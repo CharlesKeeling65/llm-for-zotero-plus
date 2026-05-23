@@ -54,6 +54,7 @@ import {
   getActiveContextAttachmentFromTabs,
   getActiveReaderForSelectedTab,
   getItemSelectionCacheKeys,
+  resolveContextSourceItem,
   resolveContextSourceItemId,
   appendSelectedTextContextForItem,
   applySelectedTextPreview,
@@ -188,6 +189,8 @@ export function registerReaderContextPanel() {
         const currentItemKey = panelRoot?.dataset?.itemId;
         const currentSystem = panelRoot?.dataset?.conversationSystem || "";
         const currentContextItemKey = panelRoot?.dataset?.contextItemId || "";
+        const currentRawContextItemKey =
+          panelRoot?.dataset?.rawContextItemId || "";
         // Lock is stale if:
         // - lock active + panel in paper mode (need to switch to global)
         // - lock active + panel shows different global conversation
@@ -206,9 +209,21 @@ export function registerReaderContextPanel() {
           ? String(getConversationKey(resolvedState.item))
           : "0";
         const rawContextItem = item || resolvedState.item;
-        const newContextItemId = resolveContextSourceItemId(rawContextItem);
+        const rawContextItemKey = rawContextItem
+          ? String(Number(rawContextItem.id || 0) || "")
+          : "";
+        const newContextSource = rawContextItem
+          ? resolveContextSourceItem(rawContextItem)
+          : null;
+        const newContextItemId = Math.floor(
+          Number(newContextSource?.contextItem?.id || 0),
+        );
         const newContextItemKey =
-          newContextItemId > 0 ? `${newContextItemId}` : "";
+          Number.isFinite(newContextItemId) && newContextItemId > 0
+            ? `${newContextItemId}`
+            : "";
+        const newContextSourceIsSynchronous =
+          newContextSource?.sourceKind !== "first-child";
         const itemChanged =
           !needsFullRender &&
           storedItemKey !== undefined &&
@@ -219,7 +234,9 @@ export function registerReaderContextPanel() {
           !needsFullRender &&
           storedItemKey === newItemKey &&
           currentKind === "paper" &&
-          currentContextItemKey !== newContextItemKey;
+          (currentRawContextItemKey !== rawContextItemKey ||
+            (newContextSourceIsSynchronous &&
+              currentContextItemKey !== newContextItemKey));
         const systemChanged =
           !needsFullRender &&
           currentSystem !== expectedSystem;
@@ -241,6 +258,7 @@ export function registerReaderContextPanel() {
           ) as HTMLElement | null;
           if (nextPanelRoot) {
             nextPanelRoot.dataset.contextItemId = newContextItemKey;
+            nextPanelRoot.dataset.rawContextItemId = rawContextItemKey;
           }
           activeContextPanels.set(body, () => resolvedState.item);
           activeContextPanelRawItems.set(body, item || null);
@@ -266,6 +284,7 @@ export function registerReaderContextPanel() {
           activeContextPanels.set(body, () => resolvedState.item);
           activeContextPanelRawItems.set(body, item || null);
           panelRoot.dataset.contextItemId = newContextItemKey;
+          panelRoot.dataset.rawContextItemId = rawContextItemKey;
           void retainClaudeRuntimeForBody(body, resolvedState.item);
         }
       } catch { /* ignore */ }
@@ -298,6 +317,9 @@ export function registerReaderContextPanel() {
           );
           panelRoot.dataset.contextItemId =
             contextItemId > 0 ? `${contextItemId}` : "";
+          panelRoot.dataset.rawContextItemId = item
+            ? `${Number(item.id || 0) || ""}`
+            : "";
         }
         activeContextPanelRawItems.set(body, item || null);
       }

@@ -127,6 +127,14 @@ export type CustomShortcut = {
 export type ResolvedContextSource = {
   contextItem: Zotero.Item | null;
   statusText: string;
+  sourceKind?:
+    | "none"
+    | "note"
+    | "active-reader"
+    | "selected-child"
+    | "direct-attachment"
+    | "first-child"
+    | "best-attachment";
 };
 
 export type PdfContext = {

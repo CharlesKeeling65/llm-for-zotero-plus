@@ -156,15 +156,12 @@ import {
   isNoteContextExpanded,
   refreshNoteChipPreview,
   refreshActiveNoteChipPreview,
-  resolveContextSourceItem,
+  resolveContextSourceItemAsync,
   setNoteContextExpanded,
   setSelectedTextContextEntries,
   setSelectedTextExpandedIndex,
 } from "./contextResolution";
-import {
-  resolvePaperContextRefFromAttachment,
-  resolvePaperContextRefFromItem,
-} from "./paperAttribution";
+import { resolvePaperContextRefFromAttachment } from "./paperAttribution";
 import {
   filterManualPaperContextsAgainstAutoLoaded,
   isSamePaperContextRef,
@@ -647,6 +644,9 @@ export function setupHandlers(
     return;
   }
   panelRoot.dataset.handlersAttached = thisGen;
+  panelRoot.dataset.rawContextItemId = rawPanelItem
+    ? `${Number(rawPanelItem.id || 0) || ""}`
+    : "";
 
   activeContextPanels.set(body, () => item);
   let isWebChatModeActive = () => panelRoot.dataset.webchatMode === "true";
@@ -2106,7 +2106,29 @@ export function setupHandlers(
     return { conversationKey: key, pair };
   };
 
-  const resolveAutoLoadedPaperContext = (): PaperContextRef | null => {
+  let autoLoadedContextSourceItemSnapshot: Zotero.Item | null | undefined;
+  let autoLoadedPaperContextSnapshot: PaperContextRef | null | undefined;
+  let autoLoadedPaperContextPromise: Promise<PaperContextRef | null> | null =
+    null;
+  let requestAutoLoadedPaperContextRefresh: (() => void) | null = null;
+
+  const setAutoLoadedContextSnapshot = (
+    contextSourceItem: Zotero.Item | null,
+    paperContext: PaperContextRef | null,
+  ) => {
+    autoLoadedContextSourceItemSnapshot = contextSourceItem;
+    autoLoadedPaperContextSnapshot = paperContext;
+    const contextItemId = Math.floor(
+      Number(paperContext?.contextItemId || contextSourceItem?.id || 0),
+    );
+    panelRoot.dataset.contextItemId =
+      Number.isFinite(contextItemId) && contextItemId > 0
+        ? `${contextItemId}`
+        : "";
+    requestAutoLoadedPaperContextRefresh?.();
+  };
+
+  const resolveAutoLoadedContextSourceItemSync = (): Zotero.Item | null => {
     if (!item) return null;
     const noteSession = resolveCurrentNoteSession();
     if (noteSession?.noteKind === "standalone") return null;
@@ -2115,19 +2137,62 @@ export function setupHandlers(
       if (!parentItem) return null;
       const activeReaderAttachment = getActiveContextAttachmentFromTabs();
       if (activeReaderAttachment?.parentID === parentItem.id) {
-        return (
-          resolvePaperContextRefFromAttachment(activeReaderAttachment) ||
-          resolvePaperContextRefFromItem(parentItem)
-        );
+        return activeReaderAttachment;
       }
-      return resolvePaperContextRefFromItem(parentItem);
+      return null;
     }
     if (isGlobalMode()) return null;
-    const contextSource = resolveContextSourceItem(rawPanelItem || item);
-    return (
-      resolvePaperContextRefFromAttachment(contextSource.contextItem) ||
-      resolvePaperContextRefFromItem(resolveCurrentPaperBaseItem())
+    const sourceItem = rawPanelItem || item;
+    const activeReaderAttachment = getActiveContextAttachmentFromTabs();
+    if (activeReaderAttachment) return activeReaderAttachment;
+    if (
+      sourceItem?.isAttachment?.() &&
+      sourceItem.attachmentContentType === "application/pdf"
+    ) {
+      return sourceItem;
+    }
+    return null;
+  };
+
+  const resolveAutoLoadedPaperContext = (): PaperContextRef | null => {
+    if (autoLoadedPaperContextSnapshot !== undefined) {
+      return autoLoadedPaperContextSnapshot;
+    }
+    return resolvePaperContextRefFromAttachment(
+      resolveAutoLoadedContextSourceItemSync(),
     );
+  };
+
+  const resolveAutoLoadedPaperContextAsync =
+    async (): Promise<PaperContextRef | null> => {
+      if (!item) return null;
+      if (autoLoadedPaperContextSnapshot !== undefined) {
+        return autoLoadedPaperContextSnapshot;
+      }
+      if (autoLoadedPaperContextPromise) return autoLoadedPaperContextPromise;
+      autoLoadedPaperContextPromise = (async () => {
+        const contextSource = await resolveContextSourceItemAsync(
+          rawPanelItem || item,
+        );
+        const contextSourceItem = contextSource.contextItem;
+        const paperContext =
+          resolvePaperContextRefFromAttachment(contextSourceItem);
+        if (panelRoot.dataset.handlersAttached === thisGen) {
+          setAutoLoadedContextSnapshot(contextSourceItem, paperContext);
+        }
+        return paperContext;
+      })();
+      try {
+        return await autoLoadedPaperContextPromise;
+      } finally {
+        autoLoadedPaperContextPromise = null;
+      }
+    };
+
+  const resolveAutoLoadedContextSourceItemAsync =
+    async (): Promise<Zotero.Item | null> => {
+      await resolveAutoLoadedPaperContextAsync();
+      return autoLoadedContextSourceItemSnapshot ?? null;
   };
 
   let paperChipMenu: HTMLDivElement | null = null;
@@ -3090,6 +3155,7 @@ export function setupHandlers(
   const updatePaperPreviewPreservingScroll = () => {
     schedulePanelStateRefresh();
   };
+  requestAutoLoadedPaperContextRefresh = updatePaperPreviewPreservingScroll;
   const updateFilePreviewPreservingScroll = () => {
     schedulePanelStateRefresh();
   };
@@ -4423,6 +4489,7 @@ export function setupHandlers(
   };
 
   // Initialize preview state
+  void resolveAutoLoadedPaperContextAsync();
   updatePaperPreviewPreservingScroll();
   updateFilePreviewPreservingScroll();
   updateImagePreviewPreservingScroll();
@@ -5027,7 +5094,7 @@ export function setupHandlers(
     body,
     inputBox,
     getItem: () => item,
-    getContextSourceItem: () => rawPanelItem || item,
+    resolveContextSourceItem: resolveAutoLoadedContextSourceItemAsync,
     closeSlashMenu,
     closePaperPicker,
     getSelectedTextContextEntries,
@@ -5249,6 +5316,7 @@ export function setupHandlers(
           currentItem.id,
         ),
       });
+      const contextSourceItem = await resolveAutoLoadedContextSourceItemAsync();
       const allPaperContexts = getManualPaperContextsForItem(
         currentItem.id,
         currentItem.id === item?.id ? resolveAutoLoadedPaperContext() : null,
@@ -5341,7 +5409,7 @@ export function setupHandlers(
         void editUserTurnAndRetry({
           body,
           item: currentItem,
-          contextSourceItem: rawPanelItem || currentItem,
+          contextSourceItem,
           userTimestamp: editTarget.userTimestamp,
           assistantTimestamp: editTarget.assistantTimestamp,
           newText,

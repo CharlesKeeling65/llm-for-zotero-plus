@@ -54,11 +54,13 @@ describe("sendFlowController", function () {
     let lastSentImages: string[] | undefined;
     let lastSentAttachments: ChatAttachment[] | undefined;
     let lastSentModelAttachments: ChatAttachment[] | undefined;
+    let lastSentContextSourceItem: Zotero.Item | null | undefined;
     let lastEditRuntimeMode = "";
     let lastEditImages: string[] | undefined;
     let lastEditAttachments: ChatAttachment[] | undefined;
     let lastEditModelAttachments: ChatAttachment[] | undefined;
     let lastEditPdfUploadSystemMessages: string[] | undefined;
+    let lastEditContextSourceItem: Zotero.Item | null | undefined;
     let lastSentCollectionContexts: CollectionContextRef[] | undefined;
     let lastEditCollectionContexts: CollectionContextRef[] | undefined;
     let lastStatus: { message: string; level: string } | null = null;
@@ -68,7 +70,7 @@ describe("sendFlowController", function () {
       body: {} as Element,
       inputBox,
       getItem: () => item,
-      getContextSourceItem: () => item,
+      resolveContextSourceItem: async () => item,
       closeSlashMenu: () => undefined,
       closePaperPicker: () => undefined,
       getSelectedTextContextEntries: () => selectedTextContexts,
@@ -121,6 +123,7 @@ describe("sendFlowController", function () {
         lastEditModelAttachments = opts.modelAttachments;
         lastEditPdfUploadSystemMessages = opts.pdfUploadSystemMessages;
         lastEditCollectionContexts = opts.selectedCollectionContexts;
+        lastEditContextSourceItem = opts.contextSourceItem;
         return "ok" as const;
       },
       sendQuestion: async (opts: any) => {
@@ -134,6 +137,7 @@ describe("sendFlowController", function () {
         lastSentAttachments = opts.attachments;
         lastSentModelAttachments = opts.modelAttachments;
         lastSentCollectionContexts = opts.selectedCollectionContexts;
+        lastSentContextSourceItem = opts.contextSourceItem;
       },
       retainPinnedImageState: () => {
         retainImageCalled += 1;
@@ -196,6 +200,7 @@ describe("sendFlowController", function () {
         lastSentAttachments,
         lastSentModelAttachments,
         lastSentCollectionContexts,
+        lastSentContextSourceItem,
       }),
       getLastEditRuntimeMode: () => lastEditRuntimeMode,
       getLastEditImages: () => lastEditImages,
@@ -203,6 +208,7 @@ describe("sendFlowController", function () {
       getLastEditModelAttachments: () => lastEditModelAttachments,
       getLastEditPdfUploadSystemMessages: () => lastEditPdfUploadSystemMessages,
       getLastEditCollectionContexts: () => lastEditCollectionContexts,
+      getLastEditContextSourceItem: () => lastEditContextSourceItem,
       getLastStatus: () => lastStatus,
       getStatuses: () => statuses.slice(),
     };
@@ -221,6 +227,49 @@ describe("sendFlowController", function () {
     assert.equal(counts.retainPaperStateCalled, 1);
     assert.equal(counts.retainFileCalled, 1);
     assert.equal(counts.retainTextCalled, 1);
+  });
+
+  it("awaits the resolved context source before selecting paper contexts", async function () {
+    const resolvedContextSource = { id: 404 } as unknown as Zotero.Item;
+    let resolverFinished = false;
+    const { controller, getLastSend } = createBaseDeps({
+      resolveContextSourceItem: async () => {
+        await Promise.resolve();
+        resolverFinished = true;
+        return resolvedContextSource;
+      },
+      getSelectedPaperContexts: () => {
+        assert.isTrue(resolverFinished);
+        return [selectedPaper];
+      },
+    });
+
+    await controller.doSend();
+
+    assert.equal(getLastSend().lastSentContextSourceItem, resolvedContextSource);
+  });
+
+  it("passes the resolved context source into latest-turn edit retries", async function () {
+    const resolvedContextSource = { id: 505 } as unknown as Zotero.Item;
+    const { controller, getLastEditContextSourceItem } = createBaseDeps({
+      resolveContextSourceItem: async () => resolvedContextSource,
+      getActiveEditSession: () => ({
+        conversationKey: item.id,
+        userTimestamp: 10,
+        assistantTimestamp: 20,
+      }),
+      getLatestEditablePair: async () => ({
+        conversationKey: item.id,
+        pair: {
+          userMessage: { timestamp: 10 },
+          assistantMessage: { timestamp: 20, streaming: false },
+        },
+      }),
+    });
+
+    await controller.doSend();
+
+    assert.equal(getLastEditContextSourceItem(), resolvedContextSource);
   });
 
   it("sends override text while preserving the current draft", async function () {
