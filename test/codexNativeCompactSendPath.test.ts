@@ -11,10 +11,18 @@ describe("Codex native compact send path", function () {
       resolve(here, "../src/modules/contextPanel/chat.ts"),
       "utf8",
     );
-    const compactBranch = source.indexOf("if (isCodexNativeCompactCommand)");
+    const sendQuestion = source.indexOf("export async function sendQuestion");
+    const compactBranch = source.indexOf(
+      "if (isCodexNativeCompactCommand)",
+      sendQuestion,
+    );
+    const userPersistCall = source.indexOf(
+      "void persistConversationMessage(",
+      compactBranch,
+    );
     const userPersist = source.indexOf(
       'role: "user",',
-      source.indexOf("void persistConversationMessage(conversationKey"),
+      userPersistCall,
     );
     const nativeTurn = source.indexOf(
       "await runCodexAppServerNativeTurn",
@@ -26,9 +34,12 @@ describe("Codex native compact send path", function () {
     );
     const attachmentNormalization = source.indexOf(
       "const requestFileAttachments",
+      compactBranch,
     );
 
+    assert.isAtLeast(sendQuestion, 0);
     assert.isAtLeast(compactBranch, 0);
+    assert.isAtLeast(userPersistCall, compactBranch);
     assert.isAtLeast(nativeCompact, compactBranch);
     assert.isBelow(compactBranch, userPersist);
     assert.isBelow(compactBranch, attachmentNormalization);

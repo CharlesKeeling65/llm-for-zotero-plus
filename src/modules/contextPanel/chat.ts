@@ -39,11 +39,10 @@ import {
   updateLatestClaudeConversationAssistantMessage,
   updateLatestClaudeConversationUserMessage,
 } from "../../claudeCode/runtime";
-import { isClaudeConversationKey } from "../../claudeCode/constants";
 import {
   getCodexProfileSignature,
-  isCodexConversationKey,
 } from "../../codexAppServer/constants";
+import { resolveConversationStorageSystem } from "../../shared/conversationStorageRouting";
 import {
   getCodexReasoningModePref,
   getCodexRuntimeModelPref,
@@ -213,6 +212,7 @@ import { renderAgentTrace, renderPendingActionCard } from "./agentTrace/render";
 import { renderRenderedMarkdownInto } from "./renderedMarkdown";
 import { toFileUrl } from "../../utils/pathFileUrl";
 import { replaceOwnerAttachmentRefs } from "../../utils/attachmentRefStore";
+import { getNotesDirectoryConfig } from "../../utils/notesDirectoryConfig";
 import {
   decorateAssistantCitationLinks,
   renderQuoteCitationPlaceholders,
@@ -1101,23 +1101,37 @@ function applyChatScrollPolicy(
 async function loadStoredConversationByKey(
   conversationKey: number,
   limit: number,
+  conversationSystem?: ConversationSystem | null,
 ): Promise<StoredChatMessage[]> {
-  return isClaudeConversationKey(conversationKey)
-    ? loadClaudeConversation(conversationKey, limit)
-    : isCodexConversationKey(conversationKey)
-      ? loadCodexConversation(conversationKey, limit)
-      : loadConversation(conversationKey, limit);
+  const storageSystem = resolveConversationStorageSystem({
+    conversationKey,
+    conversationSystem,
+  });
+  if (!storageSystem) return [];
+  if (storageSystem === "claude_code") {
+    return loadClaudeConversation(conversationKey, limit);
+  }
+  if (storageSystem === "codex") {
+    return loadCodexConversation(conversationKey, limit);
+  }
+  return loadConversation(conversationKey, limit);
 }
 
 async function updateStoredLatestUserMessageByConversation(
   conversationKey: number,
   message: Parameters<typeof updateStoredLatestUserMessage>[1],
+  conversationSystem?: ConversationSystem | null,
 ): Promise<void> {
-  if (isClaudeConversationKey(conversationKey)) {
+  const storageSystem = resolveConversationStorageSystem({
+    conversationKey,
+    conversationSystem,
+  });
+  if (!storageSystem) return;
+  if (storageSystem === "claude_code") {
     await updateLatestClaudeConversationUserMessage(conversationKey, message);
     return;
   }
-  if (isCodexConversationKey(conversationKey)) {
+  if (storageSystem === "codex") {
     await updateLatestCodexUserMessage(conversationKey, message);
     return;
   }
@@ -1127,8 +1141,14 @@ async function updateStoredLatestUserMessageByConversation(
 async function updateStoredLatestAssistantMessageByConversation(
   conversationKey: number,
   message: Parameters<typeof updateStoredLatestAssistantMessage>[1],
+  conversationSystem?: ConversationSystem | null,
 ): Promise<void> {
-  if (isClaudeConversationKey(conversationKey)) {
+  const storageSystem = resolveConversationStorageSystem({
+    conversationKey,
+    conversationSystem,
+  });
+  if (!storageSystem) return;
+  if (storageSystem === "claude_code") {
     const latestContextSnapshot = contextUsageSnapshots.get(conversationKey);
     await updateLatestClaudeConversationAssistantMessage(conversationKey, {
       ...message,
@@ -1145,7 +1165,7 @@ async function updateStoredLatestAssistantMessageByConversation(
     });
     return;
   }
-  if (isCodexConversationKey(conversationKey)) {
+  if (storageSystem === "codex") {
     const latestContextSnapshot = contextUsageSnapshots.get(conversationKey);
     await updateLatestCodexAssistantMessage(conversationKey, {
       ...message,
@@ -1168,11 +1188,17 @@ async function updateStoredLatestAssistantMessageByConversation(
 async function persistConversationMessage(
   conversationKey: number,
   message: StoredChatMessage,
+  conversationSystem?: ConversationSystem | null,
 ): Promise<void> {
   try {
-    if (isClaudeConversationKey(conversationKey)) {
+    const storageSystem = resolveConversationStorageSystem({
+      conversationKey,
+      conversationSystem,
+    });
+    if (!storageSystem) return;
+    if (storageSystem === "claude_code") {
       await appendClaudeConversationMessage(conversationKey, message);
-    } else if (isCodexConversationKey(conversationKey)) {
+    } else if (storageSystem === "codex") {
       await appendCodexMessage(conversationKey, message);
       await pruneCodexConversation(conversationKey, PERSISTED_HISTORY_LIMIT);
     } else {
@@ -1182,6 +1208,7 @@ async function persistConversationMessage(
     const storedMessages = await loadStoredConversationByKey(
       conversationKey,
       PERSISTED_HISTORY_LIMIT,
+      storageSystem,
     );
     const attachmentHashes =
       collectAttachmentHashesFromStoredMessages(storedMessages);
@@ -1298,6 +1325,7 @@ export async function ensureConversationLoaded(
   item: Zotero.Item,
 ): Promise<void> {
   const conversationKey = getConversationKey(item);
+  const conversationSystem = resolveConversationSystemForItem(item);
 
   if (loadedConversationKeys.has(conversationKey)) return;
   if (chatHistory.has(conversationKey)) {
@@ -1316,6 +1344,7 @@ export async function ensureConversationLoaded(
       const storedMessages = await loadStoredConversationByKey(
         conversationKey,
         PERSISTED_HISTORY_LIMIT,
+        conversationSystem,
       );
       const panelMessages = storedMessages.map((message) =>
         toPanelMessage(message),
@@ -4169,32 +4198,37 @@ export async function editLatestUserMessageAndRetry(
   retryPair.userMessage.attachmentActiveIndex = undefined;
 
   try {
-    await updateStoredLatestUserMessageByConversation(conversationKey, {
-      text: retryPair.userMessage.text,
-      timestamp: retryPair.userMessage.timestamp,
-      runMode: retryPair.userMessage.runMode,
-      agentRunId: retryPair.userMessage.agentRunId,
-      selectedText: retryPair.userMessage.selectedText,
-      selectedTexts: retryPair.userMessage.selectedTexts,
-      selectedTextSources: retryPair.userMessage.selectedTextSources,
-      selectedTextPaperContexts:
-        retryPair.userMessage.selectedTextPaperContexts,
-      screenshotImages: retryPair.userMessage.screenshotImages,
-      paperContexts: retryPair.userMessage.paperContexts,
-      fullTextPaperContexts: retryPair.userMessage.fullTextPaperContexts,
-      citationPaperContexts: retryPair.userMessage.citationPaperContexts,
-      selectedCollectionContexts:
-        retryPair.userMessage.selectedCollectionContexts,
-      attachments: retryPair.userMessage.attachments,
-      modelAttachments: retryPair.userMessage.modelAttachments,
-      modelName: retryPair.userMessage.modelName,
-      modelEntryId: retryPair.userMessage.modelEntryId,
-      modelProviderLabel: retryPair.userMessage.modelProviderLabel,
-    });
+    await updateStoredLatestUserMessageByConversation(
+      conversationKey,
+      {
+        text: retryPair.userMessage.text,
+        timestamp: retryPair.userMessage.timestamp,
+        runMode: retryPair.userMessage.runMode,
+        agentRunId: retryPair.userMessage.agentRunId,
+        selectedText: retryPair.userMessage.selectedText,
+        selectedTexts: retryPair.userMessage.selectedTexts,
+        selectedTextSources: retryPair.userMessage.selectedTextSources,
+        selectedTextPaperContexts:
+          retryPair.userMessage.selectedTextPaperContexts,
+        screenshotImages: retryPair.userMessage.screenshotImages,
+        paperContexts: retryPair.userMessage.paperContexts,
+        fullTextPaperContexts: retryPair.userMessage.fullTextPaperContexts,
+        citationPaperContexts: retryPair.userMessage.citationPaperContexts,
+        selectedCollectionContexts:
+          retryPair.userMessage.selectedCollectionContexts,
+        attachments: retryPair.userMessage.attachments,
+        modelAttachments: retryPair.userMessage.modelAttachments,
+        modelName: retryPair.userMessage.modelName,
+        modelEntryId: retryPair.userMessage.modelEntryId,
+        modelProviderLabel: retryPair.userMessage.modelProviderLabel,
+      },
+      retryConversationSystem,
+    );
 
     const storedMessages = await loadStoredConversationByKey(
       conversationKey,
       PERSISTED_HISTORY_LIMIT,
+      retryConversationSystem,
     );
     const attachmentHashes =
       collectAttachmentHashesFromStoredMessages(storedMessages);
@@ -4374,21 +4408,25 @@ export async function retryLatestAssistantResponse(
     finalizeCancelledAssistantMessage(assistantMessage);
     refreshChatSafely();
     const latestContextSnapshot = contextUsageSnapshots.get(conversationKey);
-    await updateStoredLatestAssistantMessageByConversation(conversationKey, {
-      text: assistantMessage.text,
-      timestamp: assistantMessage.timestamp,
-      runMode: assistantMessage.runMode,
-      agentRunId: assistantMessage.agentRunId,
-      modelName: assistantMessage.modelName,
-      modelEntryId: assistantMessage.modelEntryId,
-      modelProviderLabel: assistantMessage.modelProviderLabel,
-      reasoningSummary: assistantMessage.reasoningSummary,
-      reasoningDetails: assistantMessage.reasoningDetails,
-      compactMarker: assistantMessage.compactMarker,
-      contextTokens: latestContextSnapshot?.contextTokens,
-      contextWindow: latestContextSnapshot?.contextWindow,
-      quoteCitations: assistantMessage.quoteCitations,
-    });
+    await updateStoredLatestAssistantMessageByConversation(
+      conversationKey,
+      {
+        text: assistantMessage.text,
+        timestamp: assistantMessage.timestamp,
+        runMode: assistantMessage.runMode,
+        agentRunId: assistantMessage.agentRunId,
+        modelName: assistantMessage.modelName,
+        modelEntryId: assistantMessage.modelEntryId,
+        modelProviderLabel: assistantMessage.modelProviderLabel,
+        reasoningSummary: assistantMessage.reasoningSummary,
+        reasoningDetails: assistantMessage.reasoningDetails,
+        compactMarker: assistantMessage.compactMarker,
+        contextTokens: latestContextSnapshot?.contextTokens,
+        contextWindow: latestContextSnapshot?.contextWindow,
+        quoteCitations: assistantMessage.quoteCitations,
+      },
+      effectiveConversationSystem,
+    );
     setStatusSafely("Cancelled", "ready");
   };
   if (
@@ -4516,28 +4554,32 @@ export async function retryLatestAssistantResponse(
       selectedCollectionContexts.length
         ? selectedCollectionContexts
         : undefined;
-    await updateStoredLatestUserMessageByConversation(conversationKey, {
-      text: retryPair.userMessage.text,
-      timestamp: retryPair.userMessage.timestamp,
-      runMode: retryPair.userMessage.runMode,
-      agentRunId: retryPair.userMessage.agentRunId,
-      selectedText: retryPair.userMessage.selectedText,
-      selectedTexts: retryPair.userMessage.selectedTexts,
-      selectedTextSources: retryPair.userMessage.selectedTextSources,
-      selectedTextPaperContexts:
-        retryPair.userMessage.selectedTextPaperContexts,
-      screenshotImages: retryPair.userMessage.screenshotImages,
-      paperContexts: retryPair.userMessage.paperContexts,
-      fullTextPaperContexts: retryPair.userMessage.fullTextPaperContexts,
-      citationPaperContexts: retryPair.userMessage.citationPaperContexts,
-      selectedCollectionContexts:
-        retryPair.userMessage.selectedCollectionContexts,
-      attachments: retryPair.userMessage.attachments,
-      modelAttachments: retryPair.userMessage.modelAttachments,
-      modelName: retryPair.userMessage.modelName,
-      modelEntryId: retryPair.userMessage.modelEntryId,
-      modelProviderLabel: retryPair.userMessage.modelProviderLabel,
-    });
+    await updateStoredLatestUserMessageByConversation(
+      conversationKey,
+      {
+        text: retryPair.userMessage.text,
+        timestamp: retryPair.userMessage.timestamp,
+        runMode: retryPair.userMessage.runMode,
+        agentRunId: retryPair.userMessage.agentRunId,
+        selectedText: retryPair.userMessage.selectedText,
+        selectedTexts: retryPair.userMessage.selectedTexts,
+        selectedTextSources: retryPair.userMessage.selectedTextSources,
+        selectedTextPaperContexts:
+          retryPair.userMessage.selectedTextPaperContexts,
+        screenshotImages: retryPair.userMessage.screenshotImages,
+        paperContexts: retryPair.userMessage.paperContexts,
+        fullTextPaperContexts: retryPair.userMessage.fullTextPaperContexts,
+        citationPaperContexts: retryPair.userMessage.citationPaperContexts,
+        selectedCollectionContexts:
+          retryPair.userMessage.selectedCollectionContexts,
+        attachments: retryPair.userMessage.attachments,
+        modelAttachments: retryPair.userMessage.modelAttachments,
+        modelName: retryPair.userMessage.modelName,
+        modelEntryId: retryPair.userMessage.modelEntryId,
+        modelProviderLabel: retryPair.userMessage.modelProviderLabel,
+      },
+      effectiveConversationSystem,
+    );
     if (getCancelledRequestId(conversationKey) >= thisRequestId) {
       getAbortController(conversationKey)?.abort();
       await finalizeCancelledAssistant();
@@ -4831,21 +4873,25 @@ export async function retryLatestAssistantResponse(
     refreshChatSafely();
 
     const latestContextSnapshot = contextUsageSnapshots.get(conversationKey);
-    await updateStoredLatestAssistantMessageByConversation(conversationKey, {
-      text: assistantMessage.text,
-      timestamp: assistantMessage.timestamp,
-      runMode: assistantMessage.runMode,
-      agentRunId: assistantMessage.agentRunId,
-      modelName: assistantMessage.modelName,
-      modelEntryId: assistantMessage.modelEntryId,
-      modelProviderLabel: assistantMessage.modelProviderLabel,
-      reasoningSummary: assistantMessage.reasoningSummary,
-      reasoningDetails: assistantMessage.reasoningDetails,
-      compactMarker: assistantMessage.compactMarker,
-      contextTokens: latestContextSnapshot?.contextTokens,
-      contextWindow: latestContextSnapshot?.contextWindow,
-      quoteCitations: assistantMessage.quoteCitations,
-    });
+    await updateStoredLatestAssistantMessageByConversation(
+      conversationKey,
+      {
+        text: assistantMessage.text,
+        timestamp: assistantMessage.timestamp,
+        runMode: assistantMessage.runMode,
+        agentRunId: assistantMessage.agentRunId,
+        modelName: assistantMessage.modelName,
+        modelEntryId: assistantMessage.modelEntryId,
+        modelProviderLabel: assistantMessage.modelProviderLabel,
+        reasoningSummary: assistantMessage.reasoningSummary,
+        reasoningDetails: assistantMessage.reasoningDetails,
+        compactMarker: assistantMessage.compactMarker,
+        contextTokens: latestContextSnapshot?.contextTokens,
+        contextWindow: latestContextSnapshot?.contextWindow,
+        quoteCitations: assistantMessage.quoteCitations,
+      },
+      effectiveConversationSystem,
+    );
 
     setStatusSafely("Ready", "ready");
   } catch (err) {
@@ -5016,13 +5062,19 @@ export async function editUserTurnAndRetry(opts: {
   // Delete persisted subsequent turns
   for (const p of subsequentPairs) {
     try {
-      if (isClaudeConversationKey(conversationKey)) {
+      const storageSystem = resolveConversationStorageSystem({
+        conversationKey,
+        conversationSystem: retryConversationSystem,
+      });
+      if (!storageSystem) {
+        continue;
+      } else if (storageSystem === "claude_code") {
         await deleteClaudeConversationTurnMessages(
           conversationKey,
           p.userTs,
           p.assistantTs,
         );
-      } else if (isCodexConversationKey(conversationKey)) {
+      } else if (storageSystem === "codex") {
         await deleteCodexTurnMessages(conversationKey, p.userTs, p.assistantTs);
       } else {
         await deleteStoredTurnMessages(
@@ -5140,26 +5192,30 @@ export async function editUserTurnAndRetry(opts: {
 
   // Persist the updated user message
   try {
-    await updateStoredLatestUserMessageByConversation(conversationKey, {
-      text: userMsg.text,
-      timestamp: userMsg.timestamp,
-      runMode: userMsg.runMode,
-      agentRunId: userMsg.agentRunId,
-      selectedText: userMsg.selectedText,
-      selectedTexts: userMsg.selectedTexts,
-      selectedTextSources: userMsg.selectedTextSources,
-      selectedTextPaperContexts: userMsg.selectedTextPaperContexts,
-      screenshotImages: userMsg.screenshotImages,
-      paperContexts: userMsg.paperContexts,
-      fullTextPaperContexts: userMsg.fullTextPaperContexts,
-      citationPaperContexts: getMessageCitationPaperContexts(userMsg),
-      selectedCollectionContexts: userMsg.selectedCollectionContexts,
-      attachments: userMsg.attachments,
-      modelAttachments: userMsg.modelAttachments,
-      modelName: userMsg.modelName,
-      modelEntryId: userMsg.modelEntryId,
-      modelProviderLabel: userMsg.modelProviderLabel,
-    });
+    await updateStoredLatestUserMessageByConversation(
+      conversationKey,
+      {
+        text: userMsg.text,
+        timestamp: userMsg.timestamp,
+        runMode: userMsg.runMode,
+        agentRunId: userMsg.agentRunId,
+        selectedText: userMsg.selectedText,
+        selectedTexts: userMsg.selectedTexts,
+        selectedTextSources: userMsg.selectedTextSources,
+        selectedTextPaperContexts: userMsg.selectedTextPaperContexts,
+        screenshotImages: userMsg.screenshotImages,
+        paperContexts: userMsg.paperContexts,
+        fullTextPaperContexts: userMsg.fullTextPaperContexts,
+        citationPaperContexts: getMessageCitationPaperContexts(userMsg),
+        selectedCollectionContexts: userMsg.selectedCollectionContexts,
+        attachments: userMsg.attachments,
+        modelAttachments: userMsg.modelAttachments,
+        modelName: userMsg.modelName,
+        modelEntryId: userMsg.modelEntryId,
+        modelProviderLabel: userMsg.modelProviderLabel,
+      },
+      retryConversationSystem,
+    );
   } catch (err) {
     ztoolkit.log("LLM: Failed to persist edited user message", err);
   }
@@ -5338,6 +5394,7 @@ async function buildAgentRuntimeRequest(
           ? getClaudeAutoCompactThresholdPercent()
           : undefined,
       claudeHistoryLength: params.history.length,
+      notesDirectoryConfig: getNotesDirectoryConfig() || undefined,
     },
   };
 }
@@ -5726,16 +5783,20 @@ export async function sendQuestion(
       compactMessage.compactMarker = false;
       compactMessage.timestamp = Date.now();
       refreshChatSafely();
-      await persistConversationMessage(conversationKey, {
-        role: "assistant",
-        text: compactMessage.text,
-        timestamp: compactMessage.timestamp,
-        runMode: compactMessage.runMode,
-        agentRunId: compactMessage.agentRunId,
-        modelName: compactMessage.modelName,
-        modelEntryId: compactMessage.modelEntryId,
-        modelProviderLabel: compactMessage.modelProviderLabel,
-      });
+      await persistConversationMessage(
+        conversationKey,
+        {
+          role: "assistant",
+          text: compactMessage.text,
+          timestamp: compactMessage.timestamp,
+          runMode: compactMessage.runMode,
+          agentRunId: compactMessage.agentRunId,
+          modelName: compactMessage.modelName,
+          modelEntryId: compactMessage.modelEntryId,
+          modelProviderLabel: compactMessage.modelProviderLabel,
+        },
+        effectiveConversationSystem,
+      );
     };
 
     const AbortControllerCtor = getAbortControllerCtor();
@@ -5764,17 +5825,21 @@ export async function sendQuestion(
       compactMessage.streaming = false;
       compactMessage.timestamp = Date.now();
       refreshChatSafely();
-      await persistConversationMessage(conversationKey, {
-        role: "assistant",
-        text: compactMessage.text,
-        timestamp: compactMessage.timestamp,
-        runMode: compactMessage.runMode,
-        agentRunId: compactMessage.agentRunId,
-        modelName: compactMessage.modelName,
-        modelEntryId: compactMessage.modelEntryId,
-        modelProviderLabel: compactMessage.modelProviderLabel,
-        compactMarker: true,
-      });
+      await persistConversationMessage(
+        conversationKey,
+        {
+          role: "assistant",
+          text: compactMessage.text,
+          timestamp: compactMessage.timestamp,
+          runMode: compactMessage.runMode,
+          agentRunId: compactMessage.agentRunId,
+          modelName: compactMessage.modelName,
+          modelEntryId: compactMessage.modelEntryId,
+          modelProviderLabel: compactMessage.modelProviderLabel,
+          compactMarker: true,
+        },
+        effectiveConversationSystem,
+      );
       setStatusSafely("Ready", "ready");
     } catch (err) {
       const isCancelled =
@@ -5928,27 +5993,31 @@ export async function sendQuestion(
   } else {
     history.push(userMessage);
   }
-  void persistConversationMessage(conversationKey, {
-    role: "user",
-    text: userMessage.text,
-    timestamp: userMessage.timestamp,
-    runMode: userMessage.runMode,
-    agentRunId: userMessage.agentRunId,
-    selectedText: userMessage.selectedText,
-    selectedTexts: userMessage.selectedTexts,
-    selectedTextSources: userMessage.selectedTextSources,
-    selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
-    paperContexts: userMessage.paperContexts,
-    fullTextPaperContexts: userMessage.fullTextPaperContexts,
-    citationPaperContexts: userMessage.citationPaperContexts,
-    selectedCollectionContexts: userMessage.selectedCollectionContexts,
-    screenshotImages: userMessage.screenshotImages,
-    attachments: userMessage.attachments,
-    modelAttachments: userMessage.modelAttachments,
-    modelName: userMessage.modelName,
-    modelEntryId: userMessage.modelEntryId,
-    modelProviderLabel: userMessage.modelProviderLabel,
-  });
+  void persistConversationMessage(
+    conversationKey,
+    {
+      role: "user",
+      text: userMessage.text,
+      timestamp: userMessage.timestamp,
+      runMode: userMessage.runMode,
+      agentRunId: userMessage.agentRunId,
+      selectedText: userMessage.selectedText,
+      selectedTexts: userMessage.selectedTexts,
+      selectedTextSources: userMessage.selectedTextSources,
+      selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
+      paperContexts: userMessage.paperContexts,
+      fullTextPaperContexts: userMessage.fullTextPaperContexts,
+      citationPaperContexts: userMessage.citationPaperContexts,
+      selectedCollectionContexts: userMessage.selectedCollectionContexts,
+      screenshotImages: userMessage.screenshotImages,
+      attachments: userMessage.attachments,
+      modelAttachments: userMessage.modelAttachments,
+      modelName: userMessage.modelName,
+      modelEntryId: userMessage.modelEntryId,
+      modelProviderLabel: userMessage.modelProviderLabel,
+    },
+    effectiveConversationSystem,
+  );
 
   const assistantMessage: Message = {
     ...optimisticAssistantMessage,
@@ -5985,24 +6054,28 @@ export async function sendQuestion(
   const persistAssistantOnce = async () => {
     if (assistantPersisted) return;
     assistantPersisted = true;
-    await persistConversationMessage(conversationKey, {
-      role: "assistant",
-      text: assistantMessage.text,
-      timestamp: assistantMessage.timestamp,
-      runMode: assistantMessage.runMode,
-      agentRunId: assistantMessage.agentRunId,
-      modelName: assistantMessage.modelName,
-      modelEntryId: assistantMessage.modelEntryId,
-      modelProviderLabel: assistantMessage.modelProviderLabel,
-      reasoningSummary: assistantMessage.reasoningSummary,
-      reasoningDetails: assistantMessage.reasoningDetails,
-      webchatRunState: assistantMessage.webchatRunState,
-      webchatCompletionReason: assistantMessage.webchatCompletionReason,
-      webchatChatUrl: assistantMessage.webchatChatUrl,
-      webchatChatId: assistantMessage.webchatChatId,
-      quoteCitations: assistantMessage.quoteCitations,
-      compactMarker: assistantMessage.compactMarker,
-    });
+    await persistConversationMessage(
+      conversationKey,
+      {
+        role: "assistant",
+        text: assistantMessage.text,
+        timestamp: assistantMessage.timestamp,
+        runMode: assistantMessage.runMode,
+        agentRunId: assistantMessage.agentRunId,
+        modelName: assistantMessage.modelName,
+        modelEntryId: assistantMessage.modelEntryId,
+        modelProviderLabel: assistantMessage.modelProviderLabel,
+        reasoningSummary: assistantMessage.reasoningSummary,
+        reasoningDetails: assistantMessage.reasoningDetails,
+        webchatRunState: assistantMessage.webchatRunState,
+        webchatCompletionReason: assistantMessage.webchatCompletionReason,
+        webchatChatUrl: assistantMessage.webchatChatUrl,
+        webchatChatId: assistantMessage.webchatChatId,
+        quoteCitations: assistantMessage.quoteCitations,
+        compactMarker: assistantMessage.compactMarker,
+      },
+      effectiveConversationSystem,
+    );
   };
   let responseStreamCoalescer: BlockStreamCoalescer | null = null;
   const flushResponseStream = (reason: BlockStreamFlushReason) => {
@@ -6192,26 +6265,30 @@ export async function sendQuestion(
       userMessage.selectedTextPaperContexts,
       contextPlan.citationPaperContexts,
     );
-    await updateStoredLatestUserMessageByConversation(conversationKey, {
-      text: userMessage.text,
-      timestamp: userMessage.timestamp,
-      runMode: userMessage.runMode,
-      agentRunId: userMessage.agentRunId,
-      selectedText: userMessage.selectedText,
-      selectedTexts: userMessage.selectedTexts,
-      selectedTextSources: userMessage.selectedTextSources,
-      selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
-      screenshotImages: userMessage.screenshotImages,
-      paperContexts: userMessage.paperContexts,
-      fullTextPaperContexts: userMessage.fullTextPaperContexts,
-      citationPaperContexts: userMessage.citationPaperContexts,
-      selectedCollectionContexts: userMessage.selectedCollectionContexts,
-      attachments: userMessage.attachments,
-      modelAttachments: userMessage.modelAttachments,
-      modelName: userMessage.modelName,
-      modelEntryId: userMessage.modelEntryId,
-      modelProviderLabel: userMessage.modelProviderLabel,
-    });
+    await updateStoredLatestUserMessageByConversation(
+      conversationKey,
+      {
+        text: userMessage.text,
+        timestamp: userMessage.timestamp,
+        runMode: userMessage.runMode,
+        agentRunId: userMessage.agentRunId,
+        selectedText: userMessage.selectedText,
+        selectedTexts: userMessage.selectedTexts,
+        selectedTextSources: userMessage.selectedTextSources,
+        selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
+        screenshotImages: userMessage.screenshotImages,
+        paperContexts: userMessage.paperContexts,
+        fullTextPaperContexts: userMessage.fullTextPaperContexts,
+        citationPaperContexts: userMessage.citationPaperContexts,
+        selectedCollectionContexts: userMessage.selectedCollectionContexts,
+        attachments: userMessage.attachments,
+        modelAttachments: userMessage.modelAttachments,
+        modelName: userMessage.modelName,
+        modelEntryId: userMessage.modelEntryId,
+        modelProviderLabel: userMessage.modelProviderLabel,
+      },
+      effectiveConversationSystem,
+    );
 
     if (getCancelledRequestId(conversationKey) >= thisRequestId) {
       getAbortController(conversationKey)?.abort();

@@ -33,7 +33,9 @@ describe("external bridge action approval handling", function () {
 
   it("shows native confirmation even when cached tool metadata is absent", async function () {
     const originalFetch = globalThis.fetch;
-    const originalZotero = (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero;
+    const originalZotero = (
+      globalThis as typeof globalThis & { Zotero?: unknown }
+    ).Zotero;
     const progressEvents: Array<{ type: string; requestId?: string }> = [];
 
     (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero = {
@@ -68,22 +70,31 @@ describe("external bridge action approval handling", function () {
     try {
       const runtime = createRuntime();
 
-      await runtime.runExternalAction("cc_tool::Read", { file_path: "README.md" }, {
-        confirmationMode: "native_ui",
-        onProgress: (event) => progressEvents.push(event as any),
-        requestConfirmation: async () => ({ approved: false }),
-      });
+      await runtime.runExternalAction(
+        "cc_tool::Read",
+        { file_path: "README.md" },
+        {
+          confirmationMode: "native_ui",
+          onProgress: (event) => progressEvents.push(event as any),
+          requestConfirmation: async () => ({ approved: false }),
+        },
+      );
 
-      assert.isTrue(progressEvents.some((event) => event.type === "confirmation_required"));
+      assert.isTrue(
+        progressEvents.some((event) => event.type === "confirmation_required"),
+      );
     } finally {
       globalThis.fetch = originalFetch;
-      (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero = originalZotero;
+      (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero =
+        originalZotero;
     }
   });
 
   it("sends Claude dangerous skip acknowledgement when permission mode is yolo", async function () {
     const originalFetch = globalThis.fetch;
-    const originalZotero = (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero;
+    const originalZotero = (
+      globalThis as typeof globalThis & { Zotero?: unknown }
+    ).Zotero;
     let capturedBody: Record<string, any> | null = null;
 
     (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero = {
@@ -101,7 +112,10 @@ describe("external bridge action approval handling", function () {
       },
     };
 
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
       capturedBody = JSON.parse(String(init?.body || "{}"));
       const stream = new ReadableStream({
         start(controller) {
@@ -119,7 +133,9 @@ describe("external bridge action approval handling", function () {
     try {
       const runtime = createRuntime();
 
-      await runtime.runExternalAction("cc_tool::Write", { file_path: "note.md" });
+      await runtime.runExternalAction("cc_tool::Write", {
+        file_path: "note.md",
+      });
 
       assert.equal(capturedBody?.metadata?.permissionMode, "yolo");
       assert.equal(
@@ -128,7 +144,90 @@ describe("external bridge action approval handling", function () {
       );
     } finally {
       globalThis.fetch = originalFetch;
-      (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero = originalZotero;
+      (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero =
+        originalZotero;
+    }
+  });
+
+  it("passes notes-directory guidance to Claude bridge turns", async function () {
+    const originalFetch = globalThis.fetch;
+    const originalZotero = (
+      globalThis as typeof globalThis & { Zotero?: unknown }
+    ).Zotero;
+    let capturedBody: Record<string, any> | null = null;
+
+    (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero = {
+      Prefs: {
+        get(key: string) {
+          if (key.endsWith("enableClaudeCodeMode")) return true;
+          if (key.endsWith("agentClaudeConfigSource")) return "default";
+          if (key.endsWith("agentPermissionMode")) return "safe";
+          if (key.endsWith("conversationSystem")) return "claude_code";
+          if (key.endsWith("obsidianVaultPath")) return "/tmp/obsidian-vault";
+          if (key.endsWith("obsidianTargetFolder")) return "Zotero Notes";
+          if (key.endsWith("obsidianAttachmentsFolder"))
+            return "Zotero Notes/imgs";
+          if (key.endsWith("notesDirectoryNickname")) return "Obsidian";
+          return "";
+        },
+      },
+      Profile: {
+        dir: "/tmp/llm-for-zotero-test-profile",
+      },
+      DB: {
+        queryAsync: async () => [],
+      },
+    };
+
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      capturedBody = JSON.parse(String(init?.body || "{}"));
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              '{"type":"start","runId":"r1"}\n' +
+                '{"type":"outcome","outcome":{"kind":"completed","runId":"r1","text":"ok","usedFallback":false}}\n',
+            ),
+          );
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200 }) as Response;
+    }) as typeof fetch;
+
+    try {
+      const runtime = createRuntime();
+
+      await runtime.runTurn({
+        request: {
+          conversationKey: 77,
+          mode: "agent",
+          userText: "write this to my Obsidian",
+          model: "claude-sonnet",
+          authMode: "api_key",
+          apiBase: "",
+          apiKey: "",
+        },
+      });
+
+      const customInstruction = String(
+        capturedBody?.metadata?.customInstruction || "",
+      );
+      assert.include(
+        customInstruction,
+        "Default target path: /tmp/obsidian-vault/Zotero Notes",
+      );
+      assert.include(
+        customInstruction,
+        "Do not append Default folder to Default target path again",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      (globalThis as typeof globalThis & { Zotero?: unknown }).Zotero =
+        originalZotero;
     }
   });
 });

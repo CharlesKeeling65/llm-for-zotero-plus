@@ -13,11 +13,26 @@ type ZoteroPrefsLike = {
   set?: (key: string, value: unknown, global?: boolean) => void;
 };
 
+export type NotesDirectoryConfig = {
+  directoryPath: string;
+  defaultFolder: string;
+  defaultTargetPath: string;
+  attachmentsFolder: string;
+  attachmentsPath: string;
+  nickname: string;
+};
+
+export type NotesDirectoryWritePolicy = NotesDirectoryConfig & {
+  enforceDefaultTarget: boolean;
+};
+
 function getPrefs(): ZoteroPrefsLike | null {
   return (
-    (globalThis as typeof globalThis & {
-      Zotero?: { Prefs?: ZoteroPrefsLike };
-    }).Zotero?.Prefs || null
+    (
+      globalThis as typeof globalThis & {
+        Zotero?: { Prefs?: ZoteroPrefsLike };
+      }
+    ).Zotero?.Prefs || null
   );
 }
 
@@ -66,37 +81,145 @@ export function isNotesDirectoryConfigured(): boolean {
   return getNotesDirectoryPath().trim().length > 0;
 }
 
-export function buildNotesDirectoryConfigSection(): string {
-  if (!isNotesDirectoryConfigured()) return "";
-  const dirPath = getNotesDirectoryPath();
-  const targetFolder = getNotesDirectoryFolder();
+export function getNotesDirectoryConfig(): NotesDirectoryConfig | null {
+  if (!isNotesDirectoryConfigured()) return null;
+  const directoryPath = getNotesDirectoryPath();
+  const defaultFolder = getNotesDirectoryFolder();
   const attachmentsFolder = getNotesDirectoryAttachmentsFolder();
   const nickname = getNotesDirectoryNickname().trim();
-  const defaultTargetPath = targetFolder
-    ? joinLocalPath(dirPath, targetFolder)
-    : dirPath;
-  const lines = ["Notes directory configuration (user-configured):"];
-  if (nickname) {
-    lines.push(`- Nickname: ${nickname}`);
-  }
+  const defaultTargetPath = defaultFolder
+    ? joinLocalPath(directoryPath, defaultFolder)
+    : directoryPath;
   const attachmentsPath = attachmentsFolder
-    ? joinLocalPath(dirPath, attachmentsFolder)
+    ? joinLocalPath(directoryPath, attachmentsFolder)
     : "";
+  return {
+    directoryPath,
+    defaultFolder,
+    defaultTargetPath,
+    attachmentsFolder,
+    attachmentsPath,
+    nickname,
+  };
+}
+
+export function buildNotesDirectoryConfigSection(): string {
+  const notesConfig = getNotesDirectoryConfig();
+  if (!notesConfig) return "";
+  const lines = ["Notes directory configuration (user-configured):"];
+  if (notesConfig.nickname) {
+    lines.push(`- Nickname: ${notesConfig.nickname}`);
+  }
   lines.push(
-    `- Directory path: ${dirPath}`,
-    `- Default folder: ${targetFolder}`,
-    `- Default target path: ${defaultTargetPath}`,
-    `- Attachments folder: ${attachmentsFolder} (relative to notes directory root)`,
+    `- Directory path: ${notesConfig.directoryPath}`,
+    `- Default folder: ${notesConfig.defaultFolder}`,
+    `- Default target path: ${notesConfig.defaultTargetPath}`,
+    `- Default note file template: ${joinLocalPath(notesConfig.defaultTargetPath, "<filename>.md")}`,
+    `- Rule: when the user does not explicitly specify another folder, write file-based notes directly under Default target path. Do not append Default folder to Default target path again.`,
+    `- Attachments folder: ${notesConfig.attachmentsFolder} (relative to notes directory root)`,
   );
-  if (attachmentsPath) {
+  if (notesConfig.attachmentsPath) {
     lines.push(
-      `- Attachments path: ${attachmentsPath} (resolved absolute path for copying images)`,
+      `- Attachments path: ${notesConfig.attachmentsPath} (resolved absolute path for copying images)`,
     );
   }
-  if (nickname) {
+  if (notesConfig.nickname) {
     lines.push(
-      `When the user mentions "${nickname}" in the context of notes, write to this directory.`,
+      `When the user mentions "${notesConfig.nickname}" in the context of notes, write to this directory.`,
     );
   }
   return lines.join("\n");
+}
+
+function normalizeForComparison(value: string): string {
+  return value.replace(/\\/g, "/").replace(/\/+$/g, "");
+}
+
+export function isLocalPathInsideOrEqual(
+  path: string,
+  directory: string,
+): boolean {
+  const normalizedPath = normalizeForComparison(path);
+  const normalizedDirectory = normalizeForComparison(directory);
+  return (
+    normalizedPath === normalizedDirectory ||
+    normalizedPath.startsWith(`${normalizedDirectory}/`)
+  );
+}
+
+export function getLocalPathBasename(path: string): string {
+  return (
+    path
+      .split(/[\\/]+/)
+      .filter(Boolean)
+      .pop() || ""
+  );
+}
+
+function userTextSpecifiesCustomNoteFolder(
+  userText: string | undefined,
+  config: NotesDirectoryConfig,
+): boolean {
+  const text = (userText || "").trim();
+  if (!text) return false;
+  const defaultFolder = config.defaultFolder.trim();
+  const nickname = config.nickname.trim();
+  const pathLikeMatch = text.match(
+    /\b(?:to|into|in|under|inside|as)\s+["'`]?((?:~\/|\/|[A-Za-z]:[\\/]|[\w .-]+[\\/])[^"'`,.;\n]+)/i,
+  );
+  if (pathLikeMatch?.[1]?.trim()) return true;
+  const customFolderPattern =
+    /\b(?:folder|directory|subfolder)\s+["'`]?([^"'`,.;\n]+)/i;
+  const folderMatch = text.match(customFolderPattern);
+  if (!folderMatch?.[1]) return false;
+  const requested = folderMatch[1].trim().replace(/[\\/]+$/g, "");
+  if (!requested) return false;
+  const requestedLower = requested.toLowerCase();
+  if (defaultFolder && requestedLower === defaultFolder.toLowerCase()) {
+    return false;
+  }
+  if (nickname && requestedLower === nickname.toLowerCase()) {
+    return false;
+  }
+  return true;
+}
+
+export function buildNotesDirectoryWritePolicy(
+  params: {
+    userText?: string;
+  } = {},
+): NotesDirectoryWritePolicy | null {
+  const config = getNotesDirectoryConfig();
+  if (!config) return null;
+  return {
+    ...config,
+    enforceDefaultTarget: !userTextSpecifiesCustomNoteFolder(
+      params.userText,
+      config,
+    ),
+  };
+}
+
+function readStringField(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+export function parseNotesDirectoryWritePolicy(
+  value: unknown,
+): NotesDirectoryWritePolicy | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const directoryPath = readStringField(record, "directoryPath");
+  const defaultTargetPath = readStringField(record, "defaultTargetPath");
+  if (!directoryPath || !defaultTargetPath) return null;
+  return {
+    directoryPath,
+    defaultFolder: readStringField(record, "defaultFolder"),
+    defaultTargetPath,
+    attachmentsFolder: readStringField(record, "attachmentsFolder"),
+    attachmentsPath: readStringField(record, "attachmentsPath"),
+    nickname: readStringField(record, "nickname"),
+    enforceDefaultTarget: record.enforceDefaultTarget !== false,
+  };
 }

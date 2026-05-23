@@ -234,6 +234,7 @@ export function setLastUsedCodexGlobalConversationKey(
 ): void {
   if (!Number.isFinite(libraryID) || libraryID <= 0) return;
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInRange(conversationKey, "global")) return;
   const map = getJsonPref("codexAppServerGlobalConversationMap");
   map[buildGlobalConversationMapKey(libraryID)] = Math.floor(conversationKey);
   setJsonPref("codexAppServerGlobalConversationMap", map);
@@ -266,6 +267,7 @@ export function setLastUsedCodexPaperConversationKey(
   if (!Number.isFinite(libraryID) || libraryID <= 0) return;
   if (!Number.isFinite(paperItemID) || paperItemID <= 0) return;
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInRange(conversationKey, "paper")) return;
   const map = getJsonPref("codexAppServerPaperConversationMap");
   map[buildPaperConversationMapKey(libraryID, paperItemID)] = Math.floor(conversationKey);
   setJsonPref("codexAppServerPaperConversationMap", map);
@@ -304,6 +306,7 @@ export function getLastAllocatedCodexGlobalConversationKey(): number | null {
 
 export function setLastAllocatedCodexGlobalConversationKey(conversationKey: number): void {
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInRange(conversationKey, "global")) return;
   const current = getLastAllocatedCodexGlobalConversationKey() || 0;
   const normalized = Math.floor(conversationKey);
   if (normalized <= current) return;
@@ -322,6 +325,7 @@ export function getLastAllocatedCodexPaperConversationKey(): number | null {
 
 export function setLastAllocatedCodexPaperConversationKey(conversationKey: number): void {
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInRange(conversationKey, "paper")) return;
   const current = getLastAllocatedCodexPaperConversationKey() || 0;
   const normalized = Math.floor(conversationKey);
   if (normalized <= current) return;

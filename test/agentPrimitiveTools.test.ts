@@ -15,6 +15,7 @@ import { createApplyTagsTool } from "../src/agent/tools/write/applyTags";
 import { createRunCommandTool } from "../src/agent/tools/write/runCommand";
 import { createUndoLastActionTool } from "../src/agent/tools/write/undoLastAction";
 import { createZoteroScriptTool } from "../src/agent/tools/write/zoteroScript";
+import { buildNotesDirectoryWritePolicy } from "../src/utils/notesDirectoryConfig";
 import type { AgentModelMessage, AgentToolContext } from "../src/agent/types";
 import type { PaperContextRef } from "../src/shared/types";
 import type { PdfContext } from "../src/modules/contextPanel/types";
@@ -767,6 +768,209 @@ describe("primitive agent tools", function () {
     }
   });
 
+  it("file_io falls back to OS.File when creating a missing note folder", async function () {
+    const tool = createFileIOTool();
+    const createdDirs = new Set<string>();
+    const writes: Array<{ path: string; text: string }> = [];
+    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
+    const originalOS = (globalThis as { OS?: unknown }).OS;
+    (globalThis as { IOUtils?: unknown }).IOUtils = {
+      exists: async () => false,
+      makeDirectory: async () => {
+        throw new Error("IOUtils mkdir failed");
+      },
+      write: async (path: string, bytes: Uint8Array) => {
+        const parent = path.replace(/[\\/][^\\/]+$/, "");
+        if (!createdDirs.has(parent)) {
+          throw new Error(`Missing parent directory: ${parent}`);
+        }
+        writes.push({
+          path,
+          text: new TextDecoder().decode(bytes),
+        });
+      },
+    };
+    (globalThis as { OS?: unknown }).OS = {
+      File: {
+        makeDir: async (path: string) => {
+          createdDirs.add(path);
+        },
+      },
+    };
+    const context: AgentToolContext = {
+      ...baseContext,
+      request: {
+        ...baseContext.request,
+        conversationKey: 43_006,
+        metadata: {
+          fileNoteWritePolicy: {
+            directoryPath: "/tmp/obsidian-vault",
+            defaultFolder: "Zotero Notes",
+            defaultTargetPath: "/tmp/obsidian-vault/Zotero Notes",
+            attachmentsFolder: "Zotero Notes/imgs",
+            attachmentsPath: "/tmp/obsidian-vault/Zotero Notes/imgs",
+            nickname: "Obsidian",
+            enforceDefaultTarget: true,
+          },
+        },
+      },
+    };
+
+    try {
+      const write = tool.validate({
+        action: "write",
+        filePath: "/tmp/obsidian-vault/Figure 2.md",
+        content: "## Figure 2\nGrounded note.",
+      });
+      assert.isTrue(write.ok);
+      if (!write.ok) return;
+
+      const result = (await tool.execute(write.value, context)) as Record<
+        string,
+        unknown
+      >;
+
+      assert.deepEqual(writes, [
+        {
+          path: "/tmp/obsidian-vault/Zotero Notes/Figure 2.md",
+          text: "## Figure 2\nGrounded note.",
+        },
+      ]);
+      assert.deepInclude(result, {
+        action: "write",
+        filePath: "/tmp/obsidian-vault/Zotero Notes/Figure 2.md",
+        requestedFilePath: "/tmp/obsidian-vault/Figure 2.md",
+        correctedToNotesDirectory: true,
+      });
+    } finally {
+      clearUndoStack(context.request.conversationKey);
+      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
+      (globalThis as { OS?: unknown }).OS = originalOS;
+    }
+  });
+
+  it("notes directory policy treats save-as paths as explicit targets", function () {
+    const originalPrefs = globalScope.Zotero?.Prefs;
+    if (!globalScope.Zotero) {
+      throw new Error("Zotero test stub was not initialized");
+    }
+    globalScope.Zotero.Prefs = {
+      get: (key: string) => {
+        if (key.endsWith(".obsidianVaultPath")) return "/tmp/obsidian-vault";
+        if (key.endsWith(".obsidianTargetFolder")) return "Zotero Notes";
+        if (key.endsWith(".notesDirectoryNickname")) return "Obsidian";
+        return "";
+      },
+      set: () => undefined,
+    };
+
+    try {
+      const defaultPolicy = buildNotesDirectoryWritePolicy({
+        userText: "write this note to Obsidian",
+      });
+      const saveAsPolicy = buildNotesDirectoryWritePolicy({
+        userText: "save as /tmp/custom-note.md",
+      });
+      const writeAsHomePolicy = buildNotesDirectoryWritePolicy({
+        userText: "write as ~/notes/custom-note.md",
+      });
+
+      assert.equal(
+        defaultPolicy?.defaultTargetPath,
+        "/tmp/obsidian-vault/Zotero Notes",
+      );
+      assert.isTrue(defaultPolicy?.enforceDefaultTarget);
+      assert.isFalse(saveAsPolicy?.enforceDefaultTarget);
+      assert.isFalse(writeAsHomePolicy?.enforceDefaultTarget);
+    } finally {
+      globalScope.Zotero.Prefs = originalPrefs;
+    }
+  });
+
+  it("file_io gates redirected note overwrites and records undo", async function () {
+    const tool = createFileIOTool();
+    const existingPaths = new Set<string>([
+      "/tmp/obsidian-vault/Zotero Notes/existing.md",
+    ]);
+    const fileContent = new Map<string, string>([
+      ["/tmp/obsidian-vault/Zotero Notes/existing.md", "Original note."],
+    ]);
+    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
+    (globalThis as { IOUtils?: unknown }).IOUtils = {
+      exists: async (path: string) => existingPaths.has(path),
+      read: async (path: string) =>
+        new TextEncoder().encode(fileContent.get(path) || ""),
+      write: async (path: string, bytes: Uint8Array) => {
+        existingPaths.add(path);
+        fileContent.set(path, new TextDecoder().decode(bytes));
+      },
+      makeDirectory: async () => undefined,
+    };
+    const context: AgentToolContext = {
+      ...baseContext,
+      request: {
+        ...baseContext.request,
+        conversationKey: 43_007,
+        metadata: {
+          fileNoteWritePolicy: {
+            directoryPath: "/tmp/obsidian-vault",
+            defaultFolder: "Zotero Notes",
+            defaultTargetPath: "/tmp/obsidian-vault/Zotero Notes",
+            attachmentsFolder: "Zotero Notes/imgs",
+            attachmentsPath: "/tmp/obsidian-vault/Zotero Notes/imgs",
+            nickname: "Obsidian",
+            enforceDefaultTarget: true,
+          },
+        },
+      },
+    };
+
+    try {
+      const overwrite = tool.validate({
+        action: "write",
+        filePath: "/tmp/obsidian-vault/existing.md",
+        content: "Updated note.",
+      });
+      assert.isTrue(overwrite.ok);
+      if (!overwrite.ok) return;
+
+      assert.isTrue(
+        await tool.shouldRequireConfirmation?.(overwrite.value, context),
+      );
+
+      const deniedBypass = await tool.execute(overwrite.value, context);
+      assert.deepInclude(deniedBypass as Record<string, unknown>, {
+        action: "write",
+        filePath: "/tmp/obsidian-vault/Zotero Notes/existing.md",
+      });
+      assert.include(
+        String((deniedBypass as { error?: unknown }).error || ""),
+        "without confirmation",
+      );
+      assert.equal(
+        fileContent.get("/tmp/obsidian-vault/Zotero Notes/existing.md"),
+        "Original note.",
+      );
+
+      const approved = tool.applyConfirmation?.(overwrite.value, {}, context);
+      assert.isTrue(approved?.ok);
+      if (!approved?.ok) return;
+      await tool.execute(approved.value, context);
+      assert.equal(
+        fileContent.get("/tmp/obsidian-vault/Zotero Notes/existing.md"),
+        "Updated note.",
+      );
+      await peekUndoEntry(context.request.conversationKey)?.revert();
+      assert.equal(
+        fileContent.get("/tmp/obsidian-vault/Zotero Notes/existing.md"),
+        "Original note.",
+      );
+    } finally {
+      clearUndoStack(context.request.conversationKey);
+      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
+    }
+  });
+
   it("file_io treats new Obsidian note writes as direct writes and existing notes as overwrites", async function () {
     const tool = createFileIOTool();
     const existingPaths = new Set<string>([
@@ -846,7 +1050,10 @@ describe("primitive agent tools", function () {
 
   it("run_command confirmation keeps read-only and simple new writes direct while destructive and unknown writes stay gated", async function () {
     const tool = createRunCommandTool();
-    const existingPaths = new Set<string>(["/tmp/existing.md"]);
+    const existingPaths = new Set<string>([
+      "/tmp/existing.md",
+      "/tmp/existing-dir",
+    ]);
     const removedPaths: string[] = [];
     const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
     const originalChromeUtils = (globalThis as { ChromeUtils?: unknown })
@@ -926,6 +1133,15 @@ describe("primitive agent tools", function () {
           overwriteRedirect.value,
           context,
         ),
+      );
+
+      const existingMkdir = tool.validate({
+        command: 'mkdir -p "/tmp/existing-dir"',
+      });
+      assert.isTrue(existingMkdir.ok);
+      if (!existingMkdir.ok) return;
+      assert.isTrue(
+        await tool.shouldRequireConfirmation?.(existingMkdir.value, context),
       );
 
       const dateSet = tool.validate({ command: "date -s 2026-05-15" });

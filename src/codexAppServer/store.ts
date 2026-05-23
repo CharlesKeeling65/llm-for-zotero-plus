@@ -16,6 +16,13 @@ import {
 import { normalizeQuoteCitations } from "../modules/contextPanel/quoteCitations";
 import type { StoredChatMessage } from "../utils/chatStore";
 import {
+  CODEX_GLOBAL_CONVERSATION_KEY_BASE,
+  RUNTIME_CONVERSATION_KEY_END,
+  isConversationKeyFor,
+  isConversationKeyForKind,
+} from "../shared/conversationKeySpace";
+import { cleanupRememberedConversationKeyPrefs } from "../shared/conversationKeyPrefCleanup";
+import {
   CODEX_HISTORY_LIMIT,
   buildDefaultCodexGlobalConversationKey,
   buildDefaultCodexPaperConversationKey,
@@ -38,6 +45,8 @@ const CODEX_MESSAGES_INDEX = "llm_for_zotero_codex_messages_conversation_idx";
 const CODEX_CONVERSATIONS_TABLE = "llm_for_zotero_codex_conversations";
 const CODEX_CONVERSATIONS_KIND_INDEX =
   "llm_for_zotero_codex_conversations_kind_idx";
+const CLAUDE_MESSAGES_TABLE = "llm_for_zotero_claude_messages";
+const CLAUDE_CONVERSATIONS_TABLE = "llm_for_zotero_claude_conversations";
 const CODEX_CONVERSATION_ACTIVITY_TIMESTAMP_SQL = `MAX(
   COALESCE(c.updated_at, 0),
   COALESCE(
@@ -72,6 +81,17 @@ function normalizeLimit(limit: number, fallback: number): number {
   return Math.max(1, Math.floor(limit));
 }
 
+function isCodexStoreConversationKey(conversationKey: number): boolean {
+  return isConversationKeyFor("codex", conversationKey);
+}
+
+function isCodexStoreConversationKeyForKind(
+  conversationKey: number,
+  kind: CodexConversationKind,
+): boolean {
+  return isConversationKeyForKind("codex", kind, conversationKey);
+}
+
 function normalizeConversationTitleSeed(value: string): string {
   if (typeof value !== "string") return "";
   const normalized = value
@@ -93,7 +113,7 @@ async function touchCodexConversationActivity(
   timestamp?: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return;
   const normalizedTimestamp = normalizeCatalogTimestamp(timestamp);
   await Zotero.DB.queryAsync(
     `UPDATE ${CODEX_CONVERSATIONS_TABLE}
@@ -228,6 +248,199 @@ async function migrateLegacyCodexConversationKeys(): Promise<void> {
   }
 }
 
+const CONVERSATION_TRANSFER_COLUMNS = [
+  "conversation_key",
+  "library_id",
+  "kind",
+  "paper_item_id",
+  "created_at",
+  "updated_at",
+  "title",
+  "provider_session_id",
+  "scoped_conversation_key",
+  "scope_type",
+  "scope_id",
+  "scope_label",
+  "cwd",
+  "model_name",
+  "effort",
+] as const;
+
+const MESSAGE_TRANSFER_COLUMNS = [
+  "conversation_key",
+  "role",
+  "text",
+  "timestamp",
+  "run_mode",
+  "agent_run_id",
+  "selected_text",
+  "selected_texts_json",
+  "selected_text_sources_json",
+  "selected_text_paper_contexts_json",
+  "selected_text_note_contexts_json",
+  "paper_contexts_json",
+  "full_text_paper_contexts_json",
+  "citation_paper_contexts_json",
+  "quote_citations_json",
+  "screenshot_images",
+  "attachments_json",
+  "model_name",
+  "model_entry_id",
+  "model_provider_label",
+  "webchat_run_state",
+  "webchat_completion_reason",
+  "reasoning_summary",
+  "reasoning_details",
+  "compact_marker",
+  "context_tokens",
+  "context_window",
+] as const;
+
+function transferColumnSql(columns: readonly string[]): string {
+  return columns.join(", ");
+}
+
+function logCodexRepairWarning(message: string): void {
+  const debug = (globalThis as typeof globalThis & {
+    Zotero?: { debug?: (message: string) => void };
+  }).Zotero?.debug;
+  debug?.(`LLM: ${message}`);
+}
+
+async function tableExists(tableName: string): Promise<boolean> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT name
+     FROM sqlite_master
+     WHERE type = 'table'
+       AND name = ?
+     LIMIT 1`,
+    [tableName],
+  )) as unknown[] | undefined;
+  return Boolean(rows?.length);
+}
+
+async function countRowsForConversationKey(
+  tableName: string,
+  conversationKey: number,
+): Promise<number> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT COUNT(*) AS rowCount
+     FROM ${tableName}
+     WHERE conversation_key = ?`,
+    [conversationKey],
+  )) as Array<{ rowCount?: unknown }> | undefined;
+  const rowCount = Number(rows?.[0]?.rowCount);
+  return Number.isFinite(rowCount) ? Math.max(0, Math.floor(rowCount)) : 0;
+}
+
+async function findMisroutedCodexConversationKeys(): Promise<number[]> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT DISTINCT conversation_key AS conversationKey
+     FROM (
+       SELECT conversation_key
+       FROM ${CLAUDE_CONVERSATIONS_TABLE}
+       WHERE conversation_key >= ?
+         AND conversation_key < ?
+       UNION
+       SELECT conversation_key
+       FROM ${CLAUDE_MESSAGES_TABLE}
+       WHERE conversation_key >= ?
+         AND conversation_key < ?
+     )
+     ORDER BY conversation_key ASC`,
+    [
+      CODEX_GLOBAL_CONVERSATION_KEY_BASE,
+      RUNTIME_CONVERSATION_KEY_END,
+      CODEX_GLOBAL_CONVERSATION_KEY_BASE,
+      RUNTIME_CONVERSATION_KEY_END,
+    ],
+  )) as Array<{ conversationKey?: unknown }> | undefined;
+  return (rows || [])
+    .map((row) => normalizeConversationKey(Number(row.conversationKey)))
+    .filter(
+      (conversationKey): conversationKey is number =>
+        conversationKey !== null && isCodexStoreConversationKey(conversationKey),
+    );
+}
+
+async function moveConversationRowsIfSafe(conversationKey: number): Promise<void> {
+  const sourceCount = await countRowsForConversationKey(
+    CLAUDE_CONVERSATIONS_TABLE,
+    conversationKey,
+  );
+  if (sourceCount <= 0) return;
+  const targetCount = await countRowsForConversationKey(
+    CODEX_CONVERSATIONS_TABLE,
+    conversationKey,
+  );
+  if (targetCount > 0) {
+    logCodexRepairWarning(
+      `Skipped moving Claude conversation row ${conversationKey} to Codex because Codex already has that key.`,
+    );
+    return;
+  }
+  const columns = transferColumnSql(CONVERSATION_TRANSFER_COLUMNS);
+  await Zotero.DB.queryAsync(
+    `INSERT INTO ${CODEX_CONVERSATIONS_TABLE} (${columns})
+     SELECT ${columns}
+     FROM ${CLAUDE_CONVERSATIONS_TABLE}
+     WHERE conversation_key = ?`,
+    [conversationKey],
+  );
+  await Zotero.DB.queryAsync(
+    `DELETE FROM ${CLAUDE_CONVERSATIONS_TABLE}
+     WHERE conversation_key = ?`,
+    [conversationKey],
+  );
+}
+
+async function moveMessageRowsIfSafe(conversationKey: number): Promise<void> {
+  const sourceCount = await countRowsForConversationKey(
+    CLAUDE_MESSAGES_TABLE,
+    conversationKey,
+  );
+  if (sourceCount <= 0) return;
+  const targetCount = await countRowsForConversationKey(
+    CODEX_MESSAGES_TABLE,
+    conversationKey,
+  );
+  if (targetCount > 0) {
+    logCodexRepairWarning(
+      `Skipped moving Claude message rows for ${conversationKey} to Codex because Codex already has messages for that key.`,
+    );
+    return;
+  }
+  const columns = transferColumnSql(MESSAGE_TRANSFER_COLUMNS);
+  await Zotero.DB.queryAsync(
+    `INSERT INTO ${CODEX_MESSAGES_TABLE} (${columns})
+     SELECT ${columns}
+     FROM ${CLAUDE_MESSAGES_TABLE}
+     WHERE conversation_key = ?`,
+    [conversationKey],
+  );
+  await Zotero.DB.queryAsync(
+    `DELETE FROM ${CLAUDE_MESSAGES_TABLE}
+     WHERE conversation_key = ?`,
+    [conversationKey],
+  );
+}
+
+export async function repairMisroutedCodexConversationRows(): Promise<void> {
+  const hasSourceTables =
+    (await tableExists(CLAUDE_CONVERSATIONS_TABLE)) &&
+    (await tableExists(CLAUDE_MESSAGES_TABLE));
+  const hasTargetTables =
+    (await tableExists(CODEX_CONVERSATIONS_TABLE)) &&
+    (await tableExists(CODEX_MESSAGES_TABLE));
+  if (!hasSourceTables || !hasTargetTables) return;
+
+  const conversationKeys = await findMisroutedCodexConversationKeys();
+  for (const conversationKey of conversationKeys) {
+    await moveConversationRowsIfSafe(conversationKey);
+    await moveMessageRowsIfSafe(conversationKey);
+  }
+}
+
 export async function initCodexAppServerStore(): Promise<void> {
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
@@ -338,8 +551,10 @@ export async function initCodexAppServerStore(): Promise<void> {
       `CREATE INDEX IF NOT EXISTS ${CODEX_CONVERSATIONS_KIND_INDEX}
        ON ${CODEX_CONVERSATIONS_TABLE} (library_id, kind, paper_item_id, updated_at DESC, conversation_key DESC)`,
     );
+    await repairMisroutedCodexConversationRows();
     await migrateLegacyCodexConversationKeys();
   });
+  cleanupRememberedConversationKeyPrefs();
 }
 
 export const initCodexCodeStore = initCodexAppServerStore;
@@ -360,7 +575,7 @@ export async function appendCodexMessage(
   message: StoredChatMessage,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return;
 
   const selectedTexts = Array.isArray(message.selectedTexts)
     ? message.selectedTexts
@@ -453,7 +668,7 @@ export async function loadCodexConversation(
   limit = CODEX_HISTORY_LIMIT,
 ): Promise<StoredChatMessage[]> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return [];
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return [];
   const rows = (await Zotero.DB.queryAsync(
     `SELECT role,
             text,
@@ -672,7 +887,7 @@ export async function loadCodexConversation(
 
 export async function clearCodexConversation(conversationKey: number): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return;
   await Zotero.DB.queryAsync(
     `DELETE FROM ${CODEX_MESSAGES_TABLE} WHERE conversation_key = ?`,
     [normalizedKey],
@@ -685,7 +900,7 @@ export async function deleteCodexTurnMessages(
   assistantTimestamp: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return;
   const normalizedUserTimestamp = Number.isFinite(userTimestamp)
     ? Math.floor(userTimestamp)
     : 0;
@@ -729,7 +944,7 @@ export async function pruneCodexConversation(
   keep = CODEX_HISTORY_LIMIT,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return;
   await Zotero.DB.queryAsync(
     `DELETE FROM ${CODEX_MESSAGES_TABLE}
      WHERE id IN (
@@ -764,7 +979,7 @@ export async function updateLatestCodexUserMessage(
   >,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return;
   const selectedTexts = Array.isArray(message.selectedTexts)
     ? message.selectedTexts
     : typeof message.selectedText === "string" && message.selectedText.trim()
@@ -855,7 +1070,7 @@ export async function updateLatestCodexAssistantMessage(
   >,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return;
   const messageTimestamp = Number.isFinite(message.timestamp)
     ? Math.floor(message.timestamp)
     : Date.now();
@@ -937,7 +1152,14 @@ function toCodexConversationSummary(
   const createdAt = normalizeCatalogTimestamp(row.createdAt);
   const updatedAt = normalizeCatalogTimestamp(row.updatedAt);
   const kind = row.kind === "paper" ? "paper" : row.kind === "global" ? "global" : null;
-  if (!conversationKey || !libraryID || !kind) return null;
+  if (
+    !conversationKey ||
+    !libraryID ||
+    !kind ||
+    !isCodexStoreConversationKeyForKind(conversationKey, kind)
+  ) {
+    return null;
+  }
   const paperItemID = normalizePaperItemID(Number(row.paperItemID));
   const userTurnCount = Number(row.userTurnCount);
   return {
@@ -990,7 +1212,7 @@ export async function getCodexConversationSummary(
   conversationKey: number,
 ): Promise<CodexConversationSummary | null> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return null;
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return null;
   const rows = (await Zotero.DB.queryAsync(
     `SELECT c.conversation_key AS conversationKey,
             c.library_id AS libraryID,
@@ -1041,7 +1263,13 @@ export async function upsertCodexConversationSummary(params: {
 }): Promise<void> {
   const conversationKey = normalizeConversationKey(params.conversationKey);
   const libraryID = normalizeLibraryID(params.libraryID);
-  if (!conversationKey || !libraryID) return;
+  if (
+    !conversationKey ||
+    !libraryID ||
+    !isCodexStoreConversationKeyForKind(conversationKey, params.kind)
+  ) {
+    return;
+  }
   const createdAt = normalizeCatalogTimestamp(params.createdAt);
   const updatedAt = normalizeCatalogTimestamp(params.updatedAt);
   await Zotero.DB.queryAsync(
@@ -1329,7 +1557,7 @@ export async function touchCodexConversationTitle(
   titleSeed: string,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return;
   const title = normalizeConversationTitleSeed(titleSeed);
   if (!title) return;
   await Zotero.DB.queryAsync(
@@ -1345,7 +1573,7 @@ export async function clearCodexConversationSessionMetadata(
   conversationKey: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return;
   await Zotero.DB.queryAsync(
     `UPDATE ${CODEX_CONVERSATIONS_TABLE}
      SET provider_session_id = NULL,
@@ -1365,7 +1593,7 @@ export async function setCodexConversationTitle(
   titleSeed: string,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return;
   await Zotero.DB.queryAsync(
     `UPDATE ${CODEX_CONVERSATIONS_TABLE}
      SET title = ?
@@ -1378,7 +1606,7 @@ export async function deleteCodexConversation(
   conversationKey: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isCodexStoreConversationKey(normalizedKey)) return;
   await Zotero.DB.queryAsync(
     `DELETE FROM ${CODEX_CONVERSATIONS_TABLE}
      WHERE conversation_key = ?`,

@@ -317,7 +317,11 @@ export function getLastUsedClaudeGlobalConversationKey(
   if (!Number.isFinite(libraryID) || libraryID <= 0) return null;
   const map = getJsonPref("claudeCodeGlobalConversationMap");
   const scopedValue = Number(map[buildGlobalConversationMapKey(libraryID)]);
-  if (Number.isFinite(scopedValue) && scopedValue > 0) return Math.floor(scopedValue);
+  if (Number.isFinite(scopedValue) && scopedValue > 0) {
+    return isConversationKeyInRange(scopedValue, "global")
+      ? Math.floor(scopedValue)
+      : null;
+  }
   const legacyValue = Number(map[buildLegacyGlobalConversationMapKey(libraryID)]);
   if (!Number.isFinite(legacyValue) || legacyValue <= 0) return null;
   return isConversationKeyInRange(legacyValue, "global") ? Math.floor(legacyValue) : null;
@@ -329,6 +333,7 @@ export function setLastUsedClaudeGlobalConversationKey(
 ): void {
   if (!Number.isFinite(libraryID) || libraryID <= 0) return;
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInRange(conversationKey, "global")) return;
   const map = getJsonPref("claudeCodeGlobalConversationMap");
   map[buildGlobalConversationMapKey(libraryID)] = Math.floor(conversationKey);
   setJsonPref("claudeCodeGlobalConversationMap", map);
@@ -349,7 +354,11 @@ export function getLastUsedClaudePaperConversationKey(
   if (!Number.isFinite(paperItemID) || paperItemID <= 0) return null;
   const map = getJsonPref("claudeCodePaperConversationMap");
   const scopedValue = Number(map[buildPaperConversationMapKey(libraryID, paperItemID)]);
-  if (Number.isFinite(scopedValue) && scopedValue > 0) return Math.floor(scopedValue);
+  if (Number.isFinite(scopedValue) && scopedValue > 0) {
+    return isConversationKeyInRange(scopedValue, "paper")
+      ? Math.floor(scopedValue)
+      : null;
+  }
   const legacyValue = Number(map[buildLegacyPaperConversationMapKey(libraryID, paperItemID)]);
   if (!Number.isFinite(legacyValue) || legacyValue <= 0) return null;
   return isConversationKeyInRange(legacyValue, "paper") ? Math.floor(legacyValue) : null;
@@ -363,6 +372,7 @@ export function setLastUsedClaudePaperConversationKey(
   if (!Number.isFinite(libraryID) || libraryID <= 0) return;
   if (!Number.isFinite(paperItemID) || paperItemID <= 0) return;
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInRange(conversationKey, "paper")) return;
   const map = getJsonPref("claudeCodePaperConversationMap");
   map[buildPaperConversationMapKey(libraryID, paperItemID)] = Math.floor(conversationKey);
   setJsonPref("claudeCodePaperConversationMap", map);
@@ -392,6 +402,7 @@ export function getLastAllocatedClaudeGlobalConversationKey(): number | null {
 
 export function setLastAllocatedClaudeGlobalConversationKey(conversationKey: number): void {
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInRange(conversationKey, "global")) return;
   const current = getLastAllocatedClaudeGlobalConversationKey() || 0;
   const normalized = Math.floor(conversationKey);
   if (normalized <= current) return;
@@ -410,6 +421,7 @@ export function getLastAllocatedClaudePaperConversationKey(): number | null {
 
 export function setLastAllocatedClaudePaperConversationKey(conversationKey: number): void {
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  if (!isConversationKeyInRange(conversationKey, "paper")) return;
   const current = getLastAllocatedClaudePaperConversationKey() || 0;
   const normalized = Math.floor(conversationKey);
   if (normalized <= current) return;

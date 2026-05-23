@@ -11,6 +11,7 @@ import { clearAgentCoverageLedger } from "../src/agent/context/coverageLedger";
 import { getAgentRunTrace } from "../src/agent/store/traceStore";
 import { clearAgentTranscriptStore } from "../src/agent/store/transcriptStore";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
+import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import {
   MAX_AGENT_ROUNDS,
   MAX_AGENT_TOOL_CALLS_PER_ROUND,
@@ -1172,6 +1173,145 @@ describe("AgentRuntime", function () {
         },
       ]);
     } finally {
+      restoreDb();
+    }
+  });
+
+  it("routes default file notes into the configured folder and creates it", async function () {
+    const restoreDb = installMockDb();
+    const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;
+    const createdDirs: string[] = [];
+    const writes: Array<{ path: string; text: string }> = [];
+    try {
+      (
+        globalThis as typeof globalThis & {
+          Zotero: {
+            Prefs: {
+              set: (key: string, value: unknown, global?: boolean) => void;
+            };
+          };
+        }
+      ).Zotero.Prefs.set(
+        "extensions.zotero.llmforzotero.obsidianVaultPath",
+        "/tmp/obsidian-vault",
+        true,
+      );
+      (
+        globalThis as typeof globalThis & {
+          Zotero: {
+            Prefs: {
+              set: (key: string, value: unknown, global?: boolean) => void;
+            };
+          };
+        }
+      ).Zotero.Prefs.set(
+        "extensions.zotero.llmforzotero.obsidianTargetFolder",
+        "Zotero Notes",
+        true,
+      );
+      (
+        globalThis as typeof globalThis & {
+          Zotero: {
+            Prefs: {
+              set: (key: string, value: unknown, global?: boolean) => void;
+            };
+          };
+        }
+      ).Zotero.Prefs.set(
+        "extensions.zotero.llmforzotero.notesDirectoryNickname",
+        "Obsidian",
+        true,
+      );
+      (globalThis as { IOUtils?: unknown }).IOUtils = {
+        exists: async () => false,
+        makeDirectory: async (path: string) => {
+          createdDirs.push(path);
+        },
+        write: async (path: string, data: Uint8Array) => {
+          writes.push({
+            path,
+            text: new TextDecoder("utf-8").decode(data),
+          });
+        },
+      };
+
+      const registry = new AgentToolRegistry();
+      registry.register(createFileIOTool());
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () =>
+          new MockAdapter(
+            [
+              {
+                kind: "tool_calls",
+                calls: [
+                  {
+                    id: "call-write",
+                    name: "file_io",
+                    arguments: {
+                      action: "write",
+                      filePath: "/tmp/obsidian-vault/Figure 2.md",
+                      content: "## Figure 2\nGrounded note.",
+                    },
+                  },
+                ],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call-write",
+                      name: "file_io",
+                      arguments: {
+                        action: "write",
+                        filePath: "/tmp/obsidian-vault/Figure 2.md",
+                        content: "## Figure 2\nGrounded note.",
+                      },
+                    },
+                  ],
+                },
+              },
+              {
+                kind: "final",
+                text: "Saved.",
+                assistantMessage: {
+                  role: "assistant",
+                  content: "Saved.",
+                },
+              },
+            ],
+            {
+              streaming: true,
+              toolCalls: true,
+              multimodal: false,
+              fileInputs: false,
+              reasoning: true,
+            },
+          ),
+      });
+
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 1,
+          mode: "agent",
+          userText: "write this figure note to my Obsidian",
+          forcedSkillIds: ["write-note"],
+          model: "gpt-5.4",
+          apiBase: "",
+          apiKey: "test",
+        },
+      });
+
+      assert.equal(outcome.kind, "completed");
+      assert.deepEqual(writes, [
+        {
+          path: "/tmp/obsidian-vault/Zotero Notes/Figure 2.md",
+          text: "## Figure 2\nGrounded note.",
+        },
+      ]);
+      assert.include(createdDirs, "/tmp/obsidian-vault/Zotero Notes");
+    } finally {
+      (globalThis as { IOUtils?: unknown }).IOUtils = originalIOUtils;
       restoreDb();
     }
   });

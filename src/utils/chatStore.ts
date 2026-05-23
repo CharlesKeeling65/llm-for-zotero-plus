@@ -12,6 +12,11 @@ import {
   PAPER_CONVERSATION_KEY_BASE,
 } from "../modules/contextPanel/constants";
 import {
+  isConversationKeyFor,
+  isConversationKeyForKind,
+  UPSTREAM_RUNTIME_CONVERSATION_KEY_END,
+} from "../shared/conversationKeySpace";
+import {
   normalizeSelectedTextNoteContexts,
   normalizeSelectedTextPaperContexts,
   normalizeSelectedTextSource,
@@ -295,7 +300,15 @@ function normalizeCatalogTimestamp(value: unknown): number {
 }
 
 function isUpstreamGlobalConversationKey(conversationKey: number): boolean {
-  return Number.isFinite(conversationKey) && conversationKey >= GLOBAL_CONVERSATION_KEY_BASE && conversationKey < 3_000_000_000;
+  return isConversationKeyForKind("upstream", "global", conversationKey);
+}
+
+function isUpstreamPaperConversationKey(conversationKey: number): boolean {
+  return isConversationKeyForKind("upstream", "paper", conversationKey);
+}
+
+function isUpstreamStoreConversationKey(conversationKey: number): boolean {
+  return isConversationKeyFor("upstream", conversationKey);
 }
 
 async function purgeInvalidGlobalConversationCatalog(): Promise<void> {
@@ -303,7 +316,7 @@ async function purgeInvalidGlobalConversationCatalog(): Promise<void> {
     `DELETE FROM ${GLOBAL_CONVERSATIONS_TABLE}
      WHERE conversation_key < ?
         OR conversation_key >= ?`,
-    [GLOBAL_CONVERSATION_KEY_BASE, 3_000_000_000],
+    [GLOBAL_CONVERSATION_KEY_BASE, UPSTREAM_RUNTIME_CONVERSATION_KEY_END],
   );
 }
 
@@ -328,7 +341,7 @@ async function reconcileGlobalConversationCatalog(): Promise<void> {
        AND gc.conversation_key IS NULL
      GROUP BY m.conversation_key
      ORDER BY m.conversation_key ASC`,
-    [GLOBAL_CONVERSATION_KEY_BASE, 3_000_000_000],
+    [GLOBAL_CONVERSATION_KEY_BASE, UPSTREAM_RUNTIME_CONVERSATION_KEY_END],
   )) as ConversationCatalogSeedRow[] | undefined;
 
   for (const row of rows || []) {
@@ -714,7 +727,7 @@ export async function loadConversation(
   limit: number,
 ): Promise<StoredChatMessage[]> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return [];
+  if (!normalizedKey || !isUpstreamStoreConversationKey(normalizedKey)) return [];
 
   const normalizedLimit = normalizeLimit(limit, 200);
   const rows = (await Zotero.DB.queryAsync(
@@ -1050,7 +1063,7 @@ export async function appendMessage(
   message: StoredChatMessage,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamStoreConversationKey(normalizedKey)) return;
 
   const timestamp = Number(message.timestamp);
   const selectedTexts = Array.isArray(message.selectedTexts)
@@ -1169,7 +1182,7 @@ export async function updateLatestUserMessage(
   >,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamStoreConversationKey(normalizedKey)) return;
 
   const timestamp = Number(message.timestamp);
   const selectedTexts = Array.isArray(message.selectedTexts)
@@ -1296,7 +1309,7 @@ export async function updateLatestAssistantMessage(
   >,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamStoreConversationKey(normalizedKey)) return;
 
   const timestamp = Number(message.timestamp);
   const quoteCitations = normalizeQuoteCitations(message.quoteCitations);
@@ -1351,7 +1364,7 @@ export async function clearConversation(
   conversationKey: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamStoreConversationKey(normalizedKey)) return;
 
   await Zotero.DB.queryAsync(
     `DELETE FROM ${CHAT_MESSAGES_TABLE}
@@ -1366,7 +1379,7 @@ export async function deleteTurnMessages(
   assistantTimestamp: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamStoreConversationKey(normalizedKey)) return;
   const normalizedUserTimestamp = Number.isFinite(userTimestamp)
     ? Math.floor(userTimestamp)
     : 0;
@@ -1410,7 +1423,7 @@ export async function pruneConversation(
   keep: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamStoreConversationKey(normalizedKey)) return;
 
   const normalizedKeep = Number.isFinite(keep) ? Math.floor(keep) : 200;
   if (normalizedKeep <= 0) {
@@ -1717,7 +1730,7 @@ export async function getPaperConversation(
   conversationKey: number,
 ): Promise<PaperConversationSummary | null> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return null;
+  if (!normalizedKey || !isUpstreamPaperConversationKey(normalizedKey)) return null;
   const rows = (await Zotero.DB.queryAsync(
     `SELECT pc.conversation_key AS conversationKey,
             pc.library_id AS libraryID,
@@ -1753,7 +1766,7 @@ export async function deletePaperConversation(
   conversationKey: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamPaperConversationKey(normalizedKey)) return;
   await Zotero.DB.queryAsync(
     `DELETE FROM ${PAPER_CONVERSATIONS_TABLE}
      WHERE conversation_key = ?`,
@@ -1766,7 +1779,7 @@ export async function touchEmptyPaperConversation(
   timestamp = Date.now(),
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamPaperConversationKey(normalizedKey)) return;
   const normalizedTimestamp = Number.isFinite(timestamp)
     ? Math.floor(timestamp)
     : Date.now();
@@ -1816,7 +1829,7 @@ export async function createGlobalConversation(
        FROM ${GLOBAL_CONVERSATIONS_TABLE}
        WHERE conversation_key >= ?
          AND conversation_key < ?`,
-      [GLOBAL_CONVERSATION_KEY_BASE, 3_000_000_000],
+      [GLOBAL_CONVERSATION_KEY_BASE, UPSTREAM_RUNTIME_CONVERSATION_KEY_END],
     )) as Array<{ maxConversationKey?: unknown }> | undefined;
     const maxConversationKey = Number(rows?.[0]?.maxConversationKey);
     const nextConversationKey = Number.isFinite(maxConversationKey)
@@ -1861,7 +1874,12 @@ export async function listGlobalConversations(
      ${includeEmpty ? "" : "HAVING SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END) > 0"}
      ORDER BY lastActivityAt DESC, gc.conversation_key DESC
      LIMIT ?`,
-    [normalizedLibraryID, GLOBAL_CONVERSATION_KEY_BASE, 3_000_000_000, normalizedLimit],
+    [
+      normalizedLibraryID,
+      GLOBAL_CONVERSATION_KEY_BASE,
+      UPSTREAM_RUNTIME_CONVERSATION_KEY_END,
+      normalizedLimit,
+    ],
   )) as GlobalConversationSummaryRow[] | undefined;
 
   if (!rows?.length) return [];
@@ -1934,7 +1952,11 @@ export async function getLatestEmptyGlobalConversation(
      HAVING SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END) = 0
      ORDER BY gc.created_at DESC, gc.conversation_key DESC
      LIMIT 1`,
-    [normalizedLibraryID, GLOBAL_CONVERSATION_KEY_BASE, 3_000_000_000],
+    [
+      normalizedLibraryID,
+      GLOBAL_CONVERSATION_KEY_BASE,
+      UPSTREAM_RUNTIME_CONVERSATION_KEY_END,
+    ],
   )) as GlobalConversationSummaryRow[] | undefined;
   if (!rows?.length) return null;
   return toGlobalConversationSummary(rows[0]);
@@ -1969,7 +1991,7 @@ export async function touchGlobalConversationTitle(
   titleSeed: string,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamGlobalConversationKey(normalizedKey)) return;
   const title = normalizeConversationTitleSeed(titleSeed);
   if (!title) return;
   await Zotero.DB.queryAsync(
@@ -1986,7 +2008,7 @@ export async function setGlobalConversationTitle(
   titleSeed: string,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamGlobalConversationKey(normalizedKey)) return;
   const title = normalizeConversationTitleSeed(titleSeed);
   if (!title) return;
   await Zotero.DB.queryAsync(
@@ -2002,7 +2024,7 @@ export async function touchPaperConversationTitle(
   titleSeed: string,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamPaperConversationKey(normalizedKey)) return;
   const title = normalizeConversationTitleSeed(titleSeed);
   if (!title) return;
   await Zotero.DB.queryAsync(
@@ -2019,7 +2041,7 @@ export async function setPaperConversationTitle(
   titleSeed: string,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamPaperConversationKey(normalizedKey)) return;
   const title = normalizeConversationTitleSeed(titleSeed);
   if (!title) return;
   await Zotero.DB.queryAsync(
@@ -2034,7 +2056,7 @@ export async function clearConversationTitle(
   conversationKey: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamStoreConversationKey(normalizedKey)) return;
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
       `UPDATE ${GLOBAL_CONVERSATIONS_TABLE}
@@ -2055,7 +2077,7 @@ export async function deleteGlobalConversation(
   conversationKey: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isUpstreamGlobalConversationKey(normalizedKey)) return;
   await Zotero.DB.queryAsync(
     `DELETE FROM ${GLOBAL_CONVERSATIONS_TABLE}
      WHERE conversation_key = ?`,

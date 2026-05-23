@@ -121,8 +121,9 @@ describe("Claude profile-aware identity", function () {
       Profile: { dir: "/profiles/a" },
     };
 
-    setLastUsedClaudeGlobalConversationKey(1, 1111);
-    assert.equal(getLastUsedClaudeGlobalConversationKey(1), 1111);
+    const profileAKey = buildDefaultClaudeGlobalConversationKey(1) + 10;
+    setLastUsedClaudeGlobalConversationKey(1, profileAKey);
+    assert.equal(getLastUsedClaudeGlobalConversationKey(1), profileAKey);
 
     globalScope.Zotero = {
       ...(originalZotero || {}),
@@ -137,8 +138,9 @@ describe("Claude profile-aware identity", function () {
     };
 
     assert.isNull(getLastUsedClaudeGlobalConversationKey(1));
-    setLastUsedClaudeGlobalConversationKey(1, 2222);
-    assert.equal(getLastUsedClaudeGlobalConversationKey(1), 2222);
+    const profileBKey = buildDefaultClaudeGlobalConversationKey(1) + 20;
+    setLastUsedClaudeGlobalConversationKey(1, profileBKey);
+    assert.equal(getLastUsedClaudeGlobalConversationKey(1), profileBKey);
 
     globalScope.Zotero = {
       ...(originalZotero || {}),
@@ -152,7 +154,7 @@ describe("Claude profile-aware identity", function () {
       Profile: { dir: "/profiles/a" },
     };
 
-    assert.equal(getLastUsedClaudeGlobalConversationKey(1), 1111);
+    assert.equal(getLastUsedClaudeGlobalConversationKey(1), profileAKey);
   });
 
   it("keeps last allocated Claude keys separate across profiles", function () {

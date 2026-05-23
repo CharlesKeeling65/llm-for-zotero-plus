@@ -9,7 +9,11 @@ import {
   formatPaperSourceLabel,
 } from "../../../modules/contextPanel/paperAttribution";
 import { ok, fail, validateObject } from "../shared";
-import { getLocalParentPath } from "../../../utils/localPath";
+import { getLocalParentPath, joinLocalPath } from "../../../utils/localPath";
+import {
+  getLocalPathBasename,
+  parseNotesDirectoryWritePolicy,
+} from "../../../utils/notesDirectoryConfig";
 import { pushUndoEntry } from "../../store/undoStore";
 
 type FileIOInput = {
@@ -20,6 +24,11 @@ type FileIOInput = {
   offset?: number;
   length?: number;
   allowOverwrite?: boolean;
+};
+
+type ResolvedWriteInput = {
+  input: FileIOInput;
+  requestedFilePath?: string;
 };
 
 function normalizePathForPrefix(value: string): string {
@@ -58,6 +67,60 @@ async function removeFileIfExists(filePath: string): Promise<void> {
     return;
   }
   throw new Error("File removal is not available in this Zotero environment");
+}
+
+async function ensureDirectoryExists(directoryPath: string): Promise<void> {
+  const IOUtils = (globalThis as any).IOUtils;
+  let ioUtilsError: unknown = null;
+  if (IOUtils?.makeDirectory) {
+    try {
+      await IOUtils.makeDirectory(directoryPath, {
+        createAncestors: true,
+        ignoreExisting: true,
+      });
+      return;
+    } catch (error) {
+      ioUtilsError = error;
+    }
+  }
+  const OSFile = (globalThis as any).OS?.File;
+  if (OSFile?.makeDir) {
+    await OSFile.makeDir(directoryPath, {
+      from: getLocalParentPath(directoryPath),
+      ignoreExisting: true,
+    });
+    return;
+  }
+  if (ioUtilsError) throw ioUtilsError;
+}
+
+function isMarkdownWritePath(filePath: string): boolean {
+  return /\.(?:md|markdown)$/i.test(filePath.trim());
+}
+
+function resolveFileNoteWriteInput(
+  input: FileIOInput,
+  context: AgentToolContext,
+): ResolvedWriteInput {
+  if (input.action !== "write" || !isMarkdownWritePath(input.filePath)) {
+    return { input };
+  }
+  const policy = parseNotesDirectoryWritePolicy(
+    context.request.metadata?.fileNoteWritePolicy,
+  );
+  if (!policy) return { input };
+  if (!policy.enforceDefaultTarget) return { input };
+  const fileName = getLocalPathBasename(input.filePath);
+  if (!fileName) return { input };
+  const resolvedPath = joinLocalPath(policy.defaultTargetPath, fileName);
+  if (resolvedPath === input.filePath) return { input };
+  return {
+    input: {
+      ...input,
+      filePath: resolvedPath,
+    },
+    requestedFilePath: input.filePath,
+  };
 }
 
 function collectRequestPaperContexts(
@@ -155,16 +218,10 @@ async function writeFile(
   // Ensure parent directory exists
   const parent = getLocalParentPath(filePath);
   if (parent && parent !== filePath) {
-    const IOUtils = (globalThis as any).IOUtils;
-    if (IOUtils?.makeDirectory) {
-      try {
-        await IOUtils.makeDirectory(parent, {
-          createAncestors: true,
-          ignoreExisting: true,
-        });
-      } catch {
-        /* ignore */
-      }
+    try {
+      await ensureDirectoryExists(parent);
+    } catch {
+      /* ignore */
     }
   }
 
@@ -349,7 +406,12 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       });
     },
 
-    createPendingAction(input) {
+    createPendingAction(input, context) {
+      const { input: effectiveInput } = resolveFileNoteWriteInput(
+        input,
+        context,
+      );
+      input = effectiveInput;
       const fileName = input.filePath.split(/[\\/]/).pop() || input.filePath;
       if (input.action === "read") {
         return {
@@ -400,7 +462,11 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
     async shouldRequireConfirmation(input, _context) {
       // Read operations are safe — auto-approve
       if (input.action === "read") return false;
-      const exists = await fileExists(input.filePath);
+      const { input: effectiveInput } = resolveFileNoteWriteInput(
+        input,
+        _context,
+      );
+      const exists = await fileExists(effectiveInput.filePath);
       // New file writes are reversible by deleting the created file, so they
       // can run directly. Unknown existence is treated like an overwrite.
       if (exists === false) return false;
@@ -409,11 +475,18 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       return true;
     },
 
-    applyConfirmation(input) {
-      return ok({ ...input, allowOverwrite: true });
+    applyConfirmation(input, _resolutionData, context) {
+      const { input: effectiveInput } = resolveFileNoteWriteInput(
+        input,
+        context,
+      );
+      return ok({ ...effectiveInput, allowOverwrite: true });
     },
 
     async execute(input, context) {
+      const { input: effectiveInput, requestedFilePath } =
+        resolveFileNoteWriteInput(input, context);
+      input = effectiveInput;
       const paperSourceMetadata = buildCodexMineruPaperSourceMetadata(
         input.filePath,
         context.request,
@@ -556,6 +629,12 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
         return {
           action: "write",
           filePath: input.filePath,
+          ...(requestedFilePath
+            ? {
+                requestedFilePath,
+                correctedToNotesDirectory: true,
+              }
+            : {}),
           bytesWritten: (input.content || "").length,
         };
       } catch (error) {

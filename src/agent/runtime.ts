@@ -49,6 +49,7 @@ import {
   hydrateAgentCoverageLedger,
 } from "./context/coverageLedger";
 import {
+  buildNotesDirectoryWritePolicy,
   getNotesDirectoryNickname,
   isNotesDirectoryConfigured,
 } from "../utils/notesDirectoryConfig";
@@ -420,10 +421,16 @@ function isSuccessfulFileIoWrite(record: {
   name: string;
   ok: boolean;
   input?: unknown;
+  content?: unknown;
 }): boolean {
   if (record.name !== "file_io" || !record.ok) return false;
   if (!record.input || typeof record.input !== "object") return false;
-  return (record.input as { action?: unknown }).action === "write";
+  if ((record.input as { action?: unknown }).action !== "write") return false;
+  return !(
+    record.content &&
+    typeof record.content === "object" &&
+    "error" in record.content
+  );
 }
 
 export class AgentRuntime {
@@ -560,6 +567,7 @@ export class AgentRuntime {
       name: string;
       ok: boolean;
       input?: unknown;
+      content?: unknown;
     }> = [];
     const pendingReadActivities: AgentPendingReadActivity[] = [];
     const toolDefinitions =
@@ -637,6 +645,19 @@ export class AgentRuntime {
     // inside the agent loop — no per-step classification cost.
     const classifiedSkillIds = await detectSkillIntent(request, getAllSkills());
     const matchedSkills = getMatchedSkillIds(request, classifiedSkillIds);
+    const requiresFileNoteWrite = isWriteNoteFileRequest(
+      request,
+      matchedSkills,
+    );
+    const noteWritePolicy = requiresFileNoteWrite
+      ? buildNotesDirectoryWritePolicy({ userText: request.userText })
+      : null;
+    if (noteWritePolicy) {
+      request.metadata = {
+        ...(request.metadata || {}),
+        fileNoteWritePolicy: noteWritePolicy,
+      };
+    }
     await emit({
       type: "provider_event",
       providerType: "agent_resource_lifecycle",
@@ -705,10 +726,6 @@ export class AgentRuntime {
     const intent = classifyRequest(request);
     const { maxRounds, maxToolCallsPerRound } = resolveAgentLimits(
       intent.isBulkOperation,
-    );
-    const requiresFileNoteWrite = isWriteNoteFileRequest(
-      request,
-      matchedSkills,
     );
     let noteWriteCorrectionUsed = false;
     const hasSuccessfulFileWrite = () =>
@@ -1085,6 +1102,7 @@ export class AgentRuntime {
         name: toolResult.name,
         ok: toolResult.ok,
         input: executedCall.input,
+        content: toolResult.content,
       });
       if (toolResult.ok) {
         consecutiveToolErrors = 0;
@@ -1317,7 +1335,11 @@ export class AgentRuntime {
             const userCorrectionMessage: AgentModelMessage = {
               role: "user",
               content:
-                'Correction for this turn: the user\'s request requires writing a Markdown note to the configured notes directory. Call `file_io` with `action: "write"` now, using the configured notes directory/default target path and a clear `.md` filename. Do not put the note body in chat. If a write is impossible, explain the setup problem briefly.',
+                'Correction for this turn: the user\'s request requires writing a Markdown note to the configured notes directory. Call `file_io` with `action: "write"` now, using the configured notes directory/default target path and a clear `.md` filename.' +
+                (noteWritePolicy
+                  ? ` Default target path: ${noteWritePolicy.defaultTargetPath}.`
+                  : "") +
+                " Do not put the note body in chat. If a write is impossible, explain the setup problem briefly.",
             };
             messages.push(assistantCorrectionMessage, userCorrectionMessage);
             newTranscriptMessages.push(

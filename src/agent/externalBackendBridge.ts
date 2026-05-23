@@ -11,6 +11,7 @@ import {
 import { getClaudeProfileSignature } from "../claudeCode/projectSkills";
 import { getClaudeConversationSummary } from "../claudeCode/store";
 import { dbg, dbgError } from "../utils/debugLogger";
+import { buildNotesDirectoryConfigSection } from "../utils/notesDirectoryConfig";
 import type { AgentRuntime } from "./runtime";
 import {
   appendAgentRunEvent,
@@ -485,6 +486,13 @@ function buildAgentPermissionMetadata(): {
   return { permissionMode };
 }
 
+function buildClaudeBridgeCustomInstruction(): string {
+  return [getClaudeCustomInstructionPref(), buildNotesDirectoryConfigSection()]
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 function isClaudeCodeModeEnabled(): boolean {
   try {
     const enabled = Zotero.Prefs.get(`${config.prefsPrefix}.enableClaudeCodeMode`, true);
@@ -809,7 +817,7 @@ async function runExternalBridgeTurn(
       claudeSettingSources: getClaudeSettingSourcesByPref(),
       settingSources: getClaudeSettingSourcesCsvByPref(),
       ...buildAgentPermissionMetadata(),
-      customInstruction: getClaudeCustomInstructionPref(),
+      customInstruction: buildClaudeBridgeCustomInstruction(),
       providerIdentity,
       providerIdentityStack,
       model:

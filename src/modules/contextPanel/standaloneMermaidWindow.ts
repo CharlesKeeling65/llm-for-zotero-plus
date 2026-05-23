@@ -204,7 +204,15 @@ function initializeMermaidWindow(
     applyZoom(getWheelZoomScale(scale, event.deltaY));
   });
   doc.addEventListener("keydown", (event: KeyboardEvent) => {
-    if (event.key === "Escape") closeWindow();
+    if (event.key === "Escape") {
+      closeWindow();
+      return;
+    }
+    const isMac = (Zotero as any).isMac;
+    if ((isMac ? event.metaKey : event.ctrlKey) && event.key === "w") {
+      event.preventDefault();
+      closeWindow();
+    }
   });
   css.addEventListener("load", () => applyZoom(scale), { once: true });
   targetWin.addEventListener("resize", () => applyZoom(scale));

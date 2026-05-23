@@ -226,7 +226,8 @@ Write:        ![Figure 2. RSA toolbox schematic](../imgs/Nili2014/figure-2.jpg)
 
 **Prerequisites:**
 
-- The user's notes directory path and default folder are provided in the system prompt under "Notes directory configuration". If missing, tell the user to configure the notes directory in the plugin preferences (Settings > Agent tab).
+- The user's notes directory path, default folder, and resolved default target path are provided in the system prompt under "Notes directory configuration". If missing, tell the user to configure the notes directory in the plugin preferences (Settings > Agent tab).
+- The `Default target path` is the already-resolved directory for default file notes. When the user doesn't specify another folder, use `Default target path/<filename>.md` directly. Do not append the default folder to the default target path again.
 - The default folder is used when the user doesn't specify a folder. If the user specifies a different folder, write there instead.
 
 **Filename pattern (default):** `{papertitle}-{notetitle}-{date}.md`
@@ -257,7 +258,7 @@ Three components, joined by single hyphens:
 
 **Writing steps:**
 
-1. Construct the file path: `{notesDirectoryPath}/{folder}/<filename>.md`, using the native path separator from the runtime platform section.
+1. Construct the file path: `{defaultTargetPath}/<filename>.md` unless the user explicitly specifies another folder, using the native path separator from the runtime platform section.
 2. Call `file_io({ action:'write', filePath, content:noteContent })`.
 3. If writing fails, report the error clearly with the attempted path.
 

@@ -16,6 +16,10 @@ import {
 import { normalizeQuoteCitations } from "../modules/contextPanel/quoteCitations";
 import type { StoredChatMessage } from "../utils/chatStore";
 import {
+  isConversationKeyFor,
+  isConversationKeyForKind,
+} from "../shared/conversationKeySpace";
+import {
   CLAUDE_HISTORY_LIMIT,
   buildDefaultClaudeGlobalConversationKey,
   buildDefaultClaudePaperConversationKey,
@@ -60,6 +64,17 @@ function normalizePaperItemID(paperItemID: number): number | null {
 function normalizeLimit(limit: number, fallback: number): number {
   if (!Number.isFinite(limit)) return fallback;
   return Math.max(1, Math.floor(limit));
+}
+
+function isClaudeStoreConversationKey(conversationKey: number): boolean {
+  return isConversationKeyFor("claude_code", conversationKey);
+}
+
+function isClaudeStoreConversationKeyForKind(
+  conversationKey: number,
+  kind: ClaudeConversationKind,
+): boolean {
+  return isConversationKeyForKind("claude_code", kind, conversationKey);
 }
 
 function normalizeConversationTitleSeed(value: string): string {
@@ -330,7 +345,7 @@ export async function appendClaudeMessage(
   message: StoredChatMessage,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isClaudeStoreConversationKey(normalizedKey)) return;
 
   const selectedTexts = Array.isArray(message.selectedTexts)
     ? message.selectedTexts
@@ -419,7 +434,7 @@ export async function loadClaudeConversation(
   limit = CLAUDE_HISTORY_LIMIT,
 ): Promise<StoredChatMessage[]> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return [];
+  if (!normalizedKey || !isClaudeStoreConversationKey(normalizedKey)) return [];
   const rows = (await Zotero.DB.queryAsync(
     `SELECT role,
             text,
@@ -638,7 +653,7 @@ export async function loadClaudeConversation(
 
 export async function clearClaudeConversation(conversationKey: number): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isClaudeStoreConversationKey(normalizedKey)) return;
   await Zotero.DB.queryAsync(
     `DELETE FROM ${CLAUDE_MESSAGES_TABLE} WHERE conversation_key = ?`,
     [normalizedKey],
@@ -651,7 +666,7 @@ export async function deleteClaudeTurnMessages(
   assistantTimestamp: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isClaudeStoreConversationKey(normalizedKey)) return;
   const normalizedUserTimestamp = Number.isFinite(userTimestamp)
     ? Math.floor(userTimestamp)
     : 0;
@@ -695,7 +710,7 @@ export async function pruneClaudeConversation(
   keep = CLAUDE_HISTORY_LIMIT,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isClaudeStoreConversationKey(normalizedKey)) return;
   await Zotero.DB.queryAsync(
     `DELETE FROM ${CLAUDE_MESSAGES_TABLE}
      WHERE id IN (
@@ -730,7 +745,7 @@ export async function updateLatestClaudeUserMessage(
   >,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isClaudeStoreConversationKey(normalizedKey)) return;
   const selectedTexts = Array.isArray(message.selectedTexts)
     ? message.selectedTexts
     : typeof message.selectedText === "string" && message.selectedText.trim()
@@ -817,7 +832,7 @@ export async function updateLatestClaudeAssistantMessage(
   >,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isClaudeStoreConversationKey(normalizedKey)) return;
   const quoteCitations = normalizeQuoteCitations(message.quoteCitations);
   await Zotero.DB.queryAsync(
     `UPDATE ${CLAUDE_MESSAGES_TABLE}
@@ -895,7 +910,14 @@ function toClaudeConversationSummary(
   const createdAt = normalizeCatalogTimestamp(row.createdAt);
   const updatedAt = normalizeCatalogTimestamp(row.updatedAt);
   const kind = row.kind === "paper" ? "paper" : row.kind === "global" ? "global" : null;
-  if (!conversationKey || !libraryID || !kind) return null;
+  if (
+    !conversationKey ||
+    !libraryID ||
+    !kind ||
+    !isClaudeStoreConversationKeyForKind(conversationKey, kind)
+  ) {
+    return null;
+  }
   const paperItemID = normalizePaperItemID(Number(row.paperItemID));
   const userTurnCount = Number(row.userTurnCount);
   return {
@@ -948,7 +970,7 @@ export async function getClaudeConversationSummary(
   conversationKey: number,
 ): Promise<ClaudeConversationSummary | null> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return null;
+  if (!normalizedKey || !isClaudeStoreConversationKey(normalizedKey)) return null;
   const rows = (await Zotero.DB.queryAsync(
     `SELECT c.conversation_key AS conversationKey,
             c.library_id AS libraryID,
@@ -999,7 +1021,13 @@ export async function upsertClaudeConversationSummary(params: {
 }): Promise<void> {
   const conversationKey = normalizeConversationKey(params.conversationKey);
   const libraryID = normalizeLibraryID(params.libraryID);
-  if (!conversationKey || !libraryID) return;
+  if (
+    !conversationKey ||
+    !libraryID ||
+    !isClaudeStoreConversationKeyForKind(conversationKey, params.kind)
+  ) {
+    return;
+  }
   const createdAt = normalizeCatalogTimestamp(params.createdAt);
   const updatedAt = normalizeCatalogTimestamp(params.updatedAt);
   await Zotero.DB.queryAsync(
@@ -1287,7 +1315,7 @@ export async function touchClaudeConversationTitle(
   titleSeed: string,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isClaudeStoreConversationKey(normalizedKey)) return;
   const title = normalizeConversationTitleSeed(titleSeed);
   if (!title) return;
   await Zotero.DB.queryAsync(
@@ -1303,7 +1331,7 @@ export async function clearClaudeConversationSessionMetadata(
   conversationKey: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isClaudeStoreConversationKey(normalizedKey)) return;
   await Zotero.DB.queryAsync(
     `UPDATE ${CLAUDE_CONVERSATIONS_TABLE}
      SET provider_session_id = NULL,
@@ -1323,7 +1351,7 @@ export async function setClaudeConversationTitle(
   titleSeed: string,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isClaudeStoreConversationKey(normalizedKey)) return;
   await Zotero.DB.queryAsync(
     `UPDATE ${CLAUDE_CONVERSATIONS_TABLE}
      SET title = ?
@@ -1336,7 +1364,7 @@ export async function deleteClaudeConversation(
   conversationKey: number,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey) return;
+  if (!normalizedKey || !isClaudeStoreConversationKey(normalizedKey)) return;
   await Zotero.DB.queryAsync(
     `DELETE FROM ${CLAUDE_CONVERSATIONS_TABLE}
      WHERE conversation_key = ?`,

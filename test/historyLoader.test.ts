@@ -6,6 +6,12 @@ import {
 import { loadAllClaudeConversationHistory } from "../src/claudeCode/historyLoader";
 import { loadAllCodexConversationHistory } from "../src/codexAppServer/historyLoader";
 import {
+  CLAUDE_GLOBAL_CONVERSATION_KEY_BASE,
+  CLAUDE_PAPER_CONVERSATION_KEY_BASE,
+  CODEX_GLOBAL_CONVERSATION_KEY_BASE,
+  CODEX_PAPER_CONVERSATION_KEY_BASE,
+} from "../src/shared/conversationKeySpace";
+import {
   createGlobalConversation,
   getLatestEmptyGlobalConversation,
   listGlobalConversations,
@@ -216,6 +222,8 @@ describe("historyLoader", function () {
   });
 
   it("loads all Claude Code conversations across paper and global chat", async function () {
+    const claudePaperKey = CLAUDE_PAPER_CONVERSATION_KEY_BASE + 10;
+    const claudeGlobalKey = CLAUDE_GLOBAL_CONVERSATION_KEY_BASE + 1;
     globalScope.Zotero = {
       ...(originalZotero || {}),
       DB: {
@@ -226,7 +234,7 @@ describe("historyLoader", function () {
           ) {
             return [
               {
-                conversationKey: 4_000_000_010,
+                conversationKey: claudePaperKey,
                 libraryID: 1,
                 kind: "paper",
                 paperItemID: 10,
@@ -243,7 +251,7 @@ describe("historyLoader", function () {
           ) {
             return [
               {
-                conversationKey: 3_000_000_001,
+                conversationKey: claudeGlobalKey,
                 libraryID: 1,
                 kind: "global",
                 createdAt: 200,
@@ -272,12 +280,12 @@ describe("historyLoader", function () {
       [
         {
           kind: "paper",
-          conversationKey: 4_000_000_010,
+          conversationKey: claudePaperKey,
           paperItemID: 10,
         },
         {
           kind: "global",
-          conversationKey: 3_000_000_001,
+          conversationKey: claudeGlobalKey,
           paperItemID: undefined,
         },
       ],
@@ -285,6 +293,8 @@ describe("historyLoader", function () {
   });
 
   it("loads all Codex conversations across paper and global chat", async function () {
+    const codexPaperKey = CODEX_PAPER_CONVERSATION_KEY_BASE + 10;
+    const codexGlobalKey = CODEX_GLOBAL_CONVERSATION_KEY_BASE + 1;
     globalScope.Zotero = {
       ...(originalZotero || {}),
       DB: {
@@ -295,7 +305,7 @@ describe("historyLoader", function () {
           ) {
             return [
               {
-                conversationKey: 6_000_000_010,
+                conversationKey: codexPaperKey,
                 libraryID: 1,
                 kind: "paper",
                 paperItemID: 10,
@@ -312,7 +322,7 @@ describe("historyLoader", function () {
           ) {
             return [
               {
-                conversationKey: 5_000_000_001,
+                conversationKey: codexGlobalKey,
                 libraryID: 1,
                 kind: "global",
                 createdAt: 200,
@@ -341,12 +351,12 @@ describe("historyLoader", function () {
       [
         {
           kind: "paper",
-          conversationKey: 6_000_000_010,
+          conversationKey: codexPaperKey,
           paperItemID: 10,
         },
         {
           kind: "global",
-          conversationKey: 5_000_000_001,
+          conversationKey: codexGlobalKey,
           paperItemID: undefined,
         },
       ],

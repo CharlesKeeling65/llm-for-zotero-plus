@@ -1,9 +1,22 @@
 import { getClaudeProfileSignature } from "../claudeCode/projectSkills";
+import {
+  buildDefaultConversationKey,
+  CODEX_GLOBAL_CONVERSATION_KEY_BASE,
+  CODEX_PAPER_CONVERSATION_KEY_BASE,
+  getConversationKeyRange,
+  getProfileKeyOffset,
+  getProfileKeySlot,
+  isConversationKeyFor,
+  RUNTIME_PROFILE_KEY_MULTIPLIER,
+  RUNTIME_PROFILE_SLOT_MOD,
+} from "../shared/conversationKeySpace";
 
-export const CODEX_GLOBAL_CONVERSATION_KEY_BASE = 5_000_000_000_000_000;
-export const CODEX_PAPER_CONVERSATION_KEY_BASE = 6_000_000_000_000_000;
-export const CODEX_PROFILE_KEY_MULTIPLIER = 1_000_000_000;
-export const CODEX_PROFILE_SLOT_MOD = 999_999;
+export {
+  CODEX_GLOBAL_CONVERSATION_KEY_BASE,
+  CODEX_PAPER_CONVERSATION_KEY_BASE,
+};
+export const CODEX_PROFILE_KEY_MULTIPLIER = RUNTIME_PROFILE_KEY_MULTIPLIER;
+export const CODEX_PROFILE_SLOT_MOD = RUNTIME_PROFILE_SLOT_MOD;
 export const CODEX_HISTORY_LIMIT = 200;
 
 export const CODEX_MODEL_OPTIONS = [
@@ -28,50 +41,53 @@ export function getCodexProfileSignature(): string {
 }
 
 export function getCodexProfileKeySlot(): number {
-  const signature = getCodexProfileSignature();
-  const hex = signature.replace(/^profile-/, "");
-  const parsed = Number.parseInt(hex, 16);
-  if (!Number.isFinite(parsed) || parsed < 0) return 1;
-  return (parsed % CODEX_PROFILE_SLOT_MOD) + 1;
+  return getProfileKeySlot(getCodexProfileSignature());
 }
 
 export function getCodexProfileKeyOffset(): number {
-  return getCodexProfileKeySlot() * CODEX_PROFILE_KEY_MULTIPLIER;
+  return getProfileKeyOffset(getCodexProfileSignature());
 }
 
 export function getCodexGlobalConversationKeyRange(): {
   start: number;
   endExclusive: number;
 } {
-  const start = CODEX_GLOBAL_CONVERSATION_KEY_BASE + getCodexProfileKeyOffset();
-  return {
-    start,
-    endExclusive: start + CODEX_PROFILE_KEY_MULTIPLIER,
-  };
+  return getConversationKeyRange(
+    "codex",
+    "global",
+    getCodexProfileSignature(),
+  );
 }
 
 export function getCodexPaperConversationKeyRange(): {
   start: number;
   endExclusive: number;
 } {
-  const start = CODEX_PAPER_CONVERSATION_KEY_BASE + getCodexProfileKeyOffset();
-  return {
-    start,
-    endExclusive: start + CODEX_PROFILE_KEY_MULTIPLIER,
-  };
+  return getConversationKeyRange(
+    "codex",
+    "paper",
+    getCodexProfileSignature(),
+  );
 }
 
 export function buildDefaultCodexGlobalConversationKey(libraryID: number): number {
-  return getCodexGlobalConversationKeyRange().start + Math.max(1, Math.floor(libraryID));
+  return buildDefaultConversationKey(
+    "codex",
+    "global",
+    libraryID,
+    getCodexProfileSignature(),
+  );
 }
 
 export function buildDefaultCodexPaperConversationKey(paperItemID: number): number {
-  return getCodexPaperConversationKeyRange().start + Math.max(1, Math.floor(paperItemID));
+  return buildDefaultConversationKey(
+    "codex",
+    "paper",
+    paperItemID,
+    getCodexProfileSignature(),
+  );
 }
 
 export function isCodexConversationKey(conversationKey: number): boolean {
-  return (
-    Number.isFinite(conversationKey) &&
-    conversationKey >= CODEX_GLOBAL_CONVERSATION_KEY_BASE
-  );
+  return isConversationKeyFor("codex", conversationKey);
 }
