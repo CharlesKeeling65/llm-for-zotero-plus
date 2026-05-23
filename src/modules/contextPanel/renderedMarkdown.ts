@@ -1,9 +1,404 @@
+import { config } from "../../../package.json";
 import { renderMarkdown } from "../../utils/markdown";
+import {
+  createInlineMermaidSvgElement,
+  sanitizeRenderedMermaidSvgWithReason,
+} from "./mermaidSvg";
+import { openStandaloneMermaidWindow } from "./standaloneMermaidWindow";
 import { sanitizeText } from "./textUtils";
 
 export type RenderedMarkdownOptions = {
   resolveImage?: (src: string) => string | null;
 };
+
+const MERMAID_RENDERED_SVG_MAX_CHARS = 300_000;
+const MERMAID_ERROR_MESSAGE_MAX_CHARS = 220;
+const MERMAID_ZOOM_MIN = 0.5;
+const MERMAID_ZOOM_MAX = 4;
+const MERMAID_ZOOM_STEP = 0.25;
+const MERMAID_WHEEL_ZOOM_DELTA_MAX = 24;
+const MERMAID_WHEEL_ZOOM_SENSITIVITY = 0.002;
+type MermaidThemeKey = "light" | "dark";
+const MERMAID_RENDER_VERSION = "3";
+const MERMAID_VENDOR_SCRIPT_URL =
+  `chrome://${config.addonRef}/content/vendor/mermaid/mermaid.min.js`;
+
+const MERMAID_THEME_VARIABLES: Record<MermaidThemeKey, Record<string, string>> = {
+  light: {
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    fontSize: "15px",
+    background: "#ffffff",
+    mainBkg: "#dbeafe",
+    primaryColor: "#dbeafe",
+    primaryTextColor: "#111827",
+    primaryBorderColor: "#3b82f6",
+    secondaryColor: "#dcfce7",
+    secondaryTextColor: "#111827",
+    secondaryBorderColor: "#22c55e",
+    tertiaryColor: "#fef3c7",
+    tertiaryTextColor: "#111827",
+    tertiaryBorderColor: "#f59e0b",
+    lineColor: "#4b5563",
+    defaultLinkColor: "#4b5563",
+    edgeLabelBackground: "#ffffff",
+    clusterBkg: "#ffffff",
+    clusterBorder: "#e5e7eb",
+    nodeBkg: "#dbeafe",
+    nodeBorder: "#3b82f6",
+    nodeTextColor: "#111827",
+    titleColor: "#111827",
+    textColor: "#111827",
+  },
+  dark: {
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    fontSize: "15px",
+    background: "#151515",
+    mainBkg: "#dbeafe",
+    primaryColor: "#dbeafe",
+    primaryTextColor: "#111827",
+    primaryBorderColor: "#60a5fa",
+    secondaryColor: "#dcfce7",
+    secondaryTextColor: "#111827",
+    secondaryBorderColor: "#34d399",
+    tertiaryColor: "#fef3c7",
+    tertiaryTextColor: "#111827",
+    tertiaryBorderColor: "#f59e0b",
+    lineColor: "#d4d4d8",
+    defaultLinkColor: "#d4d4d8",
+    edgeLabelBackground: "#151515",
+    clusterBkg: "#171717",
+    clusterBorder: "#3f3f46",
+    nodeBkg: "#dbeafe",
+    nodeBorder: "#60a5fa",
+    nodeTextColor: "#111827",
+    titleColor: "#f8fafc",
+    textColor: "#f8fafc",
+  },
+};
+
+const MERMAID_FLOWCHART_CONFIG = {
+  htmlLabels: true,
+  useMaxWidth: true,
+  diagramPadding: 24,
+  nodeSpacing: 70,
+  rankSpacing: 88,
+  padding: 12,
+  curve: "basis" as const,
+};
+
+const MERMAID_BASE_CONFIG = {
+  startOnLoad: false,
+  securityLevel: "sandbox" as const,
+  secure: [
+    "securityLevel",
+    "htmlLabels",
+    "maxTextSize",
+    "maxEdges",
+    "startOnLoad",
+    "theme",
+    "themeVariables",
+    "themeCSS",
+    "secure",
+  ],
+  htmlLabels: true,
+  maxTextSize: 50_000,
+  maxEdges: 1_000,
+  theme: "base" as const,
+  flowchart: MERMAID_FLOWCHART_CONFIG,
+};
+
+function getMermaidConfig(themeKey: MermaidThemeKey) {
+  return {
+    ...MERMAID_BASE_CONFIG,
+    themeVariables: MERMAID_THEME_VARIABLES[themeKey],
+  };
+}
+
+function parseCssColorChannel(channel: string): number | null {
+  const value = channel.trim();
+  if (!value) return null;
+  if (value.endsWith("%")) {
+    const percent = Number.parseFloat(value.slice(0, -1));
+    if (!Number.isFinite(percent)) return null;
+    return Math.min(255, Math.max(0, (percent / 100) * 255));
+  }
+  const number = Number.parseFloat(value);
+  return Number.isFinite(number) ? Math.min(255, Math.max(0, number)) : null;
+}
+
+function parseCssColor(value: string): [number, number, number] | null {
+  const trimmed = value.trim();
+  const hex = trimmed.match(/^#([\da-f]{3}|[\da-f]{6})$/i);
+  if (hex) {
+    const raw = hex[1];
+    const expanded =
+      raw.length === 3
+        ? raw
+            .split("")
+            .map((char) => `${char}${char}`)
+            .join("")
+        : raw;
+    return [
+      Number.parseInt(expanded.slice(0, 2), 16),
+      Number.parseInt(expanded.slice(2, 4), 16),
+      Number.parseInt(expanded.slice(4, 6), 16),
+    ];
+  }
+
+  const rgb = trimmed.match(/^rgba?\((.+)\)$/i);
+  if (!rgb) return null;
+  const parts = rgb[1]
+    .replace(/\s*\/\s*[\d.]+%?\s*$/, "")
+    .split(/[\s,]+/)
+    .filter(Boolean);
+  if (parts.length < 3) return null;
+  const channels = parts.slice(0, 3).map(parseCssColorChannel);
+  if (channels.some((channel) => channel === null)) return null;
+  return channels as [number, number, number];
+}
+
+function getCssColorLuminance(color: [number, number, number]): number {
+  const [red, green, blue] = color.map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.03928
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+function isLightCssColor(value: string): boolean {
+  const color = parseCssColor(value);
+  return color ? getCssColorLuminance(color) > 0.5 : false;
+}
+
+function isDarkCssColor(value: string): boolean {
+  const color = parseCssColor(value);
+  return color ? getCssColorLuminance(color) < 0.35 : false;
+}
+
+function isTransparentCssColor(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || normalized === "transparent") return true;
+  if (!/^rgba?\(/.test(normalized)) return false;
+  return /[,/]\s*0(?:\.0+)?%?\s*\)?$/.test(normalized);
+}
+
+function getCssColorTheme(value: string): MermaidThemeKey | null {
+  if (!value || isTransparentCssColor(value)) return null;
+  if (isLightCssColor(value)) return "light";
+  if (isDarkCssColor(value)) return "dark";
+  return null;
+}
+
+export function resolveMermaidThemeFromColors(
+  backgrounds: string[],
+  foregrounds: string[],
+  darkHint = false,
+): MermaidThemeKey {
+  for (const background of backgrounds) {
+    const theme = getCssColorTheme(background);
+    if (theme) return theme;
+  }
+
+  for (const foreground of foregrounds) {
+    if (!foreground || isTransparentCssColor(foreground)) continue;
+    if (isDarkCssColor(foreground)) return "light";
+    if (isLightCssColor(foreground)) return "dark";
+  }
+
+  return darkHint ? "dark" : "light";
+}
+
+function getMermaidThemeElements(
+  doc: Document,
+  anchor?: HTMLElement,
+): HTMLElement[] {
+  const elements: HTMLElement[] = [];
+  const add = (element: Element | null | undefined) => {
+    if (
+      element &&
+      element.nodeType === 1 &&
+      !elements.includes(element as HTMLElement)
+    ) {
+      elements.push(element as HTMLElement);
+    }
+  };
+  add(anchor?.closest(".llm-panel"));
+  add(anchor?.closest(".llm-rendered-markdown"));
+  add(doc.body);
+  add(doc.documentElement);
+  return elements;
+}
+
+function getMermaidThemeKey(
+  doc: Document,
+  anchor?: HTMLElement,
+): MermaidThemeKey {
+  const root = doc.documentElement;
+  const body = doc.body;
+  const darkHint = Boolean(
+    anchor?.closest(".window-is-dark") ||
+    root?.classList.contains("window-is-dark") ||
+    body?.classList.contains("window-is-dark") ||
+    root?.hasAttribute("lwtheme-brighttext"),
+  );
+
+  const win = doc.defaultView;
+  if (!win) return darkHint ? "dark" : "light";
+  const backgrounds: string[] = [];
+  const foregrounds: string[] = [];
+  for (const element of getMermaidThemeElements(doc, anchor)) {
+    const computed = win.getComputedStyle(element);
+    if (!computed) continue;
+    backgrounds.push(
+      computed.backgroundColor,
+      computed.getPropertyValue("--material-sidepane").trim(),
+      computed.getPropertyValue("--material-background").trim(),
+    );
+    foregrounds.push(
+      computed.getPropertyValue("--fill-primary").trim(),
+      computed.color,
+    );
+  }
+
+  return resolveMermaidThemeFromColors(
+    backgrounds.filter(Boolean),
+    foregrounds.filter(Boolean),
+    darkHint,
+  );
+}
+
+async function initializeMermaidRenderer(
+  mermaid: Mermaid,
+  doc: Document,
+  themeKey: MermaidThemeKey,
+): Promise<void> {
+  await withDocumentGlobals(doc, async () => {
+    mermaid.initialize(getMermaidConfig(themeKey));
+  });
+}
+
+const MERMAID_VIEWER_FIT_ICON = "⛶";
+const MERMAID_VIEWER_CLOSE_ICON = "×";
+const MERMAID_VIEWER_ZOOM_OUT_ICON = "−";
+const MERMAID_VIEWER_ZOOM_IN_ICON = "+";
+
+const MERMAID_PREVIEW_OPEN_ICON = "⛶";
+
+const MERMAID_THEME_DATASET_KEY = "llmMermaidTheme";
+
+const MERMAID_THEME_CLASS_BY_KEY: Record<MermaidThemeKey, string> = {
+  light: "llm-mermaid-theme-light",
+  dark: "llm-mermaid-theme-dark",
+};
+
+function setMermaidThemeDataset(
+  element: HTMLElement,
+  themeKey: MermaidThemeKey,
+): void {
+  element.dataset[MERMAID_THEME_DATASET_KEY] = themeKey;
+  element.dataset.llmMermaidRenderVersion = MERMAID_RENDER_VERSION;
+  element.classList.remove(
+    MERMAID_THEME_CLASS_BY_KEY.light,
+    MERMAID_THEME_CLASS_BY_KEY.dark,
+  );
+  element.classList.add(MERMAID_THEME_CLASS_BY_KEY[themeKey]);
+}
+
+function getRenderedMermaidTheme(preview: HTMLElement): MermaidThemeKey | null {
+  if (preview.dataset.llmMermaidRenderVersion !== MERMAID_RENDER_VERSION) {
+    return null;
+  }
+  const theme = preview.dataset[MERMAID_THEME_DATASET_KEY];
+  return theme === "light" || theme === "dark" ? theme : null;
+}
+
+type MermaidRenderResult = {
+  svg: string;
+  bindFunctions?: (element: Element) => void;
+};
+
+type Mermaid = {
+  initialize: (config: ReturnType<typeof getMermaidConfig>) => void;
+  render: (
+    id: string,
+    definition: string,
+    container?: Element,
+  ) => Promise<MermaidRenderResult> | MermaidRenderResult;
+};
+
+const mermaidPromises = new WeakMap<Window, Promise<Mermaid>>();
+let mermaidRenderQueue: Promise<void> = Promise.resolve();
+let mermaidRenderCounter = 0;
+
+type MermaidThemeWatcher = {
+  observedElements: WeakSet<Element>;
+  observers: MutationObserver[];
+  scheduled: boolean;
+  mediaQuery?: MediaQueryList;
+};
+
+const mermaidThemeWatchers = new WeakMap<Document, MermaidThemeWatcher>();
+
+function ensureMermaidThemeWatcher(doc: Document, root?: ParentNode): void {
+  const win = doc.defaultView;
+  if (!win) return;
+
+  let watcher = mermaidThemeWatchers.get(doc);
+  if (!watcher) {
+    watcher = {
+      observedElements: new WeakSet<Element>(),
+      observers: [],
+      scheduled: false,
+    };
+    mermaidThemeWatchers.set(doc, watcher);
+  }
+
+  const scheduleRerender = () => {
+    if (!watcher || watcher.scheduled) return;
+    watcher.scheduled = true;
+    const run = () => {
+      if (!watcher) return;
+      watcher.scheduled = false;
+      void renderMermaidBlocks(doc, doc);
+    };
+    if (typeof win.requestAnimationFrame === "function") {
+      win.requestAnimationFrame(run);
+    } else {
+      win.setTimeout(run, 0);
+    }
+  };
+
+  const observeElement = (element: Element | null | undefined) => {
+    if (!element || !watcher || watcher.observedElements.has(element)) return;
+    const MutationObserverCtor = win.MutationObserver;
+    if (!MutationObserverCtor) return;
+    const observer = new MutationObserverCtor(scheduleRerender);
+    observer.observe(element, {
+      attributes: true,
+      attributeFilter: ["class", "style", "lwtheme-brighttext"],
+    });
+    watcher.observers.push(observer);
+    watcher.observedElements.add(element);
+  };
+
+  observeElement(doc.documentElement);
+  observeElement(doc.body);
+  if (root && root.nodeType === 1) {
+    const element = root as Element;
+    observeElement(element.closest(".llm-panel"));
+    observeElement(element.closest(".llm-rendered-markdown"));
+  }
+
+  if (!watcher.mediaQuery) {
+    const media = win.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
+    if (media) {
+      watcher.mediaQuery = media;
+      media.addEventListener?.("change", scheduleRerender);
+    }
+  }
+}
 
 export function renderAssistantMarkdownHtmlForChat(
   text: string,
@@ -24,6 +419,8 @@ function formatCodeCopyButtonLabel(rawLang: string): string {
     jsx: "JSX",
     markdown: "Markdown",
     md: "Markdown",
+    mermaid: "Mermaid",
+    mmd: "Mermaid",
     plaintext: "text",
     py: "Python",
     python: "Python",
@@ -46,6 +443,936 @@ function formatCodeCopyButtonLabel(rawLang: string): string {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+type MutableDomGlobal = typeof globalThis & {
+  console?: Console;
+  document?: Document;
+  window?: Window;
+};
+
+type ScopedGlobalRestore = {
+  target: object;
+  key: string;
+  previousValue: unknown;
+  hadValue: boolean;
+  changed: boolean;
+};
+
+type CssRuleLike = {
+  cssText: string;
+};
+
+const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
+
+class MermaidFallbackCSSStyleSheet {
+  cssRules: CssRuleLike[] = [];
+
+  insertRule(rule: string, index = this.cssRules.length): number {
+    const safeIndex = Math.max(0, Math.min(index, this.cssRules.length));
+    this.cssRules.splice(safeIndex, 0, { cssText: rule });
+    return safeIndex;
+  }
+
+  replaceSync(cssText: string): void {
+    const trimmed = cssText.trim();
+    this.cssRules = trimmed ? [{ cssText: trimmed }] : [];
+  }
+}
+
+const fallbackMermaidCss = {
+  escape: (value: string) => String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&"),
+};
+
+const noopMermaidConsole = {
+  assert: () => undefined,
+  clear: () => undefined,
+  count: () => undefined,
+  countReset: () => undefined,
+  debug: () => undefined,
+  dir: () => undefined,
+  dirxml: () => undefined,
+  error: () => undefined,
+  group: () => undefined,
+  groupCollapsed: () => undefined,
+  groupEnd: () => undefined,
+  info: () => undefined,
+  log: () => undefined,
+  table: () => undefined,
+  time: () => undefined,
+  timeEnd: () => undefined,
+  timeLog: () => undefined,
+  trace: () => undefined,
+  warn: () => undefined,
+} as unknown as Console;
+
+const MERMAID_BROWSER_GLOBAL_KEYS = [
+  "CSSStyleSheet",
+  "DOMParser",
+  "XMLSerializer",
+  "DocumentFragment",
+  "Element",
+  "HTMLElement",
+  "HTMLTemplateElement",
+  "Node",
+  "NodeFilter",
+  "SVGElement",
+  "NamedNodeMap",
+  "MozNamedAttrMap",
+  "HTMLFormElement",
+  "getComputedStyle",
+  "navigator",
+  "performance",
+  "requestAnimationFrame",
+  "cancelAnimationFrame",
+  "setTimeout",
+  "clearTimeout",
+  "btoa",
+  "atob",
+  "TextDecoder",
+  "TextEncoder",
+  "CSS",
+  "location",
+  "screen",
+] as const;
+
+const MERMAID_BROWSER_GLOBAL_METHODS = new Set<string>([
+  "getComputedStyle",
+  "requestAnimationFrame",
+  "cancelAnimationFrame",
+  "setTimeout",
+  "clearTimeout",
+  "btoa",
+  "atob",
+]);
+
+function setScopedGlobalValue(
+  target: object,
+  key: string,
+  value: unknown,
+): boolean {
+  const record = target as Record<string, unknown>;
+  try {
+    record[key] = value;
+    if (record[key] === value) return true;
+  } catch {
+    // Some Zotero globals are accessor-backed; defineProperty is the fallback.
+  }
+
+  try {
+    Object.defineProperty(target, key, {
+      configurable: true,
+      writable: true,
+      value,
+    });
+    return record[key] === value;
+  } catch {
+    return false;
+  }
+}
+
+function restoreScopedGlobalValue(
+  restore: ScopedGlobalRestore,
+): void {
+  const { target, key, previousValue, hadValue, changed } = restore;
+  if (!changed) return;
+  if (!hadValue) {
+    Reflect.deleteProperty(target, key);
+    return;
+  }
+  setScopedGlobalValue(target, key, previousValue);
+}
+
+function addScopedGlobalValue(
+  restores: ScopedGlobalRestore[],
+  target: object,
+  key: string,
+  value: unknown,
+): void {
+  if (typeof value === "undefined") return;
+  const record = target as Record<string, unknown>;
+  const restore: ScopedGlobalRestore = {
+    target,
+    key,
+    previousValue: record[key],
+    hadValue: key in record,
+    changed: setScopedGlobalValue(target, key, value),
+  };
+  restores.push(restore);
+}
+
+function getWindowGlobalValue(win: Window, key: string): unknown {
+  const windowRecord = win as unknown as Record<string, unknown>;
+  if (key === "CSSStyleSheet") {
+    return windowRecord.CSSStyleSheet || MermaidFallbackCSSStyleSheet;
+  }
+  if (key === "CSS") {
+    return windowRecord.CSS || fallbackMermaidCss;
+  }
+
+  const value = windowRecord[key];
+  if (typeof value === "function" && MERMAID_BROWSER_GLOBAL_METHODS.has(key)) {
+    return value.bind(win);
+  }
+  return value;
+}
+
+function escapeCssStringLiteral(value: string): string {
+  return value.replace(/["\\]/g, "\\$&");
+}
+
+function createMermaidDocumentFacade(doc: Document, body: HTMLElement): Document {
+  const proxy = new Proxy(doc, {
+    get(target, property, receiver) {
+      if (property === "body") return body;
+      if (property === "querySelector") {
+        return (selector: string) => {
+          if (selector === "body") return body;
+          return body.querySelector(selector) || target.querySelector(selector);
+        };
+      }
+      if (property === "querySelectorAll") {
+        return (selector: string) => {
+          if (selector === "body") return [body];
+          const scoped = body.querySelectorAll(selector);
+          return scoped.length ? scoped : target.querySelectorAll(selector);
+        };
+      }
+      if (property === "getElementById") {
+        return (id: string) =>
+          target.getElementById(id) ||
+          body.querySelector(`[id="${escapeCssStringLiteral(id)}"]`);
+      }
+
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return proxy as Document;
+}
+
+function createMermaidRenderHost(
+  doc: Document,
+  preview: HTMLElement,
+): HTMLElement {
+  const host = doc.createElementNS(HTML_NAMESPACE, "div") as HTMLElement;
+  host.setAttribute("aria-hidden", "true");
+  host.style.position = "absolute";
+  host.style.left = "-10000px";
+  host.style.top = "0";
+  host.style.width = "800px";
+  host.style.height = "1px";
+  host.style.overflow = "hidden";
+  preview.appendChild(host);
+  return host;
+}
+
+async function withDocumentGlobals<T>(
+  doc: Document,
+  action: () => Promise<T>,
+): Promise<T> {
+  const win = doc.defaultView;
+  if (!win) return action();
+
+  const globalObject = globalThis as MutableDomGlobal;
+  const windowObject = win as Window & { console?: Console };
+  const scopedConsole =
+    globalObject.console || windowObject.console || noopMermaidConsole;
+  const restores: ScopedGlobalRestore[] = [];
+
+  addScopedGlobalValue(
+    restores,
+    globalObject,
+    "console",
+    scopedConsole,
+  );
+  addScopedGlobalValue(restores, globalObject, "document", doc);
+  addScopedGlobalValue(restores, globalObject, "window", win);
+  addScopedGlobalValue(
+    restores,
+    windowObject,
+    "console",
+    scopedConsole,
+  );
+  for (const key of MERMAID_BROWSER_GLOBAL_KEYS) {
+    addScopedGlobalValue(
+      restores,
+      globalObject,
+      key,
+      getWindowGlobalValue(win, key),
+    );
+  }
+
+  try {
+    return await action();
+  } finally {
+    for (const restore of restores.reverse()) {
+      restoreScopedGlobalValue(restore);
+    }
+  }
+}
+
+function getMermaidGlobal(win: Window): Mermaid | null {
+  return (win as unknown as { mermaid?: Mermaid }).mermaid || null;
+}
+
+function getMermaidScriptMount(doc: Document): Node | null {
+  const htmlDoc = doc as Document & {
+    head?: HTMLHeadElement | null;
+    body?: HTMLElement | null;
+  };
+  return htmlDoc.head || htmlDoc.body || doc.documentElement;
+}
+
+function getMermaidRenderer(doc: Document): Promise<Mermaid> {
+  const win = doc.defaultView;
+  if (!win) {
+    return Promise.reject(new Error("Unable to load Mermaid without a window."));
+  }
+
+  const existing = getMermaidGlobal(win);
+  if (existing) return Promise.resolve(existing);
+
+  const activeLoad = mermaidPromises.get(win);
+  if (activeLoad) return activeLoad;
+
+  const load = new Promise<Mermaid>((resolve, reject) => {
+    const mount = getMermaidScriptMount(doc);
+    if (!mount) {
+      reject(new Error("Unable to attach Mermaid loader script."));
+      return;
+    }
+
+    const script = doc.createElementNS(
+      HTML_NAMESPACE,
+      "script",
+    ) as HTMLScriptElement;
+    script.async = true;
+    script.src = MERMAID_VENDOR_SCRIPT_URL;
+    script.addEventListener(
+      "load",
+      () => {
+        const mermaid = getMermaidGlobal(win);
+        if (mermaid) {
+          resolve(mermaid);
+        } else {
+          reject(new Error("Mermaid loaded without exposing a renderer."));
+        }
+      },
+      { once: true },
+    );
+    script.addEventListener(
+      "error",
+      () => reject(new Error("Unable to load Mermaid renderer.")),
+      { once: true },
+    );
+    mount.appendChild(script);
+  }).catch((error) => {
+    mermaidPromises.delete(win);
+    throw error;
+  });
+
+  mermaidPromises.set(win, load);
+  return load;
+}
+
+function enqueueMermaidRender<T>(task: () => Promise<T>): Promise<T> {
+  const run = mermaidRenderQueue.then(task, task);
+  mermaidRenderQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+function isStillInRenderedRoot(
+  root: ParentNode,
+  element: HTMLElement,
+): boolean {
+  if (root === element) return true;
+  const contains = (root as { contains?: (node: Node) => boolean }).contains;
+  return typeof contains === "function" ? contains.call(root, element) : true;
+}
+
+function getMermaidErrorReason(error: unknown): string {
+  const raw = getMermaidErrorText(error);
+  return raw
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MERMAID_ERROR_MESSAGE_MAX_CHARS);
+}
+
+function getMermaidErrorText(error: unknown, depth = 0): string {
+  if (!error || depth > 3) return "";
+  if (error instanceof Error) return error.message || String(error);
+  if (typeof error === "string") return error;
+  if (typeof error !== "object") return String(error);
+
+  const record = error as Record<string, unknown>;
+  for (const key of ["message", "str", "reason"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+
+  const nested = getMermaidErrorText(record.error, depth + 1);
+  if (nested) return nested;
+
+  try {
+    const json = JSON.stringify(error);
+    return json && json !== "{}" ? json : "";
+  } catch {
+    return "";
+  }
+}
+
+function setMermaidPreviewError(preview: HTMLElement, error?: unknown): void {
+  const reason = getMermaidErrorReason(error);
+  preview.dataset.mermaidState = "error";
+  delete preview.dataset.mermaidZoom;
+  preview.textContent = reason
+    ? `Unable to render Mermaid diagram: ${reason}`
+    : "Unable to render Mermaid diagram.";
+  if (reason) preview.title = reason;
+}
+
+function clampMermaidZoom(scale: number): number {
+  return Math.min(MERMAID_ZOOM_MAX, Math.max(MERMAID_ZOOM_MIN, scale));
+}
+
+function getMermaidWheelZoomScale(scale: number, deltaY: number): number {
+  const boundedDelta = Math.min(
+    MERMAID_WHEEL_ZOOM_DELTA_MAX,
+    Math.max(-MERMAID_WHEEL_ZOOM_DELTA_MAX, deltaY),
+  );
+  return scale * Math.exp(-boundedDelta * MERMAID_WHEEL_ZOOM_SENSITIVITY);
+}
+
+function formatMermaidZoomLabel(scale: number): string {
+  return `${Math.round(scale * 100)}%`;
+}
+
+function createMermaidZoomButton(
+  doc: Document,
+  label: string,
+  title: string,
+): HTMLButtonElement {
+  const button = doc.createElement("button") as HTMLButtonElement;
+  button.type = "button";
+  button.className = "llm-mermaid-zoom-btn";
+  button.textContent = label;
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  return button;
+}
+
+function getMermaidViewerMount(doc: Document, fallback: HTMLElement): Node {
+  return doc.body || doc.documentElement || fallback;
+}
+
+function openMermaidViewer(
+  doc: Document,
+  svgMarkup: string,
+  fallbackMount: HTMLElement,
+  themeKey: MermaidThemeKey,
+): void {
+  const viewer = doc.createElement("div");
+  viewer.className = "llm-mermaid-viewer";
+  viewer.tabIndex = -1;
+  setMermaidThemeDataset(viewer, themeKey);
+
+  const panel = doc.createElement("div");
+  panel.className = "llm-mermaid-viewer-panel";
+
+  const toolbar = doc.createElement("div");
+  toolbar.className = "llm-mermaid-viewer-toolbar";
+  toolbar.setAttribute("role", "toolbar");
+  toolbar.setAttribute("aria-label", "Mermaid diagram viewer controls");
+
+  const zoomOut = createMermaidZoomButton(
+    doc,
+    MERMAID_VIEWER_ZOOM_OUT_ICON,
+    "Zoom out diagram",
+  );
+  const zoomIn = createMermaidZoomButton(
+    doc,
+    MERMAID_VIEWER_ZOOM_IN_ICON,
+    "Zoom in diagram",
+  );
+  const resetZoom = createMermaidZoomButton(
+    doc,
+    MERMAID_VIEWER_FIT_ICON,
+    "Fit diagram to width",
+  );
+  const close = createMermaidZoomButton(
+    doc,
+    MERMAID_VIEWER_CLOSE_ICON,
+    "Close diagram viewer",
+  );
+  close.classList.add("llm-mermaid-viewer-close");
+  toolbar.append(zoomOut, zoomIn, resetZoom, close);
+
+  const viewport = doc.createElement("div");
+  viewport.className = "llm-mermaid-viewer-viewport";
+
+  const svg = createInlineMermaidSvgElement(
+    doc,
+    svgMarkup,
+    "llm-mermaid-viewer-svg",
+  );
+  if (!svg) return;
+  viewport.appendChild(svg);
+  panel.append(toolbar, viewport);
+  viewer.appendChild(panel);
+
+  let scale = 1;
+  const applyZoom = (nextScale: number) => {
+    scale = clampMermaidZoom(nextScale);
+    const label = formatMermaidZoomLabel(scale);
+    viewer.dataset.mermaidZoom = label;
+    svg.style.width = label;
+    zoomOut.disabled = scale <= MERMAID_ZOOM_MIN;
+    zoomIn.disabled = scale >= MERMAID_ZOOM_MAX;
+  };
+  const closeViewer = () => {
+    doc.removeEventListener("keydown", handleKeyDown);
+    if (typeof viewer.remove === "function") {
+      viewer.remove();
+    } else {
+      viewer.parentNode?.removeChild(viewer);
+    }
+  };
+  function handleKeyDown(event: KeyboardEvent) {
+    if (event.key === "Escape") closeViewer();
+  }
+
+  zoomOut.addEventListener("click", () => applyZoom(scale - MERMAID_ZOOM_STEP));
+  zoomIn.addEventListener("click", () => applyZoom(scale + MERMAID_ZOOM_STEP));
+  resetZoom.addEventListener("click", () => {
+    applyZoom(1);
+    viewport.scrollTop = 0;
+    viewport.scrollLeft = 0;
+  });
+  close.addEventListener("click", closeViewer);
+  viewer.addEventListener("click", (event: MouseEvent) => {
+    if (event.target === viewer) closeViewer();
+  });
+  viewport.addEventListener("wheel", (event: WheelEvent) => {
+    if (!event.metaKey && !event.ctrlKey) return;
+    event.preventDefault();
+    applyZoom(getMermaidWheelZoomScale(scale, event.deltaY));
+  });
+  doc.addEventListener("keydown", handleKeyDown);
+
+  applyZoom(1);
+  getMermaidViewerMount(doc, fallbackMount).appendChild(viewer);
+  viewer.focus();
+}
+
+function renderMermaidImagePreview(
+  preview: HTMLElement,
+  doc: Document,
+  svgMarkup: string,
+  themeKey: MermaidThemeKey,
+  source: string,
+): void {
+  const viewport = doc.createElement("div");
+  viewport.className = "llm-mermaid-static-viewport";
+
+  const svg = createInlineMermaidSvgElement(
+    doc,
+    svgMarkup,
+    "llm-mermaid-static-svg",
+  );
+  if (!svg) {
+    setMermaidPreviewError(preview);
+    return;
+  }
+  viewport.appendChild(svg);
+
+  const openButton = createMermaidZoomButton(
+    doc,
+    MERMAID_PREVIEW_OPEN_ICON,
+    "Open Mermaid diagram viewer",
+  );
+  openButton.classList.add("llm-mermaid-open-btn");
+  openButton.addEventListener("click", () => {
+    const currentThemeKey = getMermaidThemeKey(doc, preview);
+    if (currentThemeKey !== themeKey) {
+      preview.dataset.mermaidState = "pending";
+      void renderMermaidBlocks(
+        preview.closest(".llm-rendered-markdown") || doc,
+        doc,
+      );
+      return;
+    }
+    const opened = openStandaloneMermaidWindow(doc, {
+      svgMarkup,
+      source,
+      themeKey,
+    });
+    if (!opened) openMermaidViewer(doc, svgMarkup, preview, themeKey);
+  });
+
+  delete preview.dataset.mermaidZoom;
+  preview.replaceChildren(viewport, openButton);
+}
+
+export function normalizeMermaidFlowchartLabels(source: string): string {
+  const firstContentLine = source
+    .split(/\r?\n/)
+    .find((line) => line.trim() && !line.trimStart().startsWith("%%"));
+  if (
+    !firstContentLine ||
+    !/^\s*(?:flowchart|graph)\b/i.test(firstContentLine)
+  ) {
+    return source;
+  }
+
+  return source
+    .split(/(\r?\n)/)
+    .map((part) =>
+      /\r?\n/.test(part) ? part : normalizeMermaidFlowchartLabelsInLine(part),
+    )
+    .join("");
+}
+
+function isEscapedMermaidPipe(text: string, index: number): boolean {
+  let slashCount = 0;
+  for (let prev = index - 1; prev >= 0 && text[prev] === "\\"; prev--) {
+    slashCount += 1;
+  }
+  return slashCount % 2 === 1;
+}
+
+function findNextUnescapedMermaidPipe(text: string, start: number): number {
+  for (let index = start; index < text.length; index++) {
+    if (text[index] === "|" && !isEscapedMermaidPipe(text, index)) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function maskMermaidEdgeLabels(line: string): {
+  masked: string;
+  labels: string[];
+} {
+  const labels: string[] = [];
+  let masked = "";
+  let lastIndex = 0;
+  for (let index = 0; index < line.length; index++) {
+    if (line[index] !== "|" || isEscapedMermaidPipe(line, index)) continue;
+    const closeIndex = findNextUnescapedMermaidPipe(line, index + 1);
+    if (closeIndex < 0) break;
+    const token = `__LLM_MERMAID_EDGE_LABEL_${labels.length}__`;
+    masked += line.slice(lastIndex, index) + token;
+    labels.push(line.slice(index, closeIndex + 1));
+    lastIndex = closeIndex + 1;
+    index = closeIndex;
+  }
+  return { masked: masked + line.slice(lastIndex), labels };
+}
+
+function restoreMermaidEdgeLabels(line: string, labels: string[]): string {
+  return labels.reduce(
+    (current, label, index) =>
+      current.replace(`__LLM_MERMAID_EDGE_LABEL_${index}__`, label),
+    line,
+  );
+}
+
+function normalizeMermaidFlowchartLabelsInLine(line: string): string {
+  const { masked, labels } = maskMermaidEdgeLabels(line);
+  const normalized = masked.replace(
+    /(\b[A-Za-z][\w-]*\s*)\[(?!\[)([^\]\n]*[()?:;][^\]\n]*)\]/g,
+    (match, prefix: string, label: string) => {
+      const trimmed = label.trim();
+      if (!trimmed || trimmed.startsWith('"') || trimmed.startsWith("'")) {
+        return match;
+      }
+      const escapedLabel = label.replace(/"/g, "#quot;");
+      return `${prefix}["${escapedLabel}"]`;
+    },
+  );
+  return restoreMermaidEdgeLabels(normalized, labels);
+}
+
+function getMermaidStyleFill(definition: string): string | null {
+  const match = definition.match(/(?:^|[,;])\s*fill\s*:\s*([^,;]+)/i);
+  return match?.[1]?.trim() || null;
+}
+
+function hasDarkMermaidFill(definition: string): boolean {
+  const fill = getMermaidStyleFill(definition);
+  return fill ? isDarkCssColor(fill) : false;
+}
+
+function hasMermaidStyleProperty(definition: string, property: string): boolean {
+  return new RegExp(`(?:^|[,;])\\s*${property}\\s*:`, "i").test(definition);
+}
+
+function getMermaidSubgraphIds(source: string): Set<string> {
+  const ids = new Set<string>();
+  for (const line of source.split(/\r?\n/)) {
+    const match = line.match(/^\s*subgraph\s+([A-Za-z][\w-]*)\b/);
+    if (match?.[1]) ids.add(match[1]);
+  }
+  return ids;
+}
+
+const MERMAID_LOCKED_INIT_DIRECTIVE_KEYS =
+  /\b(?:securityLevel|secure|htmlLabels|maxTextSize|maxEdges|startOnLoad|theme|themeVariables|themeCSS)\b/i;
+
+function normalizeMermaidStyleDefinitionForTheme(
+  definition: string,
+  themeKey: MermaidThemeKey,
+): string {
+  const trimmed = definition.trim().replace(/;+\s*$/, "");
+  if (!hasDarkMermaidFill(trimmed)) return definition;
+  if (themeKey === "light") {
+    return "fill:#ffffff,stroke:#e5e7eb,color:#111827";
+  }
+  if (hasMermaidStyleProperty(trimmed, "color")) return definition;
+  return `${trimmed},color:#f8fafc`;
+}
+
+export function normalizeMermaidSourceForTheme(
+  source: string,
+  themeKey: MermaidThemeKey,
+): string {
+  const subgraphIds = getMermaidSubgraphIds(source);
+  return source
+    .replace(/^\s*%%\{\s*init\s*:[^\n]*\}%%\s*\r?\n?/gim, (directive) =>
+      MERMAID_LOCKED_INIT_DIRECTIVE_KEYS.test(directive) ? "" : directive,
+    )
+    .replace(/^(\s*classDef\s+neutral\s+)([^\n]+)$/gim, (line, prefix, def) =>
+      hasDarkMermaidFill(def)
+        ? `${prefix}${
+            themeKey === "light"
+              ? "fill:#f8fafc,stroke:#cbd5e1,color:#111827;"
+              : "fill:#2f2f2f,stroke:#52525b,color:#f8fafc;"
+          }`
+        : line,
+    )
+    .replace(
+      /^(\s*style\s+([A-Za-z][\w-]*)\s+)([^\n]+)$/gim,
+      (line, prefix, id, def) => {
+        if (!subgraphIds.has(id) || !hasDarkMermaidFill(def)) return line;
+        return `${prefix}${normalizeMermaidStyleDefinitionForTheme(
+          def,
+          themeKey,
+        )}`;
+      },
+    );
+}
+
+function getMermaidSvgPolishCss(themeKey: MermaidThemeKey): string {
+  if (themeKey === "dark") {
+    return [
+      "svg{background:#151515;color:#f8fafc;color-scheme:dark;}",
+      ".cluster rect{fill:#171717!important;stroke:#3f3f46!important;}",
+      ".cluster text,.cluster span,.cluster .nodeLabel{fill:#f8fafc!important;color:#f8fafc!important;}",
+      ".edgeLabel,.edgeLabel p{background-color:#151515!important;color:#f8fafc!important;}",
+      ".flowchart-link{stroke:#d4d4d8!important;}",
+      ".marker{fill:#d4d4d8!important;stroke:#d4d4d8!important;}",
+    ].join("\n");
+  }
+  return [
+    "svg{background:#ffffff;color:#111827;color-scheme:light;}",
+    ".cluster rect{fill:#ffffff!important;stroke:#e5e7eb!important;}",
+    ".cluster text,.cluster span,.cluster .nodeLabel{fill:#111827!important;color:#111827!important;}",
+    ".edgeLabel,.edgeLabel p{background-color:#ffffff!important;color:#374151!important;}",
+    ".flowchart-link{stroke:#6b7280!important;}",
+    ".marker{fill:#6b7280!important;stroke:#6b7280!important;}",
+  ].join("\n");
+}
+
+export function polishRenderedMermaidSvg(
+  svg: string,
+  themeKey: MermaidThemeKey,
+): string {
+  const css = getMermaidSvgPolishCss(themeKey);
+  return svg.replace(/<svg\b([^>]*)>/i, (opening) => {
+    if (opening.includes("data-llm-mermaid-polished")) {
+      return opening;
+    }
+    const background = themeKey === "dark" ? "#151515" : "#ffffff";
+    const nextOpening = /\sstyle\s*=/.test(opening)
+      ? opening.replace(
+          /\sstyle\s*=\s*(["'])([\s\S]*?)\1/i,
+          ` style="$2; background: ${background};"`,
+        )
+      : opening.replace(/^<svg\b/i, `<svg style="background: ${background};"`);
+    return `${nextOpening.replace(
+      /<svg\b/i,
+      '<svg data-llm-mermaid-polished="true"',
+    )}<style>${css}</style>`;
+  });
+}
+
+function decodeMermaidSandboxDataUri(src: string): string | null {
+  const dataUri = src
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .trim();
+  const match = dataUri.match(
+    /^data:text\/html(?:;charset=[^;,]+)?(;base64)?,([\s\S]*)$/i,
+  );
+  if (!match) return null;
+
+  try {
+    const data = decodeURIComponent(match[2]);
+    if (!match[1]) return data;
+    const binary = atob(data);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+export function extractRenderedMermaidSvg(markup: string): string {
+  const trimmed = markup.trim();
+  if (/^<svg\b/i.test(trimmed)) return trimmed;
+
+  const iframeSrc = trimmed.match(
+    /<iframe\b[^>]*\bsrc\s*=\s*(["'])([\s\S]*?)\1/i,
+  )?.[2];
+  if (!iframeSrc) return trimmed;
+
+  const html = decodeMermaidSandboxDataUri(iframeSrc);
+  const svg = html?.match(/<svg\b[\s\S]*<\/svg>/i)?.[0];
+  return svg || trimmed;
+}
+
+async function renderMermaidSvg(
+  mermaid: Mermaid,
+  doc: Document,
+  source: string,
+  preview: HTMLElement,
+): Promise<string> {
+  const renderHost = createMermaidRenderHost(doc, preview);
+  const renderDoc = createMermaidDocumentFacade(doc, renderHost);
+  const renderId = `llmMermaid${Date.now()}${++mermaidRenderCounter}`;
+  try {
+    const { svg } = await withDocumentGlobals(renderDoc, () =>
+      Promise.resolve(mermaid.render(renderId, source, renderHost)),
+    );
+    return svg;
+  } finally {
+    if (typeof renderHost.remove === "function") {
+      renderHost.remove();
+    } else {
+      renderHost.parentNode?.removeChild(renderHost);
+    }
+  }
+}
+
+async function renderMermaidSvgWithRetry(
+  mermaid: Mermaid,
+  doc: Document,
+  source: string,
+  preview: HTMLElement,
+  themeKey: MermaidThemeKey,
+): Promise<string> {
+  const themedSource = normalizeMermaidSourceForTheme(source, themeKey);
+  try {
+    const svg = await renderMermaidSvg(mermaid, doc, themedSource, preview);
+    return polishRenderedMermaidSvg(extractRenderedMermaidSvg(svg), themeKey);
+  } catch (firstError) {
+    const normalizedSource = normalizeMermaidFlowchartLabels(themedSource);
+    if (normalizedSource === themedSource) throw firstError;
+    try {
+      const svg = await renderMermaidSvg(
+        mermaid,
+        doc,
+        normalizedSource,
+        preview,
+      );
+      return polishRenderedMermaidSvg(extractRenderedMermaidSvg(svg), themeKey);
+    } catch {
+      throw firstError;
+    }
+  }
+}
+
+async function renderMermaidBlocksNow(
+  root: ParentNode,
+  doc: Document,
+): Promise<void> {
+  const previews = Array.from(
+    root.querySelectorAll(".llm-mermaid-preview[data-llm-mermaid-source]"),
+  ) as HTMLElement[];
+  if (!previews.length) return;
+  ensureMermaidThemeWatcher(doc, root);
+
+  let mermaid: Mermaid;
+  try {
+    mermaid = await getMermaidRenderer(doc);
+  } catch (error) {
+    for (const preview of previews) setMermaidPreviewError(preview, error);
+    return;
+  }
+
+  for (const preview of previews) {
+    const themeKey = getMermaidThemeKey(doc, preview);
+    if (
+      preview.dataset.mermaidState === "rendered" &&
+      getRenderedMermaidTheme(preview) === themeKey
+    ) {
+      continue;
+    }
+    if (!isStillInRenderedRoot(root, preview)) continue;
+    const source = preview.dataset.llmMermaidSource || "";
+    if (!source.trim()) continue;
+
+    preview.dataset.mermaidState = "rendering";
+    setMermaidThemeDataset(preview, themeKey);
+    try {
+      await initializeMermaidRenderer(mermaid, doc, themeKey);
+      const svg = await renderMermaidSvgWithRetry(
+        mermaid,
+        doc,
+        source,
+        preview,
+        themeKey,
+      );
+      const sanitizedSvg = sanitizeRenderedMermaidSvgWithReason(
+        svg,
+        MERMAID_RENDERED_SVG_MAX_CHARS,
+      );
+      if (!sanitizedSvg.ok) {
+        if (isStillInRenderedRoot(root, preview)) {
+          setMermaidPreviewError(preview, sanitizedSvg.reason);
+        }
+        continue;
+      }
+      if (!isStillInRenderedRoot(root, preview)) continue;
+      renderMermaidImagePreview(
+        preview,
+        doc,
+        sanitizedSvg.svg,
+        themeKey,
+        source,
+      );
+      preview.dataset.mermaidState = "rendered";
+    } catch (error) {
+      if (isStillInRenderedRoot(root, preview)) {
+        setMermaidPreviewError(preview, error);
+      }
+    }
+  }
+}
+
+export function renderMermaidBlocks(
+  root: ParentNode,
+  doc: Document,
+): Promise<void> {
+  return enqueueMermaidRender(() => renderMermaidBlocksNow(root, doc));
 }
 
 export function attachRenderedCopyButtons(root: ParentNode, doc: Document): void {
@@ -103,4 +1430,5 @@ export function renderRenderedMarkdownInto(
   target.classList.add("llm-rendered-markdown");
   target.innerHTML = renderAssistantMarkdownHtmlForChat(text, options);
   attachRenderedCopyButtons(target, doc);
+  void renderMermaidBlocks(target, doc);
 }

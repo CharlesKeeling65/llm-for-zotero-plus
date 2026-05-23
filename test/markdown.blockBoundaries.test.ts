@@ -348,6 +348,39 @@ describe("renderMarkdown code block presentation", function () {
     assert.include(html, 'data-llm-copy-source="```svg&#10;');
   });
 
+  it("renders fenced Mermaid as a hydratable preview while keeping source code", function () {
+    const input = [
+      "```mermaid",
+      "flowchart TD",
+      "  A[Continuous experience] --> B[LEC population activity]",
+      "```",
+    ].join("\n");
+    const html = renderMarkdown(input);
+    assert.include(html, "llm-codeblock-shell");
+    assert.include(html, 'data-code-lang="mermaid"');
+    assert.include(html, "llm-mermaid-preview");
+    assert.include(html, 'data-mermaid-state="pending"');
+    assert.include(html, "flowchart TD");
+    assert.include(html, "Rendering diagram...");
+    assert.include(html, 'data-llm-copy-source="```mermaid&#10;');
+  });
+
+  it("recognizes Mermaid aliases and fence metadata", function () {
+    const input = [
+      "``` mmd title=\"example\"",
+      "flowchart TD",
+      '  A["One<br/>Two"] <--> B["Three"]',
+      "```",
+    ].join("\n");
+    const html = renderMarkdown(input);
+
+    assert.include(html, 'data-code-lang="mmd"');
+    assert.include(html, "llm-mermaid-preview");
+    assert.include(html, 'data-mermaid-state="pending"');
+    assert.include(html, 'A[&quot;One&lt;br/&gt;Two&quot;]');
+    assert.include(html, 'data-llm-copy-source="``` mmd title=&quot;example&quot;&#10;');
+  });
+
   it("falls back to a normal code block for unsafe SVG", function () {
     const input = [
       "```svg",
@@ -380,5 +413,14 @@ describe("renderMarkdown code block presentation", function () {
     assert.notInclude(html, "llm-svg-preview");
     assert.include(html, '<pre class="lang-svg"><code>');
     assert.include(html, "&lt;svg");
+  });
+
+  it("does not add chat Mermaid preview chrome for Zotero note rendering", function () {
+    const input = ["```mermaid", "flowchart TD", "  A --> B", "```"].join("\n");
+    const html = renderMarkdownForNote(input);
+    assert.notInclude(html, "llm-codeblock-shell");
+    assert.notInclude(html, "llm-mermaid-preview");
+    assert.include(html, '<pre class="lang-mermaid"><code>');
+    assert.include(html, "flowchart TD");
   });
 });

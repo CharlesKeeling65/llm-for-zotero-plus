@@ -102,6 +102,7 @@ const HTML_ESCAPE_MAP: Record<string, string> = {
 
 const HARD_BREAK_TOKEN = "@@LLMHARDBREAK@@";
 const SVG_PREVIEW_MAX_CHARS = 80_000;
+const MERMAID_PREVIEW_MAX_CHARS = 50_000;
 
 // =============================================================================
 // Utility Functions
@@ -182,6 +183,10 @@ function highlightLanguageForFence(lang: string): string | null {
   return language && hljs.getLanguage(language) ? language : null;
 }
 
+function isMermaidFenceLanguage(lang: string): boolean {
+  return lang === "mermaid" || lang === "mmd";
+}
+
 function renderCodeHtml(code: string, lang: string): string {
   const trimmedCode = code.trim();
   const langClass = lang ? ` class="lang-${lang}"` : "";
@@ -230,8 +235,11 @@ function hasUnsafeSvgUrl(svg: string): boolean {
   return false;
 }
 
-export function buildSafeSvgDataUri(code: string): string | null {
-  if (!code || code.length > SVG_PREVIEW_MAX_CHARS) return null;
+export function buildSafeSvgDataUri(
+  code: string,
+  maxChars = SVG_PREVIEW_MAX_CHARS,
+): string | null {
+  if (!code || code.length > maxChars) return null;
 
   let svg = trimSvgLeadingMetadata(code);
   if (!/^<svg\b[\s\S]*(?:<\/svg>|\/>)\s*$/i.test(svg)) return null;
@@ -253,6 +261,16 @@ export function buildSafeSvgDataUri(code: string): string | null {
   }
 
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function renderMermaidPreview(code: string): string {
+  const source = code.trim();
+  if (!source || source.length > MERMAID_PREVIEW_MAX_CHARS) return "";
+  return [
+    `<div class="llm-mermaid-preview" data-mermaid-state="pending" data-llm-mermaid-source="${escapeAttribute(source)}" role="img" aria-label="Mermaid diagram preview">`,
+    `<div class="llm-mermaid-status">Rendering diagram...</div>`,
+    `</div>`,
+  ].join("");
 }
 
 function hasUnescapedPipe(text: string, start: number, end: number): boolean {
@@ -493,7 +511,7 @@ function splitIntoBlocks(text: string): TextBlock[] {
   const remaining = text;
 
   // First, extract fenced code blocks (they're atomic)
-  const codeBlockRegex = /```(\w*)\n?([\s\S]*?)```/g;
+  const codeBlockRegex = /```[ \t]*([^\s`]*)[^\n`]*\n?([\s\S]*?)```/g;
   const codeBlockMatches: {
     match: string;
     index: number;
@@ -939,7 +957,7 @@ function renderBlock(block: TextBlock): string {
 /** Render fenced code block */
 function renderCodeBlock(code: string, raw: string): string {
   // Extract language from raw if present
-  const langMatch = raw.match(/^```([^\s`]*)/);
+  const langMatch = raw.match(/^```[ \t]*([^\s`]*)/);
   const lang = normalizeFenceLanguage(langMatch?.[1]);
   const label = lang || "text";
   if (zoteroNoteMode) {
@@ -952,10 +970,14 @@ function renderCodeBlock(code: string, raw: string): string {
   const svgPreview = svgPreviewUri
     ? `<div class="llm-svg-preview" aria-label="SVG preview"><img src="${escapeAttribute(svgPreviewUri)}" alt="SVG preview" /></div>`
     : "";
+  const mermaidPreview = isMermaidFenceLanguage(lang)
+    ? renderMermaidPreview(code)
+    : "";
   const html = [
     `<div class="llm-codeblock-shell" data-code-lang="${escapeAttribute(label)}">`,
     `<div class="llm-codeblock-header"><span class="llm-codeblock-lang">${escapeHtml(label)}</span></div>`,
     svgPreview,
+    mermaidPreview,
     `<div class="llm-codeblock-body">${codeHtml}</div>`,
     `</div>`,
   ].join("");

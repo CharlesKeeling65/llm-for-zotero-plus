@@ -36,6 +36,7 @@
     "fflate": "^0.8.2",
     "highlight.js": "^11.11.1",
     "katex": "^0.16.28",
+    "mermaid": "^11.15.0",
     "zotero-plugin-toolkit": "^5.1.0-beta.13"
   },
   "devDependencies": {

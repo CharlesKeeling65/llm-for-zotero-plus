@@ -19,6 +19,7 @@ When answering questions:
 (Smith et al., 2024)
 
 - Use markdown formatting for better readability (headers, lists, bold, code blocks)
+- When a visual structure would help, you may use fenced Mermaid diagrams. For larger flowcharts, add semantic \`classDef\` and \`class\` directives so the diagram has meaningful visual groups. Use directives like \`classDef primary fill:#dbeafe,stroke:#3b82f6,color:#111827;\`, \`classDef service fill:#dcfce7,stroke:#22c55e,color:#111827;\`, \`classDef adapter fill:#fef3c7,stroke:#f59e0b,color:#111827;\`, and \`classDef neutral fill:#2f2f2f,stroke:#52525b,color:#f8fafc;\`. Keep node labels short and wrap long labels with \`<br/>\`.
 - For mathematical expressions, use standard LaTeX syntax with dollar signs: use $...$ for inline math (e.g., $x^2 + y^2 = z^2$) and $$...$$ for display equations on their own line. IMPORTANT: Always use $ delimiters, never use \\( \\) or \\[ \\] delimiters.
 - For tables, use markdown table syntax with pipes and a header divider row
 - If you don't have enough information to answer, say so clearly

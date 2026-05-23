@@ -10,6 +10,17 @@ import {
   shouldDecorateInterleavedAgentTraceCitations,
   shouldSuppressAssistantResponseContextMenu,
 } from "../src/modules/contextPanel/chat";
+import {
+  extractRenderedMermaidSvg,
+  normalizeMermaidFlowchartLabels,
+  normalizeMermaidSourceForTheme,
+  polishRenderedMermaidSvg,
+  resolveMermaidThemeFromColors,
+} from "../src/modules/contextPanel/renderedMarkdown";
+import {
+  sanitizeRenderedMermaidSvg,
+  sanitizeRenderedMermaidSvgWithReason,
+} from "../src/modules/contextPanel/mermaidSvg";
 import type {
   AgentPendingAction,
   AgentRunEventRecord,
@@ -147,6 +158,271 @@ class FakeCopyableElement extends FakeElement {
 const fakeDocument = {
   createElement: (tagName: string) => new FakeElement(tagName),
 } as unknown as Document;
+
+const obsidianStyleMermaidFixture = [
+  "flowchart TB",
+  '    A["Main question<br/>Why are spatial maps and episodic memory both tied to hippocampal circuits?"]',
+  "",
+  '    B["Classic memory models<br/>content itself creates attractors"]',
+  '    C["Memory cliff<br/>too many stored patterns can cause collapse"]',
+  "",
+  '    D["Vector-HaSH<br/>separate content storage from scaffold dynamics"]',
+  "",
+  "    A --> B --> C",
+  "    A --> D",
+  "",
+  '    subgraph Scaffold["Grid-cell scaffold"]',
+  '        G["Entorhinal grid-cell modules<br/>fixed recurrent structure"]',
+  '        F["Stable scaffold states<br/>large error-correcting basins"]',
+  '        V["Low-dimensional velocity shift<br/>moves between grid states"]',
+  "        G --> F",
+  "        V --> G",
+  "    end",
+  "",
+  '    subgraph Content["Content pathway"]',
+  '        S["Cortical / EC sensory input<br/>event details"]',
+  '        H["Hippocampal state<br/>content-independent pointer or hash"]',
+  '        R["Decoded cortical content<br/>recalled memory"]',
+  "        S -- learned association --> H",
+  "        H -- learned decoding --> R",
+  "    end",
+  "",
+  "    D --> Scaffold",
+  "    D --> Content",
+  "    G <--> H",
+  "",
+  '    subgraph Store["Storage"]',
+  '        I["Item memory<br/>bind content to scaffold state"]',
+  '        SP["Spatial memory<br/>movement updates grid phase"]',
+  '        EP["Episodic memory<br/>sequence becomes transitions through scaffold states"]',
+  "    end",
+  "",
+  "    H --> I",
+  "    V --> SP",
+  "    H --> EP",
+  "    EP --> V",
+  "",
+  '    subgraph Recall["Recall"]',
+  '        Q["Partial or noisy cue"]',
+  '        QH["Approximate hippocampal pointer"]',
+  '        QG["Grid scaffold cleans up state"]',
+  '        QR["Restored pointer"]',
+  '        QC["Feedforward decode to content"]',
+  "",
+  "        Q --> QH --> QG --> QR --> QC",
+  "    end",
+  "",
+  "    F --> QG",
+  "",
+  '    subgraph Payoff["Payoff"]',
+  '        O1["Pattern completion"]',
+  '        O2["Graceful loss of detail<br/>instead of all-or-none failure"]',
+  '        O3["Long sequence recall<br/>learn next 2D transition, not next full event"]',
+  '        O4["Unified account of<br/>item, spatial, and episodic memory"]',
+  "    end",
+  "",
+  "    QC --> O1",
+  "    QC --> O2",
+  "    V --> O3",
+  "    D --> O4",
+].join("\n");
+
+describe("Mermaid rendering helpers", function () {
+  it("quotes flowchart labels with punctuation that Mermaid parses poorly", function () {
+    const source = [
+      "flowchart TD",
+      "  A[Continuous experience] --> B[LEC population activity (time cells?)]",
+      "  B --> C[Intrinsic drift: over time]",
+    ].join("\n");
+
+    const normalized = normalizeMermaidFlowchartLabels(source);
+
+    assert.include(
+      normalized,
+      'B["LEC population activity (time cells?)"]',
+    );
+    assert.include(normalized, 'C["Intrinsic drift: over time"]');
+    assert.include(normalized, "A[Continuous experience]");
+  });
+
+  it("preserves already quoted Mermaid labels", function () {
+    const source =
+      'flowchart TD\n  A["LEC population activity (time cells?)"] --> B[Done]';
+
+    assert.equal(normalizeMermaidFlowchartLabels(source), source);
+  });
+
+  it("does not rewrite Mermaid edge labels while normalizing node labels", function () {
+    const source =
+      "flowchart TD\n  A[Bad label?] -->|question [yes?]| B[Done]";
+
+    const normalized = normalizeMermaidFlowchartLabels(source);
+
+    assert.include(normalized, 'A["Bad label?"]');
+    assert.include(normalized, "-->|question [yes?]|");
+    assert.include(normalized, "B[Done]");
+  });
+
+  it("removes hardcoded dark neutral styles for light Mermaid rendering", function () {
+    const source =
+      "flowchart TD\n  A[One]\n  classDef neutral fill:#2f2f2f,stroke:#52525b,color:#f8fafc;\n  class A neutral";
+
+    const normalized = normalizeMermaidSourceForTheme(source, "light");
+
+    assert.include(
+      normalized,
+      "classDef neutral fill:#f8fafc,stroke:#cbd5e1,color:#111827;",
+    );
+  });
+
+  it("rewrites dark subgraph fills without changing normal node styles", function () {
+    const source = [
+      "flowchart TD",
+      "  subgraph R[Recall process]",
+      "    A[One]",
+      "  end",
+      "  style R fill:#151515,stroke:#333333",
+      "  style A fill:#151515,stroke:#333333",
+    ].join("\n");
+
+    const normalized = normalizeMermaidSourceForTheme(source, "light");
+
+    assert.include(
+      normalized,
+      "style R fill:#ffffff,stroke:#e5e7eb,color:#111827",
+    );
+    assert.include(normalized, "style A fill:#151515,stroke:#333333");
+  });
+
+  it("adds SVG polish rules for the expanded Mermaid viewer", function () {
+    const svg = '<svg viewBox="0 0 10 10"><g class="cluster"><rect /></g></svg>';
+
+    const polished = polishRenderedMermaidSvg(svg, "light");
+
+    assert.include(polished, 'data-llm-mermaid-polished="true"');
+    assert.include(polished, ".cluster rect{fill:#ffffff!important");
+    assert.include(polished, ".flowchart-link{stroke:#6b7280!important");
+  });
+
+  it("preserves Obsidian-style HTML label breaks in complex flowcharts", function () {
+    const normalized = normalizeMermaidSourceForTheme(
+      obsidianStyleMermaidFixture,
+      "light",
+    );
+
+    assert.include(
+      normalized,
+      'A["Main question<br/>Why are spatial maps and episodic memory both tied to hippocampal circuits?"]',
+    );
+    assert.include(normalized, "G <--> H");
+    assert.include(normalized, 'subgraph Scaffold["Grid-cell scaffold"]');
+  });
+
+  it("strips locked Mermaid init overrides while preserving safe directives", function () {
+    const source = [
+      '%%{init: {"securityLevel": "loose", "htmlLabels": false}}%%',
+      '%%{init: {"sequence": {"showSequenceNumbers": true}}}%%',
+      "flowchart TD",
+      "  A --> B",
+    ].join("\n");
+
+    const normalized = normalizeMermaidSourceForTheme(source, "light");
+
+    assert.notInclude(normalized, "securityLevel");
+    assert.notInclude(normalized, "htmlLabels");
+    assert.include(normalized, "showSequenceNumbers");
+  });
+
+  it("allows safe Mermaid foreignObject labels with HTML line breaks", function () {
+    const svg = [
+      '<svg viewBox="0 0 200 100">',
+      "<style>.edgeLabel{background:url(#safe);}</style>",
+      '<foreignObject width="180" height="60">',
+      '<div xmlns="http://www.w3.org/1999/xhtml">',
+      '<span class="nodeLabel">Main question<br>Why hippocampus?</span>',
+      "</div>",
+      "</foreignObject>",
+      '<rect filter="url(#shadow)" width="10" height="10"/>',
+      '<path marker-end="url(#arrow)" d="M0 0L10 10"/>',
+      "</svg>",
+    ].join("");
+
+    const sanitized = sanitizeRenderedMermaidSvg(svg, 10_000);
+
+    assert.isString(sanitized);
+    assert.include(sanitized || "", "<foreignObject");
+    assert.include(sanitized || "", "<br/>");
+    assert.include(sanitized || "", 'xmlns="http://www.w3.org/2000/svg"');
+  });
+
+  it("extracts SVG markup from Mermaid sandbox iframe output", function () {
+    const svg = [
+      '<svg viewBox="0 0 100 60">',
+      '<foreignObject><div xmlns="http://www.w3.org/1999/xhtml">',
+      "one<br/>two",
+      "</div></foreignObject>",
+      "</svg>",
+    ].join("");
+    const encoded = Buffer.from(`<body>${svg}</body>`, "utf8").toString(
+      "base64",
+    );
+    const sandboxOutput = `<iframe src="data:text/html;charset=UTF-8;base64,${encoded}" sandbox=""></iframe>`;
+
+    const extracted = extractRenderedMermaidSvg(sandboxOutput);
+    const sanitized = sanitizeRenderedMermaidSvg(extracted, 10_000);
+
+    assert.equal(extracted, svg);
+    assert.include(sanitized || "", "<foreignObject");
+    assert.include(sanitized || "", "<br/>");
+  });
+
+  it("rejects unsafe Mermaid SVG output", function () {
+    const unsafeFragments = [
+      '<script>alert("x")</script>',
+      '<foreignObject><div onclick="alert(1)">x</div></foreignObject>',
+      '<foreignObject><img src="x"/></foreignObject>',
+      '<path href="https://example.com/x" d="M0 0"/>',
+      "<style>@import url(https://example.com/x.css);</style>",
+      '<rect style="fill:url(https://example.com/x.svg)"/>',
+      '<rect filter="url(https://example.com/f.svg#x)"/>',
+      '<rect fill="url(data:image/svg+xml;base64,AAAA)"/>',
+      '<use href="javascript:alert(1)"/>',
+    ];
+
+    for (const fragment of unsafeFragments) {
+      assert.isNull(
+        sanitizeRenderedMermaidSvg(`<svg>${fragment}</svg>`, 10_000),
+        fragment,
+      );
+    }
+  });
+
+  it("reports why unsafe Mermaid SVG output was rejected", function () {
+    const sanitized = sanitizeRenderedMermaidSvgWithReason(
+      '<svg><foreignObject><img src="x"/></foreignObject></svg>',
+      10_000,
+    );
+
+    assert.isFalse(sanitized.ok);
+    if (!sanitized.ok) {
+      assert.include(sanitized.reason, "unsupported SVG tag: img");
+    }
+  });
+
+  it("lets visible light surfaces override stale dark theme hints", function () {
+    assert.equal(
+      resolveMermaidThemeFromColors(["rgb(245, 245, 245)"], ["#f8fafc"], true),
+      "light",
+    );
+  });
+
+  it("falls back to dark only when no visible surface color is available", function () {
+    assert.equal(
+      resolveMermaidThemeFromColors(["transparent"], [], true),
+      "dark",
+    );
+  });
+});
 
 describe("agentTrace render", function () {
   it("uses rendered Markdown HTML for streaming assistant text", function () {
