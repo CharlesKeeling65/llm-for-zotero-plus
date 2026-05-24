@@ -602,6 +602,16 @@ describe("citation page cache", function () {
     assert.include(source, "lookupCachedQuoteLocationForAttachment");
     assert.include(source, "navigateToHiddenQuoteLocation");
   });
+
+  it("does not expose internal quote ids in unavailable quote text", function () {
+    const source = readFileSync(
+      resolve(testDir, "../src/modules/contextPanel/assistantCitationLinks.ts"),
+      "utf8",
+    );
+
+    assert.include(source, 'missing.textContent = "[quote unavailable]"');
+    assert.notInclude(source, "[quote unavailable:");
+  });
 });
 
 describe("formatSourceLabelWithPage", function () {

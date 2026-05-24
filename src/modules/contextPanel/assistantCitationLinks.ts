@@ -2340,11 +2340,11 @@ function resolveQuoteCitationCandidates(
 
 function createQuoteCitationUnavailableElement(
   ownerDoc: Document,
-  quoteId: string,
+  _quoteId: string,
 ): HTMLElement {
   const missing = ownerDoc.createElement("span");
   missing.className = "llm-quote-citation-missing";
-  missing.textContent = `[quote unavailable: ${quoteId}]`;
+  missing.textContent = "[quote unavailable]";
   return missing;
 }
 

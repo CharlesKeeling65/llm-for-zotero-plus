@@ -1,8 +1,11 @@
 import { assert } from "chai";
 import {
+  buildAssistantDisplayMarkdownForRender,
+  buildRenderedMarkdownClipboardPayload,
   resolveRetryModelInputsForTests,
   type EffectiveRequestConfig,
 } from "../src/modules/contextPanel/chat";
+import { buildQuoteCitation } from "../src/modules/contextPanel/quoteCitations";
 import type {
   ChatAttachment,
   Message,
@@ -18,6 +21,67 @@ describe("chat retry model inputs", function () {
     category: "pdf",
     storedPath: "/tmp/paper.pdf",
   };
+
+  it("expands quote anchors before rendering assistant bubbles", function () {
+    const quoteCitation = buildQuoteCitation({
+      quoteText: "Rendered quote anchors should not leak.",
+      citationLabel: "(Lee, 2026)",
+      contextItemId: 42,
+    });
+    assert.isDefined(quoteCitation);
+
+    const rendered = buildAssistantDisplayMarkdownForRender({
+      text: `Evidence:\n\n[[quote:${quoteCitation!.id}]]`,
+      quoteCitations: [quoteCitation!],
+    });
+
+    assert.include(rendered, "> Rendered quote anchors");
+    assert.include(rendered, "(Lee, 2026)");
+    assert.notInclude(rendered, "[[quote:");
+  });
+
+  it("does not render unresolved quote anchors in assistant bubbles", function () {
+    const rendered = buildAssistantDisplayMarkdownForRender({
+      text: "Evidence:\n\n[[quote:Q_missing]]",
+      quoteCitations: [],
+    });
+
+    assert.include(rendered, "[quote unavailable]");
+    assert.notInclude(rendered, "[[quote:");
+  });
+
+  it("expands quote anchors in rendered clipboard payloads", function () {
+    const quoteCitation = buildQuoteCitation({
+      quoteText: "Clipboard quote anchors should not leak.",
+      citationLabel: "(Lee, 2026)",
+      contextItemId: 42,
+    });
+    assert.isDefined(quoteCitation);
+
+    const payload = buildRenderedMarkdownClipboardPayload(
+      `Evidence:\n\n[[quote:${quoteCitation!.id}]]`,
+      [quoteCitation!],
+    );
+
+    assert.isNotNull(payload);
+    assert.include(payload!.plainText, "> Clipboard quote anchors");
+    assert.include(payload!.plainText, "(Lee, 2026)");
+    assert.notInclude(payload!.plainText, "[[quote:");
+    assert.include(payload!.renderedHtml, "<blockquote>");
+    assert.notInclude(payload!.renderedHtml, "[[quote:");
+  });
+
+  it("does not leak unresolved quote anchors in clipboard payloads", function () {
+    const payload = buildRenderedMarkdownClipboardPayload(
+      "Evidence:\n\n[[quote:Q_missing]]",
+      [],
+    );
+
+    assert.isNotNull(payload);
+    assert.include(payload!.plainText, "[quote unavailable]");
+    assert.notInclude(payload!.plainText, "[[quote:");
+    assert.notInclude(payload!.renderedHtml, "[[quote:");
+  });
 
   const visionConfig: EffectiveRequestConfig = {
     model: "third-party-vision",

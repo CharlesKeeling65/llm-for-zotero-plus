@@ -1,6 +1,7 @@
 import { assert } from "chai";
 import {
   buildAgentTraceDisplayItems,
+  buildAgentTraceMarkdownForRender,
   getPendingActionButtonLayout,
   renderAgentTrace,
 } from "../src/modules/contextPanel/agentTrace/render";
@@ -25,6 +26,7 @@ import type {
   AgentPendingAction,
   AgentRunEventRecord,
 } from "../src/agent/types";
+import { buildQuoteCitation } from "../src/modules/contextPanel/quoteCitations";
 
 class FakeClassList {
   private readonly classes = new Set<string>();
@@ -425,6 +427,34 @@ describe("Mermaid rendering helpers", function () {
 });
 
 describe("agentTrace render", function () {
+  it("expands quote anchors before rendering agent trace markdown", function () {
+    const quoteCitation = buildQuoteCitation({
+      quoteText: "Interleaved trace quote anchors should not leak.",
+      citationLabel: "(Chandra et al., 2025)",
+      contextItemId: 51,
+    });
+    assert.isDefined(quoteCitation);
+
+    const rendered = buildAgentTraceMarkdownForRender(
+      `Evidence:\n\n[[quote:${quoteCitation!.id}]]`,
+      { quoteCitations: [quoteCitation!] },
+    );
+
+    assert.include(rendered, "> Interleaved trace quote anchors");
+    assert.include(rendered, "(Chandra et al., 2025)");
+    assert.notInclude(rendered, "[[quote:");
+  });
+
+  it("does not render unresolved quote anchors in agent trace markdown", function () {
+    const rendered = buildAgentTraceMarkdownForRender(
+      "Evidence:\n\n[[quote:Q_missing]]",
+      { quoteCitations: [] },
+    );
+
+    assert.include(rendered, "[quote unavailable]");
+    assert.notInclude(rendered, "[[quote:");
+  });
+
   it("uses rendered Markdown HTML for streaming assistant text", function () {
     const html = renderAssistantMarkdownHtmlForChat(
       [

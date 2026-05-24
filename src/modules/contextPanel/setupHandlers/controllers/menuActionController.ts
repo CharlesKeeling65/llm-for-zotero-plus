@@ -115,7 +115,11 @@ export function attachMenuActionController(
       const target = deps.getResponseMenuTarget();
       deps.closeResponseMenu();
       if (!target) return;
-      await copyRenderedMarkdownToClipboard(deps.body, target.contentText);
+      await copyRenderedMarkdownToClipboard(
+        deps.body,
+        target.contentText,
+        target.quoteCitations,
+      );
       setStatusMessage(t("Copied response"), "ready");
     });
     deps.responseMenuNoteBtn.addEventListener("click", async (e: Event) => {

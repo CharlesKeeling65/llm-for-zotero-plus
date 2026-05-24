@@ -225,6 +225,7 @@ import {
   buildSelectedTextQuoteCitations,
   extractQuoteCitationsFromToolContent,
   mergeQuoteCitations,
+  replaceQuoteCitationPlaceholdersForMarkdown,
 } from "./quoteCitations";
 import { getAgentApi, getCoreAgentRuntime } from "../../agent/index";
 import { getClaudeReasoningModePref } from "../../claudeCode/prefs";
@@ -1507,19 +1508,30 @@ export async function copyTextToClipboard(
   }
 }
 
+export function buildAssistantDisplayMarkdownForRender(
+  message: Pick<Message, "text" | "quoteCitations">,
+): string {
+  return replaceQuoteCitationPlaceholdersForMarkdown(
+    sanitizeText(message.text || ""),
+    message.quoteCitations,
+    { unresolved: "unavailable" },
+  );
+}
+
 /**
- * Render markdown text through renderMarkdownForNote and copy the result
- * to the clipboard as both text/html and text/plain.  When pasted into a
- * Zotero note, the HTML version is used — producing the same rendering as
- * "Save as note".  When pasted into a plain-text editor, the raw markdown
- * is used — matching "Copy chat as md".
+ * Prepare both clipboard forms from markdown. Quote anchors are expanded before
+ * rendering so structural citation tokens never leak into copied responses.
  */
-export async function copyRenderedMarkdownToClipboard(
-  body: Element,
+export function buildRenderedMarkdownClipboardPayload(
   markdownText: string,
-): Promise<void> {
-  const safeText = sanitizeText(markdownText).trim();
-  if (!safeText) return;
+  quoteCitations?: QuoteCitation[],
+): { plainText: string; renderedHtml: string } | null {
+  const safeText = replaceQuoteCitationPlaceholdersForMarkdown(
+    sanitizeText(markdownText).trim(),
+    quoteCitations,
+    { unresolved: "unavailable" },
+  );
+  if (!safeText) return null;
 
   let renderedHtml = "";
   try {
@@ -1527,6 +1539,27 @@ export async function copyRenderedMarkdownToClipboard(
   } catch (err) {
     ztoolkit.log("LLM: Copy markdown render error:", err);
   }
+  return { plainText: safeText, renderedHtml };
+}
+
+/**
+ * Render markdown text through renderMarkdownForNote and copy the result
+ * to the clipboard as both text/html and text/plain.  When pasted into a
+ * Zotero note, the HTML version is used — producing the same rendering as
+ * "Save as note".  When pasted into a plain-text editor, the expanded markdown
+ * is used — matching "Copy chat as md" without internal quote anchors.
+ */
+export async function copyRenderedMarkdownToClipboard(
+  body: Element,
+  markdownText: string,
+  quoteCitations?: QuoteCitation[],
+): Promise<void> {
+  const payload = buildRenderedMarkdownClipboardPayload(
+    markdownText,
+    quoteCitations,
+  );
+  if (!payload) return;
+  const { plainText: safeText, renderedHtml } = payload;
 
   // Try rich clipboard (HTML + plain) first so that paste into Zotero
   // notes gives properly rendered content with math.
@@ -7863,7 +7896,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
             })
           : null;
       if (hasAnswerText && !agentUsesInterleavedText) {
-        const safeText = sanitizeText(msg.text);
+        const safeText = buildAssistantDisplayMarkdownForRender(msg);
         if (msg.streaming) bubble.classList.add("streaming");
         if (msg.compactMarker) {
           renderCompactMarkerInto(
@@ -8001,11 +8034,15 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           label.textContent = "Summary";
           const text = doc.createElement("div") as HTMLDivElement;
           text.className = "llm-agent-reasoning-text";
+          const reasoningSummaryText = buildAssistantDisplayMarkdownForRender({
+            text: msg.reasoningSummary || "",
+            quoteCitations: msg.quoteCitations,
+          });
           try {
-            renderRenderedMarkdownInto(text, msg.reasoningSummary || "", doc);
+            renderRenderedMarkdownInto(text, reasoningSummaryText, doc);
           } catch (err) {
             ztoolkit.log("LLM reasoning render error:", err);
-            text.textContent = msg.reasoningSummary || "";
+            text.textContent = reasoningSummaryText;
           }
           summaryBlock.append(label, text);
           bodyWrap.appendChild(summaryBlock);
@@ -8019,11 +8056,15 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           label.textContent = "Details";
           const text = doc.createElement("div") as HTMLDivElement;
           text.className = "llm-agent-reasoning-text";
+          const reasoningDetailsText = buildAssistantDisplayMarkdownForRender({
+            text: msg.reasoningDetails || "",
+            quoteCitations: msg.quoteCitations,
+          });
           try {
-            renderRenderedMarkdownInto(text, msg.reasoningDetails || "", doc);
+            renderRenderedMarkdownInto(text, reasoningDetailsText, doc);
           } catch (err) {
             ztoolkit.log("LLM reasoning render error:", err);
-            text.textContent = msg.reasoningDetails || "";
+            text.textContent = reasoningDetailsText;
           }
           detailsBlock.append(label, text);
           bodyWrap.appendChild(detailsBlock);

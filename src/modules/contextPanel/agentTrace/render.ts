@@ -11,6 +11,7 @@ import type {
 import type { Message, PaperContextRef } from "../types";
 import { sanitizeText, getSelectedTextSourceIcon } from "../textUtils";
 import { renderRenderedMarkdownInto } from "../renderedMarkdown";
+import { replaceQuoteCitationPlaceholdersForMarkdown } from "../quoteCitations";
 import { toFileUrl } from "../../../utils/pathFileUrl";
 import {
   normalizePaperContextRefs,
@@ -62,6 +63,17 @@ type RenderAgentTraceParams = {
   onTraceMissing?: () => void;
   onInterleavedText?: () => void;
 };
+
+export function buildAgentTraceMarkdownForRender(
+  text: string,
+  message?: Pick<Message, "quoteCitations"> | null,
+): string {
+  return replaceQuoteCitationPlaceholdersForMarkdown(
+    sanitizeText(text || ""),
+    message?.quoteCitations,
+    { unresolved: "unavailable" },
+  );
+}
 
 function normalizeSelectedTexts(
   selectedTexts: unknown,
@@ -3024,10 +3036,11 @@ export function renderAgentTrace({
     if (itemEntry.type === "inline_text") {
       const inlineEl = doc.createElement("div");
       inlineEl.className = "llm-agent-inline-text";
+      const inlineText = buildAgentTraceMarkdownForRender(itemEntry.text, message);
       try {
-        renderRenderedMarkdownInto(inlineEl, itemEntry.text, doc);
+        renderRenderedMarkdownInto(inlineEl, inlineText, doc);
       } catch {
-        inlineEl.textContent = itemEntry.text;
+        inlineEl.textContent = inlineText;
       }
       list.appendChild(inlineEl);
       continue;
@@ -3038,10 +3051,14 @@ export function renderAgentTrace({
       messageEl.className = `llm-agent-process-message llm-agent-process-message-${itemEntry.tone}`;
       if (itemEntry.markdown) {
         messageEl.classList.add("llm-agent-process-message-markdown");
+        const markdownText = buildAgentTraceMarkdownForRender(
+          itemEntry.text,
+          message,
+        );
         try {
-          renderRenderedMarkdownInto(messageEl, itemEntry.text, doc);
+          renderRenderedMarkdownInto(messageEl, markdownText, doc);
         } catch {
-          messageEl.textContent = itemEntry.text;
+          messageEl.textContent = markdownText;
         }
       } else {
         messageEl.textContent = itemEntry.text;

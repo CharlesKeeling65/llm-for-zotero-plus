@@ -123,6 +123,27 @@ describe("notes citation page export", function () {
       'href="zotero://open-pdf/library/items/ATTACH23?page=23"',
     );
     assert.notInclude(result.noteHtml, "[[quote:");
+    assert.include(result.noteText, "> Structured quote anchors");
+    assert.include(result.noteText, "(Whittington et al., 2020)");
+    assert.notInclude(result.noteText, "[[quote:");
+  });
+
+  it("does not export unresolved quote anchors into chat-history text", function () {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        text: "Evidence:\n\n[[quote:Q_missing]]",
+        timestamp: 2,
+        modelName: "Claude",
+        quoteCitations: [],
+      },
+    ];
+
+    const result = buildChatHistoryNotePayload(messages);
+
+    assert.include(result.noteText, "[quote unavailable]");
+    assert.notInclude(result.noteText, "[[quote:");
+    assert.notInclude(result.noteHtml, "[[quote:");
   });
 
   it("does not export model-written blockquote pages without a verified cache", function () {

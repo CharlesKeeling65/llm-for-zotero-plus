@@ -158,9 +158,25 @@ export function formatQuoteCitationMarkdown(
   return `${quoteLines}\n\n${citation.citationLabel}`;
 }
 
+export type UnresolvedQuoteCitationPlaceholderMode =
+  | "preserve"
+  | "unavailable"
+  | "omit";
+
+function formatUnresolvedQuoteCitationPlaceholder(
+  mode: UnresolvedQuoteCitationPlaceholderMode,
+): string {
+  if (mode === "unavailable") return "[quote unavailable]";
+  if (mode === "omit") return "";
+  return "";
+}
+
 export function replaceQuoteCitationPlaceholdersForMarkdown(
   markdown: string,
   quoteCitations: QuoteCitation[] | undefined | null,
+  options: {
+    unresolved?: UnresolvedQuoteCitationPlaceholderMode;
+  } = {},
 ): string {
   if (!markdown || !QUOTE_CITATION_PATTERN.test(markdown)) {
     QUOTE_CITATION_PATTERN.lastIndex = 0;
@@ -175,7 +191,11 @@ export function replaceQuoteCitationPlaceholdersForMarkdown(
   );
   return markdown.replace(QUOTE_CITATION_PATTERN, (token, id: string) => {
     const citation = byId.get(id);
-    return citation ? formatQuoteCitationMarkdown(citation) : token;
+    if (citation) return formatQuoteCitationMarkdown(citation);
+    const unresolved = options.unresolved || "preserve";
+    return unresolved === "preserve"
+      ? token
+      : formatUnresolvedQuoteCitationPlaceholder(unresolved);
   });
 }
 

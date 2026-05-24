@@ -386,6 +386,7 @@ function buildAssistantNoteHtml(
   const response = replaceQuoteCitationPlaceholdersForMarkdown(
     sanitizeText(stripTrailingPluginFooter(contentText || "")).trim(),
     quoteCitations,
+    { unresolved: "unavailable" },
   );
   const source = modelName.trim() || "unknown";
   const timestamp = getCurrentLocalTimestamp();
@@ -401,6 +402,7 @@ function renderChatMessageHtmlForNote(
   const safeText = replaceQuoteCitationPlaceholdersForMarkdown(
     sanitizeText(text || "").trim(),
     quoteCitations,
+    { unresolved: "unavailable" },
   );
   if (!safeText) return "";
   // Reuse the same markdown-to-note rendering path as single-response save.
@@ -715,11 +717,19 @@ export function buildChatHistoryNotePayload(messages: Message[]): {
         lastUserPaperContexts,
       );
     }
+    const exportedText =
+      msg.role === "assistant"
+        ? replaceQuoteCitationPlaceholdersForMarkdown(
+            textWithContext,
+            msg.quoteCitations,
+            { unresolved: "unavailable" },
+          )
+        : textWithContext;
     if (msg.role === "user") {
       lastUserPaperContexts = getMessageCitationPaperContexts(msg);
     }
     if (!rendered && !screenshotHtml && !fileHtml) continue;
-    textLines.push(`${speaker}: ${textWithContext}`);
+    textLines.push(`${speaker}: ${exportedText}`);
     const renderedBlock = rendered ? `<div>${rendered}</div>` : "";
     htmlBlocks.push(
       `<p><strong>${escapeNoteHtml(speaker)}:</strong></p>${renderedBlock}${screenshotHtml}${fileHtml}`,

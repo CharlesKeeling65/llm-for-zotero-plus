@@ -66,6 +66,22 @@ describe("quoteCitations", function () {
     assert.notInclude(rendered, "[[quote:");
   });
 
+  it("can suppress unresolved placeholders on external text surfaces", function () {
+    const preserved = replaceQuoteCitationPlaceholdersForMarkdown(
+      "Evidence: [[quote:Q_missing]]",
+      [],
+    );
+    const suppressed = replaceQuoteCitationPlaceholdersForMarkdown(
+      "Evidence: [[quote:Q_missing]]",
+      [],
+      { unresolved: "unavailable" },
+    );
+
+    assert.include(preserved, "[[quote:Q_missing]]");
+    assert.equal(suppressed, "Evidence: [quote unavailable]");
+    assert.notInclude(suppressed, "[[quote:");
+  });
+
   it("extracts quote citations from nested tool content and JSON text payloads", function () {
     const citation = buildQuoteCitation({
       quoteText: "Tool quote.",
