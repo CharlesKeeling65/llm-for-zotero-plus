@@ -86,4 +86,64 @@ describe("RetrievalService", function () {
     assert.equal(results[1].score, captionCandidate.evidenceScore);
     assert.isAbove(results[0].score, results[1].score);
   });
+
+  it("passes query variants through the shared paper retrieval query plan", async function () {
+    const paper: PaperContextRef = {
+      itemId: 2,
+      contextItemId: 22,
+      title: "Variant Paper",
+      firstCreator: "Chen",
+      year: "2026",
+    };
+    const pdfContext = {
+      title: "Mock Paper",
+      chunks: [],
+      chunkMeta: [],
+      chunkStats: [],
+      docFreq: {},
+      avgChunkLength: 0,
+      fullLength: 0,
+    } as PdfContext;
+    const retrieval = new RetrievalService(
+      {
+        ensurePaperContext: async () => pdfContext,
+      } as any,
+      async (_paperContext, _pdfContext, _question, _apiOverrides, options) => {
+        assert.include(options?.queryPlan?.variants || [], "calcium imaging");
+        assert.include(options?.queryPlan?.lexicalTerms || [], "calcium");
+        assert.include(
+          options?.queryPlan?.semanticQuery || "",
+          "calcium imaging",
+        );
+        return [
+          {
+            paperKey: "2:22",
+            itemId: 2,
+            contextItemId: 22,
+            title: "Variant Paper",
+            chunkIndex: 0,
+            chunkText: "The paper uses calcium imaging.",
+            estimatedTokens: 8,
+            bm25Score: 1,
+            embeddingScore: 0,
+            hybridScore: 1,
+            evidenceScore: 1,
+            matchedQueryVariant: "calcium imaging",
+            matchedQueryVariants: ["calcium imaging"],
+          },
+        ];
+      },
+    );
+
+    const results = await retrieval.retrieveEvidence({
+      papers: [paper],
+      question: "钙成像",
+      queryVariants: ["calcium imaging"],
+      topK: 1,
+      perPaperTopK: 1,
+    });
+
+    assert.lengthOf(results, 1);
+    assert.equal(results[0].text, "The paper uses calcium imaging.");
+  });
 });

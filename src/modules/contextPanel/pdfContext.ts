@@ -22,6 +22,7 @@ import {
   tokenizeRetrievalQuery,
   tokenizeRetrievalText,
 } from "./retrievalTokenizer";
+import type { RetrievalQueryPlan } from "./retrievalQueryPlan";
 import {
   buildGenericSourceQuoteCitationGuidance,
   buildPaperQuoteCitationGuidance,
@@ -1454,6 +1455,36 @@ function tokenizeQuery(query: string): string[] {
   return tokenizeRetrievalQuery(query);
 }
 
+function queryPlanTerms(
+  question: string,
+  queryPlan: RetrievalQueryPlan | undefined,
+): string[] {
+  return queryPlan?.lexicalTerms?.length
+    ? queryPlan.lexicalTerms
+    : tokenizeQuery(question);
+}
+
+function matchedQueryVariantsForText(
+  text: string,
+  queryPlan: RetrievalQueryPlan | undefined,
+): string[] {
+  if (!queryPlan?.effectiveQueries.length || !text.trim()) return [];
+  const haystack = text.toLocaleLowerCase();
+  const matches: string[] = [];
+  for (const query of queryPlan.effectiveQueries) {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    if (normalizedQuery.length > 2 && haystack.includes(normalizedQuery)) {
+      matches.push(query);
+      continue;
+    }
+    const terms = tokenizeQuery(query);
+    if (terms.length && terms.some((term) => haystack.includes(term))) {
+      matches.push(query);
+    }
+  }
+  return Array.from(new Set(matches));
+}
+
 function scoreChunkBM25(
   chunk: ChunkStat,
   terms: string[],
@@ -2007,12 +2038,20 @@ export async function buildPaperRetrievalCandidates(
     mode?: "general" | "evidence";
     /** Pre-computed query embedding to avoid redundant API calls in multi-paper loops. */
     precomputedQueryEmbedding?: number[];
+    /** Disable semantic embeddings even when the global semantic-search preference is enabled. */
+    disableEmbeddings?: boolean;
+    /** Shared retrieval query plan with bounded variants and lexical terms. */
+    queryPlan?: RetrievalQueryPlan;
   },
   compatibilityOptions?: {
     topK?: number;
     mode?: "general" | "evidence";
     /** Pre-computed query embedding to avoid redundant API calls in multi-paper loops. */
     precomputedQueryEmbedding?: number[];
+    /** Disable semantic embeddings even when the global semantic-search preference is enabled. */
+    disableEmbeddings?: boolean;
+    /** Shared retrieval query plan with bounded variants and lexical terms. */
+    queryPlan?: RetrievalQueryPlan;
   },
 ): Promise<PaperContextCandidate[]> {
   if (!pdfContext) return [];
@@ -2020,7 +2059,8 @@ export async function buildPaperRetrievalCandidates(
     compatibilityOptions ||
     ("topK" in (apiOverridesOrOptions || {}) ||
     "mode" in (apiOverridesOrOptions || {}) ||
-    "precomputedQueryEmbedding" in (apiOverridesOrOptions || {})
+    "precomputedQueryEmbedding" in (apiOverridesOrOptions || {}) ||
+    "queryPlan" in (apiOverridesOrOptions || {})
       ? apiOverridesOrOptions
       : undefined);
   const { chunks, chunkStats, docFreq, avgChunkLength } = pdfContext;
@@ -2035,7 +2075,9 @@ export async function buildPaperRetrievalCandidates(
     ? Math.max(1, Math.floor(options?.topK as number))
     : RETRIEVAL_TOP_K_PER_PAPER;
 
-  const terms = tokenizeQuery(question);
+  const queryPlan = options?.queryPlan;
+  const terms = queryPlanTerms(question, queryPlan);
+  const semanticQuery = queryPlan?.semanticQuery || question;
   const bm25Scores = chunkStats.map((chunk) =>
     scoreChunkBM25(chunk, terms, docFreq, chunks.length, avgChunkLength || 1),
   );
@@ -2052,7 +2094,11 @@ export async function buildPaperRetrievalCandidates(
   // Compute embedding ranks if available
   let embedRank: number[] | null = null;
   let rawEmbeddingScores: number[] | null = null;
-  if (question.trim() && shouldTryEmbeddings()) {
+  if (
+    semanticQuery.trim() &&
+    !options?.disableEmbeddings &&
+    shouldTryEmbeddings()
+  ) {
     const embeddingsReady = await ensureEmbeddings(
       pdfContext,
       paperContext.contextItemId,
@@ -2061,7 +2107,7 @@ export async function buildPaperRetrievalCandidates(
       try {
         const queryEmbedding =
           options?.precomputedQueryEmbedding ||
-          (await callEmbeddings([question]))[0] ||
+          (await callEmbeddings([semanticQuery]))[0] ||
           [];
         if (queryEmbedding.length) {
           rawEmbeddingScores = pdfContext.embeddings.map((vec) =>
@@ -2094,6 +2140,10 @@ export async function buildPaperRetrievalCandidates(
       ? 1 / (RRF_K + bm25Rank[idx]) + 1 / (RRF_K + embedRank[idx])
       : 1 / (RRF_K + bm25Rank[idx]);
     const meta = chunkMeta[chunk.index];
+    const matchedQueryVariants = matchedQueryVariantsForText(
+      chunks[chunk.index],
+      queryPlan,
+    );
     const candidate: PaperContextCandidate = {
       paperKey: buildPaperKey(paperContext),
       itemId: paperContext.itemId,
@@ -2113,6 +2163,10 @@ export async function buildPaperRetrievalCandidates(
       embeddingScore,
       hybridScore,
       evidenceScore: hybridScore,
+      matchedQueryVariant: matchedQueryVariants[0],
+      matchedQueryVariants: matchedQueryVariants.length
+        ? matchedQueryVariants
+        : undefined,
     };
     const evidenceScore =
       retrievalMode === "evidence"

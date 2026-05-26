@@ -1,9 +1,11 @@
 import { AgentToolRegistry } from "./registry";
 import { PdfService } from "../services/pdfService";
 import { RetrievalService } from "../services/retrievalService";
+import { LibraryRetrieveService } from "../services/libraryRetrieveService";
 import { ZoteroGateway } from "../services/zoteroGateway";
 import { createQueryLibraryTool } from "./read/queryLibrary";
 import { createReadLibraryTool } from "./read/readLibrary";
+import { createLibraryRetrieveTool } from "./read/libraryRetrieve";
 import { createPaperReadTool } from "./read/paperRead";
 import { createReadPaperTool } from "./read/readPaper";
 import { createSearchPaperTool } from "./read/searchPaper";
@@ -160,7 +162,8 @@ function createLibraryUpdateTool(tools: {
       }
       const delegateArgs = { ...args };
       delete delegateArgs.kind;
-      if (args.kind === "tags") return ok({ tool: tools.applyTags, args: delegateArgs });
+      if (args.kind === "tags")
+        return ok({ tool: tools.applyTags, args: delegateArgs });
       if (args.kind === "collections") {
         return ok({ tool: tools.moveToCollection, args: delegateArgs });
       }
@@ -272,6 +275,9 @@ export function createBuiltInToolRegistry(
   const registry = new AgentToolRegistry();
   const queryLibrary = createQueryLibraryTool(deps.zoteroGateway);
   const readLibrary = createReadLibraryTool(deps.zoteroGateway);
+  const libraryRetrieve = createLibraryRetrieveTool(
+    new LibraryRetrieveService(deps.zoteroGateway, deps.pdfService),
+  );
   const readPaper = createReadPaperTool(deps.pdfService, deps.zoteroGateway);
   const searchPaper = createSearchPaperTool(
     deps.retrievalService,
@@ -321,6 +327,7 @@ export function createBuiltInToolRegistry(
         "Read structured Zotero item state: metadata, notes, annotations, attachments, collection membership, and note content. Use paper_read for primary PDF/paper content. For explicit child-attachment requests, enumerate attachments then use read_attachment for Markdown/HTML/TXT/DOCX.",
     }),
   );
+  registry.register(libraryRetrieve);
   registry.register(
     createPaperReadTool(
       deps.pdfService,

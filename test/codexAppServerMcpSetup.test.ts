@@ -133,7 +133,10 @@ describe("Codex app-server MCP setup", function () {
     assert.deepEqual(value?.enabled_tools, getZoteroMcpAllowedToolNames());
     assert.include(value?.enabled_tools as string[], "note_write");
     assert.include(value?.enabled_tools as string[], "run_command");
-    assert.notInclude(value?.enabled_tools as string[], "zotero_confirm_action");
+    assert.notInclude(
+      value?.enabled_tools as string[],
+      "zotero_confirm_action",
+    );
     const toolApprovals = value?.tools as Record<
       string,
       { approval_mode?: string }
@@ -199,7 +202,9 @@ describe("Codex app-server MCP setup", function () {
       (call) => call.method === "config/value/write",
     );
     assert.deepEqual(
-      writeCalls.map((call) => Object.keys(call.params as Record<string, unknown>)[0]),
+      writeCalls.map(
+        (call) => Object.keys(call.params as Record<string, unknown>)[0],
+      ),
       ["keyPath", "keyPath", "keyPath", "key"],
     );
     assert.equal(status.configured, true);
@@ -253,14 +258,16 @@ describe("Codex app-server MCP setup", function () {
     const registry = new AgentToolRegistry();
     registry.register(createReadTool("library_search"));
     registry.register(createReadTool("library_read"));
+    registry.register(createReadTool("library_retrieve"));
     registry.register(createReadTool("paper_read"));
     registerMcpServer({
       toolRegistry: registry,
       zoteroGateway: {} as never,
     });
-    (globalThis as typeof globalThis & { fetch: typeof fetch }).fetch = (async () => {
-      throw new Error("preflight should not self-fetch Zotero's HTTP server");
-    }) as typeof fetch;
+    (globalThis as typeof globalThis & { fetch: typeof fetch }).fetch =
+      (async () => {
+        throw new Error("preflight should not self-fetch Zotero's HTTP server");
+      }) as typeof fetch;
 
     const status = await preflightCodexZoteroMcpServer({
       scopeToken: "scope-direct",
@@ -271,6 +278,7 @@ describe("Codex app-server MCP setup", function () {
     assert.deepEqual(status.toolNames, [
       "library_search",
       "library_read",
+      "library_retrieve",
       "paper_read",
     ]);
   });
@@ -308,6 +316,7 @@ describe("Codex app-server MCP setup", function () {
               tools: [
                 { name: "library_search" },
                 { name: "library_read" },
+                { name: "library_retrieve" },
                 { name: "paper_read" },
               ],
             },
@@ -330,11 +339,13 @@ describe("Codex app-server MCP setup", function () {
     assert.deepEqual(first.toolNames, [
       "library_search",
       "library_read",
+      "library_retrieve",
       "paper_read",
     ]);
     assert.deepEqual(second.toolNames, [
       "library_search",
       "library_read",
+      "library_retrieve",
       "paper_read",
     ]);
     assert.deepEqual(methods, [
@@ -388,8 +399,9 @@ describe("Codex app-server MCP setup", function () {
     assert.include(servers[scoped.serverName].enabled_tools, "library_read");
     assert.include(
       servers[scoped.serverName].enabled_tools,
-      "note_write",
+      "library_retrieve",
     );
+    assert.include(servers[scoped.serverName].enabled_tools, "note_write");
     assert.equal(
       servers[scoped.serverName].tools.note_write.approval_mode,
       "approve",

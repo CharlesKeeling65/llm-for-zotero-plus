@@ -227,6 +227,37 @@ describe("agent coverage ledger", function () {
       request: req,
       timestamp: 5,
     });
+    const libraryRetrieveEntries = buildAgentCoverageEntriesForActivity({
+      toolName: "library_retrieve",
+      input: { query: "stable readout", depth: "evidence" },
+      content: {
+        depth: "evidence",
+        methodsUsed: ["metadata", "exact"],
+        resourcePool: {
+          type: "collection",
+          name: "Methods",
+          scope: { libraryID: 1, collectionIds: [3] },
+          totalItems: 12,
+          queryCoverage: {
+            metadataInspected: 12,
+            fullTextSearched: 2,
+            snippetsReturned: 1,
+          },
+        },
+        snippets: [
+          {
+            itemId: "1",
+            contextItemId: "10",
+            title: "Coverage Paper",
+            sourceKind: "pdf_text",
+            matchMethod: "exact",
+            snippet: "The method used a stable readout.",
+          },
+        ],
+      },
+      request: req,
+      timestamp: 6,
+    });
 
     assert.isTrue(
       libraryEntries.some(
@@ -258,6 +289,22 @@ describe("agent coverage ledger", function () {
       granularity: "attachment",
       coverage: "targeted",
     });
+    assert.isTrue(
+      libraryRetrieveEntries.some(
+        (entry) =>
+          entry.resourceKey === "collection:1:3" &&
+          entry.sourceKind === "zotero_metadata" &&
+          entry.granularity === "scope",
+      ),
+    );
+    assert.isTrue(
+      libraryRetrieveEntries.some(
+        (entry) =>
+          entry.resourceKey === "paper:1:10" &&
+          entry.sourceKind === "zotero_fulltext" &&
+          entry.granularity === "passage",
+      ),
+    );
   });
 
   it("persists, hydrates, renders, and clears conversation coverage", async function () {

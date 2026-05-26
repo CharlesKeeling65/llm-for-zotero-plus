@@ -85,6 +85,7 @@ describe("semantic tool surface", function () {
       "library_delete",
       "library_import",
       "library_read",
+      "library_retrieve",
       "library_search",
       "library_update",
       "literature_search",
@@ -416,7 +417,10 @@ describe("semantic tool surface", function () {
       assert.equal(result?.backend, "zotero_metadata");
       assert.include(String(result?.text || ""), "Abstract fallback");
       assert.include(String(result?.warning || ""), "full.md disappeared");
-      assert.include(String(result?.warning || ""), "PDF text extraction failed");
+      assert.include(
+        String(result?.warning || ""),
+        "PDF text extraction failed",
+      );
     } finally {
       if (originalIOUtils === undefined) {
         delete globalScope.IOUtils;
@@ -642,7 +646,11 @@ describe("semantic tool surface", function () {
     if (!validated.ok) return;
     const output = (await tool.execute(validated.value, baseContext)) as {
       results?: unknown[];
-      quoteCitations?: Array<{ id: string; quoteText: string; citationLabel: string }>;
+      quoteCitations?: Array<{
+        id: string;
+        quoteText: string;
+        citationLabel: string;
+      }>;
       papers?: Array<{
         status?: string;
         sourceLabel?: string;
@@ -666,7 +674,10 @@ describe("semantic tool surface", function () {
       "Second method passage.",
     );
     assert.lengthOf(output.quoteCitations || [], 2);
-    assert.equal(output.quoteCitations?.[0]?.quoteText, "First method passage.");
+    assert.equal(
+      output.quoteCitations?.[0]?.quoteText,
+      "First method passage.",
+    );
     assert.equal(output.quoteCitations?.[0]?.citationLabel, "(Huys, 2016)");
     assert.equal(
       output.papers?.[0]?.passages?.[0]?.quoteCitationId,
@@ -694,7 +705,9 @@ describe("semantic tool surface", function () {
     const tool = createPaperReadTool(
       {
         ensurePaperContext: async () => {
-          throw new Error("semantic retrieval should not prepare paper context");
+          throw new Error(
+            "semantic retrieval should not prepare paper context",
+          );
         },
       } as never,
       {
@@ -782,7 +795,9 @@ describe("semantic tool surface", function () {
       {} as never,
       {
         retrieveEvidence: async () => {
-          throw new Error("semantic retrieval should not run for explicit pages");
+          throw new Error(
+            "semantic retrieval should not run for explicit pages",
+          );
         },
       } as never,
       {

@@ -53,6 +53,7 @@ const READ_TOOL_NAMES = new Set([
   "paper_read",
   "read_paper",
   "search_paper",
+  "library_retrieve",
   "view_pdf_pages",
   "read_attachment",
 ]);
@@ -423,7 +424,7 @@ function findMineruPaperTarget(
 
 function snippetFromRecord(value: unknown): AgentEvidenceSnippet | null {
   const record = normalizeRecord(value);
-  const text = normalizeEvidenceText(record.text);
+  const text = normalizeEvidenceText(record.text || record.snippet);
   if (!text) return null;
   const snippet: AgentEvidenceSnippet = { text };
   const sourceLabel = normalizeText(record.sourceLabel, 80);
@@ -619,6 +620,7 @@ function collectGenericSnippets(content: unknown): AgentEvidenceSnippet[] {
   const record = normalizeRecord(content);
   const candidates: unknown[] = [];
   if (Array.isArray(record.results)) candidates.push(...record.results);
+  if (Array.isArray(record.snippets)) candidates.push(...record.snippets);
   if (Array.isArray(record.pages)) candidates.push(...record.pages);
   if (Array.isArray(record.chunks)) candidates.push(...record.chunks);
   if (candidates.length) {
@@ -647,9 +649,7 @@ function buildReadAttachmentEvidenceEntry(
   const parentItem = normalizeRecord(content.parentItem);
   const attachmentId = normalizePositiveInt(content.attachmentId);
   const target = {
-    itemId:
-      paperContext.itemId ||
-      normalizePositiveInt(parentItem.itemId),
+    itemId: paperContext.itemId || normalizePositiveInt(parentItem.itemId),
     contextItemId: paperContext.contextItemId || attachmentId,
     title:
       normalizeText(content.title, 120) ||

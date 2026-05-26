@@ -226,6 +226,8 @@ export type PaperContextCandidate = {
   embeddingScore: number;
   hybridScore: number;
   evidenceScore: number;
+  matchedQueryVariant?: string;
+  matchedQueryVariants?: string[];
 };
 
 export type MultiContextPlan = {

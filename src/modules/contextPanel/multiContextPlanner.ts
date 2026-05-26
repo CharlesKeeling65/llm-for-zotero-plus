@@ -1,4 +1,8 @@
-import type { ChatMessage, ReasoningConfig } from "../../utils/llmClient";
+import type {
+  ChatMessage,
+  ChatParams,
+  ReasoningConfig,
+} from "../../utils/llmClient";
 import {
   estimateAvailableContextBudget,
   callEmbeddings,
@@ -37,6 +41,12 @@ import { mergeQuoteCitations } from "./quoteCitations";
 import { pdfTextCache } from "./state";
 import { sanitizeText } from "./textUtils";
 import { tokenizeRetrievalDiversity } from "./retrievalTokenizer";
+import {
+  buildRetrievalQueryPlan,
+  buildRetrievalQueryPlanCacheKey,
+  resolveRetrievalQueryPlan,
+  type RetrievalQueryPlan,
+} from "./retrievalQueryPlan";
 import {
   planContextCacheReuse,
   shouldPreferCacheAwareFullContext,
@@ -364,14 +374,12 @@ function normalizeMetadataText(value: string): string {
     .trim();
 }
 
-function tokenizeMetadataQuery(question: string): string[] {
-  return Array.from(
-    new Set(
-      normalizeMetadataText(question)
-        .split(/\s+/g)
-        .filter((token) => token.length >= 3),
-    ),
-  );
+function tokenizeMetadataQuery(
+  question: string,
+  queryPlan?: RetrievalQueryPlan,
+): string[] {
+  if (queryPlan?.lexicalTerms.length) return queryPlan.lexicalTerms;
+  return buildRetrievalQueryPlan({ query: question }).lexicalTerms;
 }
 
 function scoreCollectionPaperMetadata(params: {
@@ -494,6 +502,7 @@ function buildCollectionManifestText(params: {
 async function resolveCollectionScopePapers(params: {
   collectionContexts?: CollectionContextRef[];
   question: string;
+  queryPlan?: RetrievalQueryPlan;
   excludePaperKeys: Set<string>;
   orderStart: number;
 }): Promise<CollectionScopeResolution> {
@@ -510,7 +519,10 @@ async function resolveCollectionScopePapers(params: {
     };
   }
 
-  const questionTokens = tokenizeMetadataQuery(params.question);
+  const questionTokens = tokenizeMetadataQuery(
+    params.question,
+    params.queryPlan,
+  );
   const candidates: CollectionPaperCandidate[] = [];
   const scopeLines: string[] = [];
   const manifestSeenPaperKeys = new Set<string>();
@@ -582,8 +594,12 @@ async function resolveCollectionScopePapers(params: {
   const positive = retrievalCandidates.filter(
     (candidate) => candidate.score > 0,
   );
-  const shortlistSource = positive.length ? positive : retrievalCandidates;
-  const shortlistLimit = positive.length
+  const enoughPositiveMatches =
+    positive.length >= COLLECTION_RETRIEVAL_MIN_SCORE_FALLBACK_PAPERS;
+  const shortlistSource = enoughPositiveMatches
+    ? positive
+    : retrievalCandidates;
+  const shortlistLimit = enoughPositiveMatches
     ? COLLECTION_RETRIEVAL_MAX_PAPERS
     : Math.min(
         COLLECTION_RETRIEVAL_MAX_PAPERS,
@@ -823,12 +839,16 @@ export function selectContextAssemblyMode(params: {
 export async function assembleRetrievedMultiPaperContext(params: {
   papers: PlannerPaperEntry[];
   question: string;
+  queryPlan?: RetrievalQueryPlan;
   contextBudgetTokens: number;
   minChunksByPaper?: Map<string, number>;
   options?: RetrievedAssemblyOptions;
 }): Promise<RetrievedAssembly> {
   const { papers, question, contextBudgetTokens, minChunksByPaper, options } =
     params;
+  const queryPlan =
+    params.queryPlan || buildRetrievalQueryPlan({ query: question });
+  const retrievalCacheKey = buildRetrievalQueryPlanCacheKey(queryPlan);
   if (!papers.length || contextBudgetTokens <= 0) {
     return {
       contextText: "",
@@ -842,9 +862,11 @@ export async function assembleRetrievedMultiPaperContext(params: {
   // Pre-compute query embedding once so we don't make N identical API calls
   // for N papers in the loop below.
   let precomputedQueryEmbedding: number[] | undefined;
-  if (question.trim() && checkEmbeddingAvailability()) {
+  if (queryPlan.semanticQuery.trim() && checkEmbeddingAvailability()) {
     try {
-      precomputedQueryEmbedding = (await callEmbeddings([question]))[0];
+      precomputedQueryEmbedding = (
+        await callEmbeddings([queryPlan.semanticQuery])
+      )[0];
     } catch {
       // Embedding unavailable — fall back to BM25-only scoring per paper.
     }
@@ -852,7 +874,10 @@ export async function assembleRetrievedMultiPaperContext(params: {
 
   const allCandidates: PaperContextCandidate[] = [];
   for (const paper of papers) {
-    const cached = getCachedRetrievalCandidates(paper.paperKey, question);
+    const cached = getCachedRetrievalCandidates(
+      paper.paperKey,
+      retrievalCacheKey,
+    );
     if (cached) {
       allCandidates.push(...cached);
       continue;
@@ -865,9 +890,10 @@ export async function assembleRetrievedMultiPaperContext(params: {
         topK: RETRIEVAL_TOP_K_PER_PAPER,
         mode: "evidence",
         precomputedQueryEmbedding,
+        queryPlan,
       },
     );
-    setCachedRetrievalCandidates(paper.paperKey, question, candidates);
+    setCachedRetrievalCandidates(paper.paperKey, retrievalCacheKey, candidates);
     allCandidates.push(...candidates);
   }
 
@@ -1250,9 +1276,34 @@ export async function resolveMultiContextPlan(params: {
     fullTextPaperContexts,
     historyPaperContexts: params.historyPaperContexts,
   });
+  const firstPaperTurn =
+    params.conversationMode === "paper" && isFirstPaperTurn(params.history);
+  const hasCollectionContext = Boolean(params.collectionContexts?.length);
+  const queryPlan = await resolveRetrievalQueryPlan({
+    query: params.question,
+    hasRetrievalContext:
+      Boolean(papers.length || hasCollectionContext) &&
+      (!firstPaperTurn || hasCollectionContext),
+    model: params.model,
+    apiBase: params.apiBase,
+    apiKey: params.apiKey,
+    authMode: params.authMode as ChatParams["authMode"],
+    providerProtocol: params.providerProtocol,
+    reasoning: params.reasoning,
+    signal: params.signal,
+  });
+  const queryPlanForQuestion = (question: string): RetrievalQueryPlan =>
+    question === params.question
+      ? queryPlan
+      : buildRetrievalQueryPlan({
+          query: question,
+          queryVariants: queryPlan.variants,
+          notes: queryPlan.notes,
+        });
   const collectionScope = await resolveCollectionScopePapers({
     collectionContexts: params.collectionContexts,
     question: params.question,
+    queryPlan,
     excludePaperKeys: new Set(papers.map((paper) => paper.paperKey)),
     orderStart: papers.length + 1,
   });
@@ -1320,6 +1371,7 @@ export async function resolveMultiContextPlan(params: {
     const retrieved = await assembleRetrievedMultiPaperContext({
       papers: collectionPapers,
       question: params.question,
+      queryPlan,
       contextBudgetTokens: adjustedContextBudget.contextBudgetTokens,
       minChunksByPaper: new Map<string, number>(),
     });
@@ -1344,9 +1396,6 @@ export async function resolveMultiContextPlan(params: {
   const unpinned = papers.filter((paper) => paper.pinKind === "none");
   const activePaper =
     papers.find((paper) => paper.isActive) || papers[0] || null;
-  const firstPaperTurn =
-    params.conversationMode === "paper" && isFirstPaperTurn(params.history);
-
   if (params.conversationMode === "paper" && activePaper) {
     // Collect other explicitly selected papers (@-referenced) beyond the
     // active paper so they are not silently dropped.
@@ -1385,6 +1434,7 @@ export async function resolveMultiContextPlan(params: {
           extraRetrieved = await assembleRetrievedMultiPaperContext({
             papers: extraRetrievalPapers,
             question: enrichedQuestion,
+            queryPlan: queryPlanForQuestion(enrichedQuestion),
             contextBudgetTokens: remainingTokens,
             minChunksByPaper: buildMinChunkMapForRetrievedPapers(otherUnpinned),
           });
@@ -1455,6 +1505,7 @@ export async function resolveMultiContextPlan(params: {
         extraRetrieved = await assembleRetrievedMultiPaperContext({
           papers: extraRetrievalPapers,
           question: enrichedQuestion,
+          queryPlan: queryPlanForQuestion(enrichedQuestion),
           contextBudgetTokens: remainingTokens,
           minChunksByPaper: buildMinChunkMapForRetrievedPapers(otherUnpinned),
         });
@@ -1499,6 +1550,7 @@ export async function resolveMultiContextPlan(params: {
     const retrieved = await assembleRetrievedMultiPaperContext({
       papers: allRetrievalPapers,
       question: enrichedQuestion,
+      queryPlan: queryPlanForQuestion(enrichedQuestion),
       contextBudgetTokens: adjustedContextBudget.contextBudgetTokens,
       minChunksByPaper: buildMinChunkMapForRetrievedPapers(
         directRetrievalPapers,
@@ -1559,6 +1611,7 @@ export async function resolveMultiContextPlan(params: {
         extraUnpinned = await assembleRetrievedMultiPaperContext({
           papers: extraUnpinnedPapers,
           question: params.question,
+          queryPlan,
           contextBudgetTokens: remainingTokens,
           minChunksByPaper: buildMinChunkMapForRetrievedPapers(unpinned),
         });
@@ -1625,6 +1678,7 @@ export async function resolveMultiContextPlan(params: {
         extraRetrieved = await assembleRetrievedMultiPaperContext({
           papers: retrievalCompanionPapers,
           question: params.question,
+          queryPlan,
           contextBudgetTokens: remainingTokens,
           minChunksByPaper: buildMinChunkMapForRetrievedPapers(
             retrievalCompanionPapers.filter(
@@ -1690,6 +1744,7 @@ export async function resolveMultiContextPlan(params: {
   const retrieved = await assembleRetrievedMultiPaperContext({
     papers: retrievalPapers,
     question: params.question,
+    queryPlan,
     contextBudgetTokens: adjustedContextBudget.contextBudgetTokens,
     minChunksByPaper: buildMinChunkMapForRetrievedPapers(directRetrievalPapers),
   });

@@ -782,7 +782,9 @@ function buildReadAttachmentCoverageEntries(
     granularity: "attachment",
     coverage: text ? "targeted" : "partial",
     confidence: text ? "high" : "medium",
-    contentHash: text ? activityContentHash(activity, { resourceKey, text }) : undefined,
+    contentHash: text
+      ? activityContentHash(activity, { resourceKey, text })
+      : undefined,
     toolName: activity.toolName,
     evidenceRefs: [evidenceRefFor(activity, { attachmentId, title })],
     durable: Boolean(resourceKey && text),
@@ -929,6 +931,131 @@ function buildLibraryReadCoverageEntries(
     .filter((entry): entry is AgentCoverageEntry => Boolean(entry));
 }
 
+function sourceKindFromLibraryRetrieveSnippet(
+  snippet: Record<string, unknown>,
+): AgentCoverageSourceKind {
+  const matchMethod = normalizeText(snippet.matchMethod, 40);
+  if (matchMethod === "semantic") return "embedding_retrieval";
+  const sourceKind = normalizeText(snippet.sourceKind, 40);
+  if (sourceKind === "mineru") return "mineru";
+  if (sourceKind === "note") return "note";
+  if (sourceKind === "attachment") return "attachment_text";
+  if (sourceKind === "metadata" || sourceKind === "abstract") {
+    return "zotero_metadata";
+  }
+  return "zotero_fulltext";
+}
+
+function buildLibraryRetrieveCoverageEntries(
+  activity: AgentCacheEvidenceActivity,
+): AgentCoverageEntry[] {
+  const input = normalizeRecord(activity.input);
+  const content = normalizeRecord(activity.content);
+  const pool = normalizeRecord(content.resourcePool);
+  const scope = normalizeRecord(pool.scope);
+  const queryCoverage = normalizeRecord(pool.queryCoverage);
+  const snippets = Array.isArray(content.snippets) ? content.snippets : [];
+  const topic = normalizeTopic(input.query, activity.request.userText);
+  const collectionIds = Array.isArray(scope.collectionIds)
+    ? scope.collectionIds
+    : [];
+  const firstCollectionId = collectionIds
+    .map((value) => normalizePositiveInt(value))
+    .find(Boolean);
+  const libraryID =
+    normalizePositiveInt(scope.libraryID) || activity.request.libraryID;
+  const resourceKey =
+    normalizeText(pool.type, 40) === "collection" && firstCollectionId
+      ? collectionResourceKey({ collectionId: firstCollectionId, libraryID })
+      : libraryResourceKey(libraryID);
+  const entries: AgentCoverageEntry[] = [];
+  const scopeEntry = createCoverageEntry({
+    resourceKey,
+    resourceLabel:
+      normalizeText(pool.name, 120) ||
+      (normalizeText(pool.type, 40) === "collection"
+        ? "collection resource pool"
+        : "library resource pool"),
+    sourceKind: "zotero_metadata",
+    topic,
+    granularity: "scope",
+    coverage: normalizePositiveInt(queryCoverage.indexedTextScanned)
+      ? "broad"
+      : normalizePositiveInt(queryCoverage.snippetPapersExpanded) ||
+          normalizePositiveInt(queryCoverage.fullTextSearched)
+        ? "broad"
+        : "listed",
+    confidence: "high",
+    contentHash: activityContentHash(activity, {
+      scope,
+      totalItems: pool.totalItems,
+      queryCoverage,
+      depth: content.depth,
+      methodsUsed: content.methodsUsed,
+    }),
+    toolName: activity.toolName,
+    evidenceRefs: [
+      evidenceRefFor(activity, {
+        scope,
+        queryCoverage,
+        depth: content.depth,
+      }),
+    ],
+    durable: Boolean(resourceKey),
+    updatedAt: activity.timestamp,
+  });
+  if (scopeEntry) entries.push(scopeEntry);
+
+  const byResource = new Map<
+    string,
+    {
+      paper: Partial<PaperContextRef>;
+      rows: Record<string, unknown>[];
+    }
+  >();
+  for (const rawSnippet of snippets) {
+    const snippet = normalizeRecord(rawSnippet);
+    const itemId = normalizePositiveInt(snippet.itemId);
+    const contextItemId = normalizePositiveInt(snippet.contextItemId);
+    const paper = {
+      itemId,
+      contextItemId,
+      title: normalizeText(snippet.title, 160),
+    };
+    const resource = paperResourceKey(paper);
+    if (!resource) continue;
+    let group = byResource.get(resource);
+    if (!group) {
+      group = { paper, rows: [] };
+      byResource.set(resource, group);
+    }
+    group.rows.push(snippet);
+  }
+  for (const { paper, rows } of byResource.values()) {
+    const first = rows[0] || {};
+    const granularity: AgentCoverageGranularity =
+      normalizeText(first.sourceKind, 40) === "abstract"
+        ? "abstract"
+        : "passage";
+    const entry = createCoverageEntry({
+      resourceKey: paperResourceKey(paper),
+      resourceLabel: getPaperLabel(paper),
+      sourceKind: sourceKindFromLibraryRetrieveSnippet(first),
+      topic,
+      granularity,
+      coverage: rows.length ? "targeted" : "partial",
+      confidence: rows.length ? "high" : "medium",
+      contentHash: activityContentHash(activity, rows.slice(0, 4)),
+      toolName: activity.toolName,
+      evidenceRefs: [evidenceRefFor(activity, rows.slice(0, 4))],
+      durable: true,
+      updatedAt: activity.timestamp,
+    });
+    if (entry) entries.push(entry);
+  }
+  return entries;
+}
+
 export function buildAgentCoverageEntriesForActivity(
   activity: AgentCacheEvidenceActivity,
 ): AgentCoverageEntry[] {
@@ -961,6 +1088,9 @@ export function buildAgentCoverageEntriesForActivity(
     activity.toolName === "read_library"
   ) {
     return buildLibraryReadCoverageEntries(activity);
+  }
+  if (activity.toolName === "library_retrieve") {
+    return buildLibraryRetrieveCoverageEntries(activity);
   }
   return [];
 }

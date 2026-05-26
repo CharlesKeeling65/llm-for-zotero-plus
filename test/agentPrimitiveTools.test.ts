@@ -591,6 +591,7 @@ describe("primitive agent tools", function () {
       typeof messages[0]?.content === "string" ? messages[0].content : "";
     assert.include(systemText, "literature_search");
     assert.include(systemText, "library_search");
+    assert.include(systemText, "library_retrieve");
     assert.include(systemText, "library_read");
     assert.include(systemText, "paper_read");
     assert.include(systemText, "library_update");

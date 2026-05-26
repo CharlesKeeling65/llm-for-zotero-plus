@@ -14,6 +14,7 @@ import {
   writeMineruCacheFiles,
 } from "../src/modules/contextPanel/mineruCache";
 import { tokenizeRetrievalText } from "../src/modules/contextPanel/retrievalTokenizer";
+import { buildRetrievalQueryPlan } from "../src/modules/contextPanel/retrievalQueryPlan";
 import { pdfTextCache } from "../src/modules/contextPanel/state";
 import type {
   ChunkStat,
@@ -321,6 +322,35 @@ describe("pdfContext multi-context helpers", function () {
     assert.equal(candidates[0].paperKey, buildPaperKey(paper));
     assert.equal(candidates[0].itemId, 1);
     assert.isAtLeast(candidates[0].estimatedTokens, 1);
+  });
+
+  it("uses query-plan variants for lexical chunk retrieval", async function () {
+    const paper: PaperContextRef = {
+      itemId: 1,
+      contextItemId: 11,
+      title: "Paper A",
+      firstCreator: "Alice",
+      year: "2024",
+    };
+    const context = buildPdfContext([
+      "The methods use calcium imaging to measure neural drift.",
+      "This unrelated appendix describes baseline calibration.",
+    ]);
+    const queryPlan = buildRetrievalQueryPlan({
+      query: "钙成像",
+      queryVariants: ["calcium imaging"],
+    });
+    const candidates = await buildPaperRetrievalCandidates(
+      paper,
+      context,
+      "钙成像",
+      undefined,
+      { topK: 2, queryPlan },
+    );
+
+    assert.equal(candidates[0].chunkIndex, 0);
+    assert.isAbove(candidates[0].bm25Score, candidates[1].bm25Score);
+    assert.include(candidates[0].matchedQueryVariants || [], "calcium imaging");
   });
 
   it("falls back to Zotero full-text cache when PDFWorker returns no text", async function () {

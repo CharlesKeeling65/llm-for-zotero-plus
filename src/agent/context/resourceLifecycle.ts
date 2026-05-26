@@ -770,9 +770,9 @@ export function buildAgentStableResourceContextBlock(
         (entry, index) =>
           `- Collection ${index + 1}: ${entry.name} [collectionId=${entry.collectionId}, libraryID=${entry.libraryID}]`,
       ),
-      "Treat collection membership as the scope boundary. Use library_search({ entity:'items', mode:'list', filters:{ collectionId:<collectionId> } }) or collection-scoped actions when the user asks to inspect or operate on them. Do not assume all full text has already been read.",
-      "When reading papers from a collection, first enumerate the collection, then pass explicit itemId/contextItemId targets to library_read or paper_read. Do not use the active reader paper as an implicit collection member.",
-      "If the user explicitly asks to read or analyze the full text of every paper in a collection, plan a batch workflow: enumerate papers, read/process them in bounded batches, create compact per-paper digests with evidence, then synthesize.",
+      "Treat collection membership as the scope boundary. Use library_retrieve({ scope:{ collectionIds:[<collectionId>] }, query:'...', queryVariants:[...], intent:'enumerate'|'summarize', depth:'metadata'|'evidence' }) for broad comprehensive evidence search when variants would improve recall, library_search({ entity:'items', mode:'list', filters:{ collectionId:<collectionId> } }) for catalog listing, or collection-scoped actions when the user asks to operate on them. Do not assume all full text has already been read.",
+      "When reading papers from a collection, prefer library_retrieve for staged resource-pool search. It maps metadata, scans indexed/searchable text, returns a paper-level frontier, and expands snippets only for selected branches; use paper_read only for close reading explicit itemId/contextItemId targets returned by search/retrieval. Do not use the active reader paper as an implicit collection member.",
+      "If the user explicitly asks to read or analyze the full text of every paper in a collection, use library_retrieve or plan a batch workflow: enumerate papers, read/process them in bounded batches, create compact per-paper digests with evidence, then synthesize.",
       "If the user explicitly asks to include or only read child attachments in this collection, enumerate item attachments with library_search plus library_read sections:['attachments']; otherwise ignore sibling attachments for primary-document workflows.",
     );
   }

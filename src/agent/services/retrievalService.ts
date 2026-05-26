@@ -1,6 +1,16 @@
+import { buildPaperRetrievalCandidates } from "../../modules/contextPanel/pdfContext";
 import {
-  buildPaperRetrievalCandidates,
-} from "../../modules/contextPanel/pdfContext";
+  buildRetrievalQueryPlanCacheKey,
+  resolveRetrievalQueryPlan,
+  type RetrievalQueryPlan,
+} from "../../modules/contextPanel/retrievalQueryPlan";
+import {
+  callEmbeddings,
+  checkEmbeddingAvailability,
+  type ChatParams,
+  type ReasoningConfig,
+} from "../../utils/llmClient";
+import type { ProviderProtocol } from "../../utils/providerProtocol";
 import {
   formatPaperCitationLabel,
   formatPaperSourceLabel,
@@ -25,7 +35,12 @@ function dedupePaperContexts(
   const out: PaperContextRef[] = [];
   const seen = new Set<string>();
   for (const entry of paperContexts) {
-    if (!entry || !Number.isFinite(entry.itemId) || !Number.isFinite(entry.contextItemId)) continue;
+    if (
+      !entry ||
+      !Number.isFinite(entry.itemId) ||
+      !Number.isFinite(entry.contextItemId)
+    )
+      continue;
     const key = `${entry.itemId}:${entry.contextItemId}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -38,11 +53,11 @@ type EvidenceCacheKey = string;
 
 function buildEvidenceCacheKey(
   contextItemId: number,
-  question: string,
+  queryKey: string,
 ): EvidenceCacheKey {
   // Strip punctuation and normalise whitespace so minor phrasing variations
   // (e.g. "What is the method?" vs "what is the method") share a cache entry.
-  const normalizedQ = question
+  const normalizedQ = queryKey
     .trim()
     .toLowerCase()
     .replace(/[^\w\s]/g, " ")
@@ -66,8 +81,15 @@ export class RetrievalService {
   async retrieveEvidence(params: {
     papers: PaperContextRef[];
     question: string;
+    queryVariants?: string[];
+    queryPlan?: RetrievalQueryPlan;
+    model?: string;
     apiBase?: string;
     apiKey?: string;
+    authMode?: ChatParams["authMode"];
+    providerProtocol?: ProviderProtocol;
+    reasoning?: ReasoningConfig;
+    signal?: AbortSignal;
     topK?: number;
     perPaperTopK?: number;
   }): Promise<RetrievalResult[]> {
@@ -79,11 +101,41 @@ export class RetrievalService {
     const topK = Number.isFinite(params.topK)
       ? Math.max(1, Math.floor(params.topK as number))
       : 6;
+    const queryPlan = await resolveRetrievalQueryPlan({
+      query: params.question,
+      queryVariants: params.queryVariants,
+      queryPlan: params.queryPlan,
+      hasRetrievalContext: true,
+      model: params.model,
+      apiBase: params.apiBase,
+      apiKey: params.apiKey,
+      authMode: params.authMode,
+      providerProtocol: params.providerProtocol,
+      reasoning: params.reasoning,
+      signal: params.signal,
+    });
+    const queryCacheKey = buildRetrievalQueryPlanCacheKey(queryPlan);
+    let embeddingsAvailable = false;
+    try {
+      embeddingsAvailable = checkEmbeddingAvailability();
+    } catch {
+      embeddingsAvailable = false;
+    }
+    let precomputedQueryEmbedding: number[] | undefined;
+    if (queryPlan.semanticQuery.trim() && embeddingsAvailable) {
+      try {
+        precomputedQueryEmbedding = (
+          await callEmbeddings([queryPlan.semanticQuery])
+        )[0];
+      } catch {
+        // Embedding unavailable — buildPaperRetrievalCandidates will fall back.
+      }
+    }
     const results: RetrievalResult[] = [];
     for (const paperContext of papers) {
       const cacheKey = buildEvidenceCacheKey(
         paperContext.contextItemId,
-        params.question,
+        queryCacheKey,
       );
       const cached = this.evidenceCache.get(cacheKey);
       if (cached) {
@@ -98,10 +150,14 @@ export class RetrievalService {
         {
           apiBase: params.apiBase,
           apiKey: params.apiKey,
+          precomputedQueryEmbedding,
+          queryPlan,
         },
         {
           topK: perPaperTopK,
           mode: "evidence",
+          precomputedQueryEmbedding,
+          queryPlan,
         },
       );
       const paperResults: RetrievalResult[] = candidates.map((candidate) => ({

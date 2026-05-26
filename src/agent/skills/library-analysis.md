@@ -26,21 +26,25 @@ match: /\b(distribution|breakdown|histogram)\b.*\b(years?|tags?|authors?|types?|
   To reset to default, delete this file — it will be recreated on next restart.
 -->
 
-## Library / Collection Analysis - use zotero_script read mode
+## Library / Collection Analysis
 
 When the user asks for a summary, overview, statistics, or analysis of their **whole library or a collection**, do NOT make multiple `library_search` calls to page through results. Each broad `library_search` call can return enough metadata to overflow the context window.
 
-Instead, use a single `zotero_script({ mode:'read', description:'Analyze library or collection statistics', script:'...' })` call that iterates all items inside Zotero's runtime and aggregates the answer in one pass. The script runs locally — there is no context-size limitation because only the final `env.log()` output is returned to the conversation.
+For evidence-bearing topic/theme questions, use `library_retrieve` first. It treats the library or selected collection as a resource pool, maps metadata/abstracts broadly, scans indexed/searchable text for paper-level matches when appropriate, expands selected snippets, and reports coverage.
+
+For pure aggregate statistics, use a single `zotero_script({ mode:'read', description:'Analyze library or collection statistics', script:'...' })` call that iterates all items inside Zotero's runtime and aggregates the answer in one pass. The script runs locally — there is no context-size limitation because only the final `env.log()` output is returned to the conversation.
 
 ### Strategy
 
-1. Write a `zotero_script({ mode:'read', description:'Analyze library or collection statistics', script:'...' })` script that:
+1. If the user asks "which papers discuss X", "find all papers about X", "how many papers use X", or any broad local evidence question, call `library_retrieve({ query:'X', queryVariants:[...], intent:'enumerate', depth:'evidence' })` or collection-scoped `library_retrieve({ scope:{ collectionIds:[...] }, query:'X', queryVariants:[...], intent:'enumerate', depth:'evidence' })` when translation, acronyms, notation variants, or technical equivalents would improve recall. Treat `enumerate` as comprehensive quality-first search across the scoped resource pool, not just a fast list operation.
+2. If the user asks for a broad method/theme taxonomy, call `library_retrieve({ query:'X', queryVariants:[...], intent:'summarize', depth:'evidence' })` when useful.
+3. If the user asks for counts/distributions only, write a `zotero_script({ mode:'read', description:'Analyze library or collection statistics', script:'...' })` script that:
    - Calls `Zotero.Items.getAll(env.libraryID, false, false, false)` to get all items.
    - Filters to `item.isRegularItem()` (skips attachments, notes, annotations).
    - Aggregates whatever the user asked for (counts by year, by type, by tag, top authors, collection sizes, etc.).
    - Calls `env.log()` with the aggregated result (compact JSON or readable text).
-2. Present the aggregated output to the user with interpretation.
-3. If the user needs detail on specific items after seeing the summary, use `library_search` with targeted filters for just those items.
+4. Present the aggregated output to the user with interpretation.
+5. If the user needs detail on specific items after seeing the summary, use `library_search` with targeted filters for catalog details, `library_retrieve` frontier results for snippet expansion, or `paper_read` for close reading one paper.
 
 ### Example: "give me an overview of my library"
 
@@ -66,6 +70,8 @@ env.log(JSON.stringify({ total, byYear, byType, byTag }, null, 2));
 ### Key rules
 
 - NEVER page through `library_search` to collect all items — it will overflow the context.
+- For broad evidence questions, prefer `library_retrieve` over hand-rolled loops of `library_search` plus many `paper_read` calls.
+- Always preserve the `library_retrieve` coverage boundary: if indexed/searchable text or snippets are partial/sampled, say candidates/evidence rather than "all papers". Use `paperMatches` as the primary ledger; query variants are search probes, not evidence by themselves.
 - A single `zotero_script({ mode:'read', description:'Analyze library or collection statistics', script:'...' })` can process thousands of items because only the final summary is returned.
 - If the user asks about a specific collection, filter by collection inside the script using `Zotero.Collections.get(collectionId).getChildItems()`.
 - Keep `env.log()` output concise — aggregate, don't list every item.

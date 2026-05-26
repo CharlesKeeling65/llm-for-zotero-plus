@@ -86,6 +86,10 @@ describe("tool guidance contracts", function () {
       label: "read_library(sections:...)",
       pattern: /read_library\(sections:/,
     },
+    {
+      label: "library_retrieve(intent:'discover')",
+      pattern: /library_retrieve\([^)]*intent:'discover'/,
+    },
   ];
 
   it("does not contain stale pseudo-call examples in shipped guidance", function () {

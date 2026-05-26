@@ -46,6 +46,7 @@ const SCOPED_MCP_SCOPE_TTL_MS = 2 * 60 * 60 * 1000;
 export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
   "library_search",
   "library_read",
+  "library_retrieve",
   "paper_read",
   "literature_search",
   "web_search",
@@ -94,6 +95,7 @@ const MCP_READ_DEDUPE_TTL_MS = 2 * 60 * 1000;
 const MCP_READ_DEDUPE_TOOL_NAMES = new Set([
   "library_search",
   "library_read",
+  "library_retrieve",
   "paper_read",
 ]);
 const MCP_TOOLS_WITH_OWN_CONFIRMATION_POLICY = new Set([
@@ -688,7 +690,7 @@ function decorateMcpToolDescription(
   mutability: ToolSpec["mutability"],
 ): string {
   const scopeGuidance =
-    "Zotero MCP scope: omit libraryID, activeItemId, and activeContextItemId to use the current Codex Zotero chat scope. Use library_search with explicit entity and mode, for example library_search({ entity:'items', mode:'search', text:'...' }) or library_search({ entity:'collections', mode:'list', view:'tree' }), to discover Zotero items, and library_read for structured item state. Use paper_read for in-context paper content: mode:'overview' for summaries/main message, mode:'targeted' for textual evidence/sections/pages, mode:'visual' for rendered PDF pages, and mode:'capture' for the currently visible reader page. Use literature_search for scholarly discovery/import workflows and web_search for general web lookup. For counting questions, prefer library_search totalCount/returnedCount/limited metadata instead of hand-counting listed results.";
+    "Zotero MCP scope: omit libraryID, activeItemId, and activeContextItemId to use the current Codex Zotero chat scope. Use library_search with explicit entity and mode, for example library_search({ entity:'items', mode:'search', text:'...' }) or library_search({ entity:'collections', mode:'list', view:'tree' }), to discover Zotero items. Use library_retrieve for broad folder/library evidence search across a scoped resource pool: intent:'enumerate' for comprehensive quality-first local evidence search including which/all/how-many/list questions, intent:'summarize' for taxonomy/theme synthesis, and intent:'verify' for exact presence/absence. Use library_read for structured item state, and paper_read for close reading one known paper: mode:'overview' for summaries/main message, mode:'targeted' for textual evidence/sections/pages, mode:'visual' for rendered PDF pages, and mode:'capture' for the currently visible reader page. Use literature_search for scholarly discovery/import workflows and web_search for general web lookup. For counting questions, prefer library_search totalCount/returnedCount/limited metadata or library_retrieve intent:'enumerate' coverage instead of hand-counting listed results.";
   const writeGuidance =
     toolName === "zotero_script"
       ? "zotero_script runs directly without a review card. Write scripts must call env.snapshot(item) before mutating items, or env.addUndoStep(fn) for custom changes, so undo_last_action can revert the operation."

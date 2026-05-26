@@ -27,11 +27,12 @@ describe("quote anchor leak boundaries", function () {
   it("renders agent trace markdown through the quote-anchor display helper", function () {
     const traceSource = source("src/modules/contextPanel/agentTrace/render.ts");
 
+    assert.include(traceSource, "buildAgentTraceMarkdownForRender(");
+    assert.include(traceSource, "itemEntry.text,");
     assert.include(
       traceSource,
-      "buildAgentTraceMarkdownForRender(itemEntry.text, message)",
+      "renderRenderedMarkdownInto(inlineEl, inlineText",
     );
-    assert.include(traceSource, "renderRenderedMarkdownInto(inlineEl, inlineText");
     assert.notInclude(
       traceSource,
       "renderRenderedMarkdownInto(inlineEl, itemEntry.text",

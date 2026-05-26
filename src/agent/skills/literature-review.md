@@ -35,8 +35,8 @@ When the user asks for a literature review, follow this three-phase workflow. Th
 Identify the corpus of papers to review:
 
 - **Papers already in context**: If the user has pinned or selected papers (visible in `selectedPaperContexts` or `fullTextPaperContexts`), use those directly. No discovery step needed.
-- **Topic search**: If the user provides a topic or keywords, use `library_search({ entity:'items', mode:'search', text:'<topic>', include:['metadata','abstract'] })` to find matching papers in their library.
-- **Collection**: If the user names a collection, use `library_search({ entity:'collections', mode:'search', text:'<collection name>' })` to resolve it, then `library_search({ entity:'items', mode:'list', filters:{ collectionId:<collectionId> }, include:['metadata','abstract'] })`.
+- **Topic search**: If the user provides a topic or keywords and wants evidence from their Zotero library, use `library_retrieve({ query:'<topic>', queryVariants:[...], intent:'enumerate', depth:'metadata'|'evidence' })` to search metadata/abstracts/indexed text broadly when translation, acronyms, notation variants, or terminology equivalents would improve recall. Use `intent:'summarize', depth:'evidence'` for method or theme taxonomies.
+- **Collection**: If the user names a collection, use `library_search({ entity:'collections', mode:'search', text:'<collection name>' })` to resolve it, then `library_retrieve({ scope:{ collectionIds:[<collectionId>] }, query:'<review topic>', queryVariants:[...], intent:'enumerate', depth:'metadata'|'evidence' })` when variants would help. Use `intent:'summarize'` for collection-grounded taxonomies.
 - **Whole library**: If the user wants a review across their entire library, use `zotero_script({ mode:'read', description:'Summarize candidate papers for a literature review', script:'...' })` to aggregate candidates in Zotero's runtime (same pattern as `library-analysis`).
 
 Cap the corpus at **15-20 papers**. If more match, select the most relevant based on title/abstract relevance to the topic. Use `library_read` to retrieve metadata (title, authors, year, abstract, publicationTitle) for all discovered papers.
@@ -45,7 +45,7 @@ Cap the corpus at **15-20 papers**. If more match, select the most relevant base
 
 Do **NOT** read every paper in full. Abstracts from Phase 1 are sufficient for most.
 
-Deep-read only the **3-5 most relevant papers** to the review topic:
+Deep-read only the **3-5 most relevant papers** to the review topic. If `library_retrieve` already returned good evidence snippets, use those before calling `paper_read`.
 
 1. Use `paper_read({ mode:'overview', targets:[...] })` for selected papers.
 2. For targeted claims: `paper_read({ mode:'targeted', query:'...', targets:[...] })` with focused questions (e.g., "What methods were used?", "What were the key findings?").
@@ -97,7 +97,8 @@ If key figures from deep-read papers would strengthen a thematic point, embed th
 
 ### Key rules
 
-- Budget: aim for **4-8 tool calls** total across all phases.
+- Budget: aim for **3-6 tool calls** total across all phases. Prefer one `library_retrieve` call over many `paper_read` calls for broad collection/library search.
+- Preserve coverage wording from `library_retrieve`: sampled snippets support evidence summaries, but only complete metadata/indexed/searchable-text coverage can support exhaustive folder-level claims. Use `paperMatches` before manually inferring from snippets.
 - Do NOT dump all paper content into context — use abstracts first, deep-read selectively.
 - Do NOT produce a per-paper summary list — synthesize thematically.
 - If the review covers >10 papers, prioritize breadth (abstracts) over depth (full reads).

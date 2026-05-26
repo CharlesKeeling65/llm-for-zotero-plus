@@ -42,6 +42,7 @@ type PaperReadInput = {
   target?: PdfTarget;
   targets?: PdfTarget[];
   query?: string;
+  queryVariants?: string[];
   sections?: string[];
   pages?: number[];
   neighborPages?: number;
@@ -310,7 +311,8 @@ function buildQuoteCitationFromResult(
   return buildQuoteCitation({
     quoteText: result.text,
     citationLabel:
-      normalizeString(result.sourceLabel) || normalizeString(result.citationLabel),
+      normalizeString(result.sourceLabel) ||
+      normalizeString(result.citationLabel),
     contextItemId: paperContext?.contextItemId,
     itemId: paperContext?.itemId,
   });
@@ -462,6 +464,12 @@ export function createPaperReadTool(
             },
           },
           query: { type: "string" },
+          queryVariants: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Optional search probes such as translations, acronyms, notation variants, or technical equivalents.",
+          },
           sections: { type: "array", items: { type: "string" } },
           pages: {
             anyOf: [
@@ -547,6 +555,7 @@ export function createPaperReadTool(
           mode === "overview" ? MAX_OVERVIEW_TARGETS : MAX_TARGETED_TARGETS,
         ),
         query: normalizeString(args.query),
+        queryVariants: normalizeStringArray(args.queryVariants),
         sections: normalizeStringArray(args.sections),
         pages: normalizePages(args.pages),
         neighborPages: normalizePositiveInt(args.neighborPages),
@@ -672,8 +681,13 @@ export function createPaperReadTool(
       const results = await retrievalService.retrieveEvidence({
         papers: targets,
         question,
+        queryVariants: input.queryVariants,
+        model: context.request.model,
         apiBase: context.request.apiBase,
         apiKey: context.request.apiKey,
+        authMode: context.request.authMode,
+        providerProtocol: context.request.providerProtocol,
+        reasoning: context.request.reasoning,
         topK: input.topK,
         perPaperTopK: input.topK,
       });
