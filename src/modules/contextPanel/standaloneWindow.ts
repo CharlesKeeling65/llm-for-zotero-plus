@@ -188,6 +188,8 @@ const STANDALONE_SIDEBAR_PANEL_WIDTH_PX = 220;
 const STANDALONE_SIDEBAR_AUTO_COLLAPSE_THRESHOLD_PX =
   STANDALONE_MIN_WIDTH_PX + STANDALONE_SIDEBAR_PANEL_WIDTH_PX;
 const STANDALONE_SIDEBAR_AUTO_EXPAND_THRESHOLD_PX = 600;
+const STANDALONE_WINDOW_FEATURES =
+  "chrome,extrachrome,menubar,resizable,scrollbars,status,centerscreen,dialog=no,dependent=no";
 
 function clampStandaloneWindowSize(win: Window): void {
   try {
@@ -595,7 +597,7 @@ export function openStandaloneChat(options?: {
   const newWin = mainWin.openDialog(
     `chrome://${config.addonRef}/content/standaloneChat.xhtml`,
     "llmforzotero-standalone-chat",
-    "chrome,extrachrome,menubar,resizable,scrollbars,status,centerscreen",
+    STANDALONE_WINDOW_FEATURES,
   ) as Window | null;
   if (!newWin) {
     setStandalonePending(false);

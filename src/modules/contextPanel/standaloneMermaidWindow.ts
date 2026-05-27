@@ -19,6 +19,8 @@ const MERMAID_WINDOW_ZOOM_STEP = 0.25;
 const MERMAID_WINDOW_WHEEL_ZOOM_DELTA_MAX = 24;
 const MERMAID_WINDOW_WHEEL_ZOOM_SENSITIVITY = 0.002;
 const MERMAID_WINDOW_ROOT_ID = "llmforzotero-standalone-mermaid-root";
+const MERMAID_WINDOW_FEATURES =
+  "chrome,extrachrome,menubar,resizable,scrollbars,status,centerscreen,dialog=no,dependent=no";
 
 type OpenDialogWindow = Window & {
   openDialog?: (...args: unknown[]) => Window | null;
@@ -234,7 +236,7 @@ export function openStandaloneMermaidWindow(
     opener,
     `chrome://${config.addonRef}/content/standaloneMermaid.xhtml`,
     `llmforzotero-standalone-mermaid-${Date.now()}`,
-    "chrome,extrachrome,menubar,resizable,scrollbars,status,centerscreen",
+    MERMAID_WINDOW_FEATURES,
   ) as Window | null;
   if (!newWin) return false;
 
