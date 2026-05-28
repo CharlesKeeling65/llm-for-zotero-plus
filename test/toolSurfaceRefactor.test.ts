@@ -76,7 +76,7 @@ describe("semantic tool surface", function () {
       pdfPageService: {} as never,
       retrievalService: {} as never,
     });
-    const tools = registry.listTools();
+    const tools = registry.listToolsForRequest(baseContext.request);
     const names = tools.map((tool) => tool.name).sort();
 
     assert.deepEqual(names, [

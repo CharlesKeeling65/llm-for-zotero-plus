@@ -69,6 +69,7 @@ import {
   clearAgentConversationState,
   clearDeletedAgentConversationState,
 } from "./agentConversationCleanup";
+import { validateConversationScope } from "../../shared/conversationRegistry";
 
 type ConversationDeletionKind = "global" | "paper";
 
@@ -402,6 +403,27 @@ export async function finalizeConversationDeletion(
     libraryID,
     paperItemID: normalizePositiveInt(target.paperItemID) || undefined,
   };
+  const validScope = await validateConversationScope({
+    conversationKey,
+    system: normalizedTarget.conversationSystem,
+    kind: normalizedTarget.kind,
+    libraryID,
+    paperItemID: normalizedTarget.paperItemID,
+  });
+  if (!validScope) {
+    result.blocked = true;
+    recordIssue(
+      result,
+      "errors",
+      {
+        code: "catalog_row",
+        message:
+          "LLM: Refused to delete conversation with mismatched registry scope",
+      },
+      log,
+    );
+    return result;
+  }
   const operations = buildOperations(deps);
 
   await runStep(

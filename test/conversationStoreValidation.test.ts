@@ -8,10 +8,13 @@ import {
 import { appendMessage } from "../src/utils/chatStore";
 import {
   appendClaudeMessage,
+  listClaudePaperConversations,
   upsertClaudeConversationSummary,
 } from "../src/claudeCode/store";
 import {
   appendCodexMessage,
+  listCodexPaperConversations,
+  repairCodexConversationIdentityRegistry,
   repairMisroutedCodexConversationRows,
   upsertCodexConversationSummary,
 } from "../src/codexAppServer/store";
@@ -99,6 +102,170 @@ describe("conversation store key validation", function () {
       restore();
     }
   });
+
+  it("refuses to reassign an existing Codex paper conversation to a different paper", async function () {
+    const conversationKey = CODEX_PAPER_CONVERSATION_KEY_BASE + 123;
+    const { queries, restore } = installQueryRecorder(async (sql) => {
+      if (
+        sql.includes("FROM llm_for_zotero_codex_conversations c") &&
+        sql.includes("WHERE c.conversation_key = ?")
+      ) {
+        return [
+          {
+            conversationKey,
+            libraryID: 1,
+            kind: "paper",
+            paperItemID: 3196,
+            createdAt: 100,
+            updatedAt: 200,
+            title: "Existing paper",
+            userTurnCount: 1,
+          },
+        ];
+      }
+      return [];
+    });
+    try {
+      const stored = await upsertCodexConversationSummary({
+        conversationKey,
+        libraryID: 1,
+        kind: "paper",
+        paperItemID: 3340,
+      });
+
+      assert.equal(stored, false);
+      assert.isFalse(
+        queries.some((query) =>
+          query.sql.includes("INSERT INTO llm_for_zotero_codex_conversations"),
+        ),
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("backfills missing Codex registry rows while listing legacy history", async function () {
+    const conversationKey = CODEX_PAPER_CONVERSATION_KEY_BASE + 3331;
+    const { queries, restore } = installQueryRecorder(async (sql) => {
+      if (
+        sql.includes("FROM llm_for_zotero_codex_conversations c") &&
+        sql.includes("c.kind = 'paper'") &&
+        sql.includes("c.paper_item_id = ?")
+      ) {
+        return [
+          {
+            conversationKey,
+            libraryID: 1,
+            kind: "paper",
+            paperItemID: 3326,
+            createdAt: 100,
+            updatedAt: 200,
+            title: "Legacy paper chat",
+            userTurnCount: 1,
+          },
+        ];
+      }
+      return [];
+    });
+    try {
+      const entries = await listCodexPaperConversations(1, 3326, 10);
+
+      assert.lengthOf(entries, 1);
+      assert.equal(entries[0]?.conversationKey, conversationKey);
+      assert.isTrue(
+        queries.some((query) =>
+          query.sql.includes("INSERT INTO llm_for_zotero_conversation_registry"),
+        ),
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not list a missing-registry Codex row under the wrong paper after context repair", async function () {
+    const conversationKey = CODEX_PAPER_CONVERSATION_KEY_BASE + 3342;
+    const { queries, restore } = installQueryRecorder(async (sql) => {
+      if (
+        sql.includes("FROM llm_for_zotero_codex_conversations c") &&
+        sql.includes("c.kind = 'paper'") &&
+        sql.includes("c.paper_item_id = ?")
+      ) {
+        return [
+          {
+            conversationKey,
+            libraryID: 1,
+            kind: "paper",
+            paperItemID: 3342,
+            createdAt: 100,
+            updatedAt: 200,
+            title: "Wrong paper",
+            userTurnCount: 1,
+          },
+        ];
+      }
+      if (
+        sql.includes("FROM llm_for_zotero_codex_messages") &&
+        sql.includes("paper_contexts_json AS paperContextsJson")
+      ) {
+        return [
+          {
+            paperContextsJson: JSON.stringify([{ itemId: 3326 }]),
+          },
+        ];
+      }
+      return [];
+    });
+    try {
+      const entries = await listCodexPaperConversations(1, 3342, 10);
+
+      assert.lengthOf(entries, 0);
+      const repairUpdate = queries.find((query) =>
+        query.sql.includes("UPDATE llm_for_zotero_codex_conversations") &&
+        query.sql.includes("SET paper_item_id = ?"),
+      );
+      assert.deepEqual(repairUpdate?.params, [3326, conversationKey]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("backfills missing Claude registry rows while listing legacy history", async function () {
+    const conversationKey = CLAUDE_PAPER_CONVERSATION_KEY_BASE + 3331;
+    const { queries, restore } = installQueryRecorder(async (sql) => {
+      if (
+        sql.includes("FROM llm_for_zotero_claude_conversations c") &&
+        sql.includes("c.kind = 'paper'") &&
+        sql.includes("c.paper_item_id = ?")
+      ) {
+        return [
+          {
+            conversationKey,
+            libraryID: 1,
+            kind: "paper",
+            paperItemID: 3326,
+            createdAt: 100,
+            updatedAt: 200,
+            title: "Legacy Claude chat",
+            userTurnCount: 1,
+          },
+        ];
+      }
+      return [];
+    });
+    try {
+      const entries = await listClaudePaperConversations(1, 3326, 10);
+
+      assert.lengthOf(entries, 1);
+      assert.equal(entries[0]?.conversationKey, conversationKey);
+      assert.isTrue(
+        queries.some((query) =>
+          query.sql.includes("INSERT INTO llm_for_zotero_conversation_registry"),
+        ),
+      );
+    } finally {
+      restore();
+    }
+  });
 });
 
 describe("misrouted Codex conversation repair", function () {
@@ -175,6 +342,64 @@ describe("misrouted Codex conversation repair", function () {
         ),
       );
       assert.lengthOf(warnings, 2);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("Codex conversation identity repair", function () {
+  const conversationKey = CODEX_PAPER_CONVERSATION_KEY_BASE + 3340;
+
+  it("restores a wrong-paper Codex catalog row when message contexts prove the original paper", async function () {
+    const { queries, restore } = installQueryRecorder(async (sql) => {
+      if (
+        sql.includes("FROM llm_for_zotero_codex_conversations") &&
+        sql.includes("ORDER BY updatedAt DESC")
+      ) {
+        return [
+          {
+            conversationKey,
+            libraryID: 1,
+            kind: "paper",
+            paperItemID: 3340,
+            createdAt: 100,
+            updatedAt: 200,
+            title: "Wrong paper",
+          },
+        ];
+      }
+      if (
+        sql.includes("FROM llm_for_zotero_codex_messages") &&
+        sql.includes("paper_contexts_json AS paperContextsJson")
+      ) {
+        return [
+          {
+            paperContextsJson: JSON.stringify([
+              {
+                itemId: 3196,
+                contextItemId: 3197,
+                title: "Stable and Dynamic Coding for Working Memory",
+              },
+            ]),
+          },
+        ];
+      }
+      return [];
+    });
+    try {
+      await repairCodexConversationIdentityRegistry();
+
+      const repairUpdate = queries.find((query) =>
+        query.sql.includes("UPDATE llm_for_zotero_codex_conversations") &&
+        query.sql.includes("SET paper_item_id = ?"),
+      );
+      assert.deepEqual(repairUpdate?.params, [3196, conversationKey]);
+      assert.isTrue(
+        queries.some((query) =>
+          query.sql.includes("INSERT INTO llm_for_zotero_conversation_registry"),
+        ),
+      );
     } finally {
       restore();
     }

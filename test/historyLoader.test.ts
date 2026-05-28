@@ -227,7 +227,24 @@ describe("historyLoader", function () {
     globalScope.Zotero = {
       ...(originalZotero || {}),
       DB: {
-        queryAsync: async (sql: string) => {
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          if (
+            sql.includes("FROM llm_for_zotero_conversation_registry") &&
+            sql.includes("WHERE conversation_key = ?")
+          ) {
+            const conversationKey = Number(params?.[0]);
+            return [
+              {
+                conversationKey,
+                system: "claude_code",
+                kind: conversationKey === claudePaperKey ? "paper" : "global",
+                profileSignature: "profile-default",
+                libraryID: 1,
+                paperItemID: conversationKey === claudePaperKey ? 10 : null,
+                valid: 1,
+              },
+            ];
+          }
           if (
             sql.includes("FROM llm_for_zotero_claude_conversations c") &&
             sql.includes("c.kind = 'paper'")
@@ -298,7 +315,24 @@ describe("historyLoader", function () {
     globalScope.Zotero = {
       ...(originalZotero || {}),
       DB: {
-        queryAsync: async (sql: string) => {
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          if (
+            sql.includes("FROM llm_for_zotero_conversation_registry") &&
+            sql.includes("WHERE conversation_key = ?")
+          ) {
+            const conversationKey = Number(params?.[0]);
+            return [
+              {
+                conversationKey,
+                system: "codex",
+                kind: conversationKey === codexPaperKey ? "paper" : "global",
+                profileSignature: "profile-default",
+                libraryID: 1,
+                paperItemID: conversationKey === codexPaperKey ? 10 : null,
+                valid: 1,
+              },
+            ];
+          }
           if (
             sql.includes("FROM llm_for_zotero_codex_conversations c") &&
             sql.includes("c.kind = 'paper'")

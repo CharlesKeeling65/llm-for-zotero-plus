@@ -23,6 +23,7 @@ import {
   CLAUDE_HISTORY_LIMIT,
   buildDefaultClaudeGlobalConversationKey,
   buildDefaultClaudePaperConversationKey,
+  getClaudeAllocatedConversationKeyRange,
   getClaudeGlobalConversationKeyRange,
   getClaudePaperConversationKeyRange,
 } from "./constants";
@@ -30,12 +31,23 @@ import {
   getLastAllocatedClaudeGlobalConversationKey,
   getLastAllocatedClaudePaperConversationKey,
   isConversationKeyInRange,
+  removeLastUsedClaudePaperConversationKey,
   setLastAllocatedClaudeGlobalConversationKey,
   setLastAllocatedClaudePaperConversationKey,
   setLastUsedClaudeConversationMode,
   setLastUsedClaudeGlobalConversationKey,
   setLastUsedClaudePaperConversationKey,
 } from "./prefs";
+import {
+  getRegisteredConversationScope,
+  inferSinglePaperItemIdFromContextRows,
+  initConversationRegistryStore,
+  invalidateRegisteredConversationScope,
+  registerConversationScope,
+  repairRegisteredConversationScope,
+  validateConversationScope,
+  type PaperContextJsonColumns,
+} from "../shared/conversationRegistry";
 
 const CLAUDE_MESSAGES_TABLE = "llm_for_zotero_claude_messages";
 const CLAUDE_MESSAGES_INDEX = "llm_for_zotero_claude_messages_conversation_idx";
@@ -162,9 +174,6 @@ async function migrateLegacyClaudeConversationKeys(): Promise<void> {
     }
     if (!targetConversationKey) {
       targetConversationKey = Math.max(
-        kind === "paper"
-          ? buildDefaultClaudePaperConversationKey(paperItemID || 1)
-          : buildDefaultClaudeGlobalConversationKey(libraryID),
         ((kind === "paper"
           ? getLastAllocatedClaudePaperConversationKey()
           : getLastAllocatedClaudeGlobalConversationKey()) || 0) + 1,
@@ -215,8 +224,123 @@ async function migrateLegacyClaudeConversationKeys(): Promise<void> {
   }
 }
 
+function logClaudeScopeWarning(message: string): void {
+  const debug = (globalThis as typeof globalThis & {
+    Zotero?: { debug?: (message: string) => void };
+  }).Zotero?.debug;
+  debug?.(`LLM: ${message}`);
+}
+
+async function getClaudeMessagePaperContextRows(
+  conversationKey: number,
+): Promise<PaperContextJsonColumns[]> {
+  return ((await Zotero.DB.queryAsync(
+    `SELECT paper_contexts_json AS paperContextsJson,
+            full_text_paper_contexts_json AS fullTextPaperContextsJson,
+            selected_text_paper_contexts_json AS selectedTextPaperContextsJson,
+            citation_paper_contexts_json AS citationPaperContextsJson
+     FROM ${CLAUDE_MESSAGES_TABLE}
+     WHERE conversation_key = ?
+       AND (
+         paper_contexts_json IS NOT NULL OR
+         full_text_paper_contexts_json IS NOT NULL OR
+         selected_text_paper_contexts_json IS NOT NULL OR
+         citation_paper_contexts_json IS NOT NULL
+       )`,
+    [conversationKey],
+  )) || []) as PaperContextJsonColumns[];
+}
+
+export async function repairClaudeConversationIdentityRegistry(): Promise<void> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT conversation_key AS conversationKey,
+            library_id AS libraryID,
+            kind AS kind,
+            paper_item_id AS paperItemID,
+            created_at AS createdAt,
+            updated_at AS updatedAt,
+            title AS title
+     FROM ${CLAUDE_CONVERSATIONS_TABLE}
+     ORDER BY updated_at DESC, conversation_key DESC`,
+  )) as ClaudeConversationRow[] | undefined;
+  for (const row of rows || []) {
+    const summary = toClaudeConversationSummary(row);
+    if (!summary) continue;
+    if (summary.kind === "paper") {
+      const contextRows = await getClaudeMessagePaperContextRows(
+        summary.conversationKey,
+      );
+      const inferredPaperItemID =
+        inferSinglePaperItemIdFromContextRows(contextRows);
+      if (inferredPaperItemID === "ambiguous") {
+        await repairRegisteredConversationScope({
+          conversationKey: summary.conversationKey,
+          system: "claude_code",
+          kind: "paper",
+          libraryID: summary.libraryID,
+          paperItemID: summary.paperItemID,
+          createdAt: summary.createdAt,
+          updatedAt: summary.updatedAt,
+          title: summary.title,
+        });
+        await invalidateRegisteredConversationScope(
+          summary.conversationKey,
+          "ambiguous paper context evidence",
+        );
+        continue;
+      }
+      if (
+        inferredPaperItemID &&
+        summary.paperItemID &&
+        inferredPaperItemID !== summary.paperItemID
+      ) {
+        await Zotero.DB.queryAsync(
+          `UPDATE ${CLAUDE_CONVERSATIONS_TABLE}
+           SET paper_item_id = ?
+           WHERE conversation_key = ?`,
+          [inferredPaperItemID, summary.conversationKey],
+        );
+        removeLastUsedClaudePaperConversationKey(
+          summary.libraryID,
+          summary.paperItemID,
+        );
+        setLastUsedClaudePaperConversationKey(
+          summary.libraryID,
+          inferredPaperItemID,
+          summary.conversationKey,
+        );
+        await repairRegisteredConversationScope({
+          conversationKey: summary.conversationKey,
+          system: "claude_code",
+          kind: "paper",
+          libraryID: summary.libraryID,
+          paperItemID: inferredPaperItemID,
+          createdAt: summary.createdAt,
+          updatedAt: summary.updatedAt,
+          title: summary.title,
+        });
+        logClaudeScopeWarning(
+          `Repaired Claude conversation ${summary.conversationKey} from paper ${summary.paperItemID} to paper ${inferredPaperItemID} based on stored paper contexts.`,
+        );
+        continue;
+      }
+    }
+    await registerConversationScope({
+      conversationKey: summary.conversationKey,
+      system: "claude_code",
+      kind: summary.kind,
+      libraryID: summary.libraryID,
+      paperItemID: summary.paperItemID,
+      createdAt: summary.createdAt,
+      updatedAt: summary.updatedAt,
+      title: summary.title,
+    });
+  }
+}
+
 export async function initClaudeCodeStore(): Promise<void> {
   await Zotero.DB.executeTransaction(async () => {
+    await initConversationRegistryStore();
     await Zotero.DB.queryAsync(
       `CREATE TABLE IF NOT EXISTS ${CLAUDE_MESSAGES_TABLE} (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -326,6 +450,7 @@ export async function initClaudeCodeStore(): Promise<void> {
        ON ${CLAUDE_CONVERSATIONS_TABLE} (library_id, kind, paper_item_id, updated_at DESC, conversation_key DESC)`,
     );
     await migrateLegacyClaudeConversationKeys();
+    await repairClaudeConversationIdentityRegistry();
   });
 }
 
@@ -966,6 +1091,153 @@ function toClaudeConversationSummary(
   };
 }
 
+function sameClaudeCatalogScope(
+  existing: ClaudeConversationSummary,
+  params: {
+    libraryID: number;
+    kind: ClaudeConversationKind;
+    paperItemID?: number | null;
+  },
+): boolean {
+  const requestedPaperItemID =
+    params.kind === "paper"
+      ? normalizePaperItemID(Number(params.paperItemID))
+      : null;
+  return (
+    existing.libraryID === params.libraryID &&
+    existing.kind === params.kind &&
+    (existing.paperItemID || null) === (requestedPaperItemID || null)
+  );
+}
+
+async function filterValidClaudeConversationSummaries(
+  summaries: ClaudeConversationSummary[],
+  expectedPaperItemID?: number | null,
+): Promise<ClaudeConversationSummary[]> {
+  const filtered: ClaudeConversationSummary[] = [];
+  for (const summary of summaries) {
+    const validSummary = await validateOrRepairClaudeConversationSummary(summary);
+    if (!validSummary) continue;
+    const normalizedExpectedPaperItemID = normalizePaperItemID(
+      Number(expectedPaperItemID),
+    );
+    if (
+      normalizedExpectedPaperItemID &&
+      validSummary.kind === "paper" &&
+      validSummary.paperItemID !== normalizedExpectedPaperItemID
+    ) {
+      continue;
+    }
+    filtered.push(validSummary);
+  }
+  return filtered;
+}
+
+async function validateOrRepairClaudeConversationSummary(
+  summary: ClaudeConversationSummary,
+): Promise<ClaudeConversationSummary | null> {
+  const valid = await validateConversationScope({
+    conversationKey: summary.conversationKey,
+    system: "claude_code",
+    kind: summary.kind,
+    libraryID: summary.libraryID,
+    paperItemID: summary.paperItemID,
+  });
+  if (valid) return summary;
+
+  const registered = await getRegisteredConversationScope(
+    summary.conversationKey,
+  );
+  if (registered) return null;
+
+  if (summary.kind === "global") {
+    const registeredMissingGlobal = await registerConversationScope({
+      conversationKey: summary.conversationKey,
+      system: "claude_code",
+      kind: summary.kind,
+      libraryID: summary.libraryID,
+      paperItemID: summary.paperItemID,
+      createdAt: summary.createdAt,
+      updatedAt: summary.updatedAt,
+      title: summary.title,
+    });
+    return registeredMissingGlobal ? summary : null;
+  }
+
+  const contextRows = await getClaudeMessagePaperContextRows(
+    summary.conversationKey,
+  );
+  const inferredPaperItemID = inferSinglePaperItemIdFromContextRows(contextRows);
+  if (inferredPaperItemID === "ambiguous") {
+    await repairRegisteredConversationScope({
+      conversationKey: summary.conversationKey,
+      system: "claude_code",
+      kind: "paper",
+      libraryID: summary.libraryID,
+      paperItemID: summary.paperItemID,
+      createdAt: summary.createdAt,
+      updatedAt: summary.updatedAt,
+      title: summary.title,
+    });
+    await invalidateRegisteredConversationScope(
+      summary.conversationKey,
+      "ambiguous paper context evidence",
+    );
+    return null;
+  }
+
+  if (
+    inferredPaperItemID &&
+    summary.paperItemID &&
+    inferredPaperItemID !== summary.paperItemID
+  ) {
+    await Zotero.DB.queryAsync(
+      `UPDATE ${CLAUDE_CONVERSATIONS_TABLE}
+       SET paper_item_id = ?
+       WHERE conversation_key = ?`,
+      [inferredPaperItemID, summary.conversationKey],
+    );
+    removeLastUsedClaudePaperConversationKey(
+      summary.libraryID,
+      summary.paperItemID,
+    );
+    setLastUsedClaudePaperConversationKey(
+      summary.libraryID,
+      inferredPaperItemID,
+      summary.conversationKey,
+    );
+    await repairRegisteredConversationScope({
+      conversationKey: summary.conversationKey,
+      system: "claude_code",
+      kind: "paper",
+      libraryID: summary.libraryID,
+      paperItemID: inferredPaperItemID,
+      createdAt: summary.createdAt,
+      updatedAt: summary.updatedAt,
+      title: summary.title,
+    });
+    logClaudeScopeWarning(
+      `Repaired Claude conversation ${summary.conversationKey} from paper ${summary.paperItemID} to paper ${inferredPaperItemID} while loading history.`,
+    );
+    return {
+      ...summary,
+      paperItemID: inferredPaperItemID,
+    };
+  }
+
+  const registeredMissingPaper = await registerConversationScope({
+    conversationKey: summary.conversationKey,
+    system: "claude_code",
+    kind: "paper",
+    libraryID: summary.libraryID,
+    paperItemID: summary.paperItemID,
+    createdAt: summary.createdAt,
+    updatedAt: summary.updatedAt,
+    title: summary.title,
+  });
+  return registeredMissingPaper ? summary : null;
+}
+
 export async function getClaudeConversationSummary(
   conversationKey: number,
 ): Promise<ClaudeConversationSummary | null> {
@@ -1018,7 +1290,7 @@ export async function upsertClaudeConversationSummary(params: {
   cwd?: string;
   model?: string;
   effort?: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const conversationKey = normalizeConversationKey(params.conversationKey);
   const libraryID = normalizeLibraryID(params.libraryID);
   if (
@@ -1026,10 +1298,37 @@ export async function upsertClaudeConversationSummary(params: {
     !libraryID ||
     !isClaudeStoreConversationKeyForKind(conversationKey, params.kind)
   ) {
-    return;
+    return false;
   }
   const createdAt = normalizeCatalogTimestamp(params.createdAt);
   const updatedAt = normalizeCatalogTimestamp(params.updatedAt);
+  const paperItemID = normalizePaperItemID(Number(params.paperItemID));
+  const title = normalizeConversationTitleSeed(params.title || "") || null;
+  const existing = await getClaudeConversationSummary(conversationKey);
+  if (
+    existing &&
+    !sameClaudeCatalogScope(existing, {
+      libraryID,
+      kind: params.kind,
+      paperItemID,
+    })
+  ) {
+    logClaudeScopeWarning(
+      `Refused to reassign Claude conversation ${conversationKey} from ${existing.kind}/${existing.libraryID}/${existing.paperItemID || ""} to ${params.kind}/${libraryID}/${paperItemID || ""}.`,
+    );
+    return false;
+  }
+  const registryOk = await registerConversationScope({
+    conversationKey,
+    system: "claude_code",
+    kind: params.kind,
+    libraryID,
+    paperItemID,
+    createdAt,
+    updatedAt,
+    title,
+  });
+  if (!registryOk) return false;
   await Zotero.DB.queryAsync(
     `INSERT INTO ${CLAUDE_CONVERSATIONS_TABLE}
       (conversation_key, library_id, kind, paper_item_id, created_at, updated_at, title, provider_session_id, scoped_conversation_key, scope_type, scope_id, scope_label, cwd, model_name, effort)
@@ -1053,10 +1352,10 @@ export async function upsertClaudeConversationSummary(params: {
       conversationKey,
       libraryID,
       params.kind,
-      normalizePaperItemID(Number(params.paperItemID)) || null,
+      paperItemID || null,
       createdAt,
       updatedAt,
-      normalizeConversationTitleSeed(params.title || "") || null,
+      title,
       params.providerSessionId?.trim() || null,
       params.scopedConversationKey?.trim() || null,
       params.scopeType?.trim() || null,
@@ -1067,6 +1366,7 @@ export async function upsertClaudeConversationSummary(params: {
       params.effort?.trim() || null,
     ],
   );
+  return true;
 }
 
 async function listClaudeConversations(params: {
@@ -1141,9 +1441,13 @@ async function listClaudeConversations(params: {
       : [libraryID, limit],
   )) as ClaudeConversationRow[] | undefined;
   if (!rows?.length) return [];
-  return rows
+  const summaries = rows
     .map((row) => toClaudeConversationSummary(row))
     .filter((row): row is ClaudeConversationSummary => Boolean(row));
+  return filterValidClaudeConversationSummaries(
+    summaries,
+    params.kind === "paper" ? normalizePaperItemID(Number(params.paperItemID)) : null,
+  );
 }
 
 export async function listClaudeGlobalConversations(
@@ -1206,9 +1510,10 @@ export async function listAllClaudePaperConversationsByLibrary(
     [normalizedLibraryID, normalizedLimit],
   )) as ClaudeConversationRow[] | undefined;
   if (!rows?.length) return [];
-  return rows
+  const summaries = rows
     .map((row) => toClaudeConversationSummary(row))
     .filter((row): row is ClaudeConversationSummary => Boolean(row));
+  return filterValidClaudeConversationSummaries(summaries);
 }
 
 export async function ensureClaudeGlobalConversation(
@@ -1217,13 +1522,16 @@ export async function ensureClaudeGlobalConversation(
   const normalizedLibraryID = normalizeLibraryID(libraryID);
   if (!normalizedLibraryID) return null;
   const conversationKey = buildDefaultClaudeGlobalConversationKey(normalizedLibraryID);
-  await upsertClaudeConversationSummary({
+  const stored = await upsertClaudeConversationSummary({
     conversationKey,
     libraryID: normalizedLibraryID,
     kind: "global",
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
+  if (!stored) {
+    return createClaudeGlobalConversation(normalizedLibraryID);
+  }
   return getClaudeConversationSummary(conversationKey);
 }
 
@@ -1235,7 +1543,7 @@ export async function ensureClaudePaperConversation(
   const normalizedPaperItemID = normalizePaperItemID(paperItemID);
   if (!normalizedLibraryID || !normalizedPaperItemID) return null;
   const conversationKey = buildDefaultClaudePaperConversationKey(normalizedPaperItemID);
-  await upsertClaudeConversationSummary({
+  const stored = await upsertClaudeConversationSummary({
     conversationKey,
     libraryID: normalizedLibraryID,
     kind: "paper",
@@ -1243,13 +1551,17 @@ export async function ensureClaudePaperConversation(
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
+  if (!stored) {
+    return createClaudePaperConversation(
+      normalizedLibraryID,
+      normalizedPaperItemID,
+    );
+  }
   return getClaudeConversationSummary(conversationKey);
 }
 
 async function getMaxClaudeConversationKey(kind: ClaudeConversationKind): Promise<number> {
-  const range = kind === "global"
-    ? getClaudeGlobalConversationKeyRange()
-    : getClaudePaperConversationKeyRange();
+  const range = getClaudeAllocatedConversationKeyRange(kind);
   const rows = (await Zotero.DB.queryAsync(
     `SELECT MAX(conversation_key) AS maxConversationKey
      FROM ${CLAUDE_CONVERSATIONS_TABLE}
@@ -1260,7 +1572,7 @@ async function getMaxClaudeConversationKey(kind: ClaudeConversationKind): Promis
   )) as Array<{ maxConversationKey?: unknown }> | undefined;
   const maxConversationKey = Number(rows?.[0]?.maxConversationKey);
   if (!Number.isFinite(maxConversationKey) || maxConversationKey <= 0) {
-    return range.start;
+    return range.start - 1;
   }
   return Math.floor(maxConversationKey);
 }
@@ -1271,17 +1583,18 @@ export async function createClaudeGlobalConversation(
   const normalizedLibraryID = normalizeLibraryID(libraryID);
   if (!normalizedLibraryID) return null;
   const nextKey = Math.max(
-    buildDefaultClaudeGlobalConversationKey(normalizedLibraryID),
+    getClaudeAllocatedConversationKeyRange("global").start,
     (getLastAllocatedClaudeGlobalConversationKey() || 0) + 1,
     (await getMaxClaudeConversationKey("global")) + 1,
   );
-  await upsertClaudeConversationSummary({
+  const stored = await upsertClaudeConversationSummary({
     conversationKey: nextKey,
     libraryID: normalizedLibraryID,
     kind: "global",
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
+  if (!stored) return null;
   setLastAllocatedClaudeGlobalConversationKey(nextKey);
   return getClaudeConversationSummary(nextKey);
 }
@@ -1294,11 +1607,11 @@ export async function createClaudePaperConversation(
   const normalizedPaperItemID = normalizePaperItemID(paperItemID);
   if (!normalizedLibraryID || !normalizedPaperItemID) return null;
   const nextKey = Math.max(
-    buildDefaultClaudePaperConversationKey(normalizedPaperItemID),
+    getClaudeAllocatedConversationKeyRange("paper").start,
     (getLastAllocatedClaudePaperConversationKey() || 0) + 1,
     (await getMaxClaudeConversationKey("paper")) + 1,
   );
-  await upsertClaudeConversationSummary({
+  const stored = await upsertClaudeConversationSummary({
     conversationKey: nextKey,
     libraryID: normalizedLibraryID,
     kind: "paper",
@@ -1306,6 +1619,7 @@ export async function createClaudePaperConversation(
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
+  if (!stored) return null;
   setLastAllocatedClaudePaperConversationKey(nextKey);
   return getClaudeConversationSummary(nextKey);
 }

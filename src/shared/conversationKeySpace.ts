@@ -18,6 +18,8 @@ export const UPSTREAM_RUNTIME_CONVERSATION_KEY_END = 3_000_000_000;
 
 export const RUNTIME_PROFILE_KEY_MULTIPLIER = 1_000_000_000;
 export const RUNTIME_PROFILE_SLOT_MOD = 999_999;
+export const RUNTIME_DEFAULT_CONVERSATION_KEY_OFFSET = 100_000_000;
+export const RUNTIME_ALLOCATED_CONVERSATION_KEY_OFFSET = 500_000_000;
 
 export const CLAUDE_GLOBAL_CONVERSATION_KEY_BASE = 3_000_000_000_000_000;
 export const CLAUDE_PAPER_CONVERSATION_KEY_BASE = 4_000_000_000_000_000;
@@ -118,6 +120,30 @@ export function getConversationKeyRange(
   };
 }
 
+export function getRuntimeDefaultConversationKeyRange(
+  system: Exclude<ConversationSystem, "upstream">,
+  kind: ConversationKeyKind,
+  profileSignature?: string | null,
+): ConversationKeyRange {
+  const range = getConversationKeyRange(system, kind, profileSignature || "");
+  return {
+    start: range.start + RUNTIME_DEFAULT_CONVERSATION_KEY_OFFSET,
+    endExclusive: range.start + RUNTIME_ALLOCATED_CONVERSATION_KEY_OFFSET,
+  };
+}
+
+export function getRuntimeAllocatedConversationKeyRange(
+  system: Exclude<ConversationSystem, "upstream">,
+  kind: ConversationKeyKind,
+  profileSignature?: string | null,
+): ConversationKeyRange {
+  const range = getConversationKeyRange(system, kind, profileSignature || "");
+  return {
+    start: range.start + RUNTIME_ALLOCATED_CONVERSATION_KEY_OFFSET,
+    endExclusive: range.endExclusive,
+  };
+}
+
 export function buildDefaultConversationKey(
   system: ConversationSystem,
   kind: ConversationKeyKind,
@@ -129,7 +155,7 @@ export function buildDefaultConversationKey(
     return normalizeScopeId(scopeId);
   }
   return (
-    getConversationKeyRange(system, kind, profileSignature || "").start +
+    getRuntimeDefaultConversationKeyRange(system, kind, profileSignature || "").start +
     normalizeScopeId(scopeId)
   );
 }
@@ -168,6 +194,25 @@ export function isConversationKeyForKind(
     classification?.system === system &&
     classification.kind === kind
   );
+}
+
+export function isRuntimeAllocatedConversationKeyForKind(
+  system: Exclude<ConversationSystem, "upstream">,
+  kind: ConversationKeyKind,
+  key: number,
+): boolean {
+  if (!isConversationKeyForKind(system, kind, key)) return false;
+  const base =
+    system === "claude_code"
+      ? kind === "global"
+        ? CLAUDE_GLOBAL_CONVERSATION_KEY_BASE
+        : CLAUDE_PAPER_CONVERSATION_KEY_BASE
+      : kind === "global"
+        ? CODEX_GLOBAL_CONVERSATION_KEY_BASE
+        : CODEX_PAPER_CONVERSATION_KEY_BASE;
+  const offsetWithinProfile =
+    (Math.floor(key) - base) % RUNTIME_PROFILE_KEY_MULTIPLIER;
+  return offsetWithinProfile >= RUNTIME_ALLOCATED_CONVERSATION_KEY_OFFSET;
 }
 
 export function isConversationKeyInRange(

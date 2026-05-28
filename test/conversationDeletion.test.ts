@@ -2,6 +2,15 @@ import { assert } from "chai";
 import { finalizeConversationDeletion } from "../src/modules/contextPanel/conversationDeletion";
 
 describe("conversationDeletion", function () {
+  const globalScope = globalThis as typeof globalThis & {
+    Zotero?: Record<string, unknown>;
+  };
+  const originalZotero = globalScope.Zotero;
+
+  afterEach(function () {
+    globalScope.Zotero = originalZotero;
+  });
+
   function createOperations(calls: string[]) {
     return {
       clearStoredConversation: async (conversationKey: number) => {
@@ -42,6 +51,51 @@ describe("conversationDeletion", function () {
       },
     };
   }
+
+  it("blocks deletion when the registry scope does not match the target", async function () {
+    const calls: string[] = [];
+    globalScope.Zotero = {
+      DB: {
+        queryAsync: async (sql: string) => {
+          if (
+            sql.includes("FROM llm_for_zotero_conversation_registry") &&
+            sql.includes("WHERE conversation_key = ?")
+          ) {
+            return [
+              {
+                conversationKey: 7101,
+                system: "codex",
+                kind: "paper",
+                profileSignature: "profile-test",
+                libraryID: 1,
+                paperItemID: 3196,
+                valid: 1,
+              },
+            ];
+          }
+          return [];
+        },
+      },
+    };
+
+    const result = await finalizeConversationDeletion(
+      {
+        conversationKey: 7101,
+        kind: "paper",
+        conversationSystem: "codex",
+        libraryID: 1,
+        paperItemID: 3340,
+      },
+      {
+        operations: createOperations(calls),
+      },
+    );
+
+    assert.isFalse(result.ok);
+    assert.isTrue(result.blocked);
+    assert.deepEqual(calls, []);
+    assert.equal(result.errors[0]?.code, "catalog_row");
+  });
 
   it("deletes upstream global conversations through the shared cleanup path", async function () {
     const calls: string[] = [];

@@ -125,4 +125,58 @@ describe("clearConversationController", function () {
 
     assert.isFalse(called);
   });
+
+  it("does not clear stored rows when the registry scope is invalid", async function () {
+    const calls: string[] = [];
+    let statusMessage = "";
+    const { clearCurrentConversation } = createClearConversationController({
+      getConversationKey: () => 7001,
+      getCurrentItemID: () => 7001,
+      validateConversationScope: async () => false,
+      clearTransientComposeStateForItem: () => {
+        calls.push("compose");
+      },
+      resetComposePreviewUI: () => {
+        calls.push("preview");
+      },
+      resetConversationHistory: (conversationKey) => {
+        calls.push(`history:${conversationKey}`);
+      },
+      markConversationLoaded: (conversationKey) => {
+        calls.push(`loaded:${conversationKey}`);
+      },
+      clearStoredConversation: async () => {
+        calls.push("stored");
+      },
+      resetConversationTitle: async () => {
+        calls.push("title");
+      },
+      clearOwnerAttachmentRefs: async () => {
+        calls.push("refs");
+      },
+      removeConversationAttachmentFiles: async () => {
+        calls.push("files");
+      },
+      refreshChatPreservingScroll: () => {
+        calls.push("refresh");
+      },
+      refreshGlobalHistoryHeader: () => {
+        calls.push("history-header");
+      },
+      scheduleAttachmentGc: () => {
+        calls.push("gc");
+      },
+      setStatusMessage: (message) => {
+        statusMessage = message;
+      },
+    });
+
+    await clearCurrentConversation();
+
+    assert.deepEqual(calls, ["history:7001", "loaded:7001"]);
+    assert.equal(
+      statusMessage,
+      "Conversation identity mismatch; not clearing stored history.",
+    );
+  });
 });

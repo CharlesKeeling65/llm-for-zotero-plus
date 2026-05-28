@@ -2,6 +2,7 @@ import { config } from "../../package.json";
 import {
   UPSTREAM_GLOBAL_CONVERSATION_KEY_BASE,
   isConversationKeyForKind,
+  isRuntimeAllocatedConversationKeyForKind,
 } from "./conversationKeySpace";
 
 type ZoteroPrefsAPI = {
@@ -116,7 +117,7 @@ export function cleanupRememberedConversationKeyPrefs(): void {
   cleanJsonNumberMapPref("claudeCodeLastAllocatedConversationKeyMap", (key, value) => {
     const kind = allocatedKindForMapKey(key);
     return Boolean(
-      kind && isConversationKeyForKind("claude_code", kind, value),
+      kind && isRuntimeAllocatedConversationKeyForKind("claude_code", kind, value),
     );
   });
 
@@ -130,7 +131,9 @@ export function cleanupRememberedConversationKeyPrefs(): void {
     "codexAppServerLastAllocatedConversationKeyMap",
     (key, value) => {
       const kind = allocatedKindForMapKey(key);
-      return Boolean(kind && isConversationKeyForKind("codex", kind, value));
+      return Boolean(
+        kind && isRuntimeAllocatedConversationKeyForKind("codex", kind, value),
+      );
     },
   );
 
@@ -139,15 +142,15 @@ export function cleanupRememberedConversationKeyPrefs(): void {
   );
 
   cleanScalarConversationKeyPref("claudeCodeLastAllocatedGlobalConversationKey", (value) =>
-    isConversationKeyForKind("claude_code", "global", value),
+    isRuntimeAllocatedConversationKeyForKind("claude_code", "global", value),
   );
   cleanScalarConversationKeyPref("claudeCodeLastAllocatedPaperConversationKey", (value) =>
-    isConversationKeyForKind("claude_code", "paper", value),
+    isRuntimeAllocatedConversationKeyForKind("claude_code", "paper", value),
   );
   cleanScalarConversationKeyPref("codexAppServerLastAllocatedGlobalConversationKey", (value) =>
-    isConversationKeyForKind("codex", "global", value),
+    isRuntimeAllocatedConversationKeyForKind("codex", "global", value),
   );
   cleanScalarConversationKeyPref("codexAppServerLastAllocatedPaperConversationKey", (value) =>
-    isConversationKeyForKind("codex", "paper", value),
+    isRuntimeAllocatedConversationKeyForKind("codex", "paper", value),
   );
 }

@@ -4,6 +4,8 @@ import {
   CODEX_GLOBAL_CONVERSATION_KEY_BASE,
   CODEX_PAPER_CONVERSATION_KEY_BASE,
   getConversationKeyRange,
+  getRuntimeAllocatedConversationKeyRange,
+  getRuntimeDefaultConversationKeyRange,
   getProfileKeyOffset,
   getProfileKeySlot,
   isConversationKeyFor,
@@ -66,6 +68,32 @@ export function getCodexPaperConversationKeyRange(): {
   return getConversationKeyRange(
     "codex",
     "paper",
+    getCodexProfileSignature(),
+  );
+}
+
+export function getCodexDefaultConversationKeyRange(
+  kind: "global" | "paper",
+): {
+  start: number;
+  endExclusive: number;
+} {
+  return getRuntimeDefaultConversationKeyRange(
+    "codex",
+    kind,
+    getCodexProfileSignature(),
+  );
+}
+
+export function getCodexAllocatedConversationKeyRange(
+  kind: "global" | "paper",
+): {
+  start: number;
+  endExclusive: number;
+} {
+  return getRuntimeAllocatedConversationKeyRange(
+    "codex",
+    kind,
     getCodexProfileSignature(),
   );
 }

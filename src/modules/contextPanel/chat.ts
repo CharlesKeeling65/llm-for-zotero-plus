@@ -257,6 +257,10 @@ import {
 import { getConversationKey } from "./conversationIdentity";
 import { recordContextCacheTelemetry } from "../../contextCache/manager";
 import { resolveTextAttachmentSourceModeFromMetadata } from "./textAttachmentExtraction";
+import {
+  validateConversationScope,
+  type ConversationRegistryScope,
+} from "../../shared/conversationRegistry";
 
 export { getConversationKey } from "./conversationIdentity";
 export { renderAssistantMarkdownHtmlForChat } from "./renderedMarkdown";
@@ -271,6 +275,100 @@ function getAbortControllerCtor(): new () => AbortController {
       }
     ).AbortController
   );
+}
+
+function normalizeConversationScopeInt(value: unknown): number | null {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.floor(parsed);
+}
+
+function buildConversationRegistryScopeForItem(
+  item: Zotero.Item,
+  conversationKey: number,
+  conversationSystem?: ConversationSystem | null,
+): ConversationRegistryScope | null {
+  const normalizedConversationKey =
+    normalizeConversationScopeInt(conversationKey);
+  if (!normalizedConversationKey) return null;
+  const storageSystem = resolveConversationStorageSystem({
+    conversationKey: normalizedConversationKey,
+    conversationSystem,
+  });
+  if (!storageSystem) return null;
+  const kind = resolveDisplayConversationKind(item);
+  const libraryID = normalizeConversationScopeInt(item?.libraryID);
+  if (!kind || !libraryID) return null;
+  if (kind === "global") {
+    return {
+      conversationKey: normalizedConversationKey,
+      system: storageSystem,
+      kind: "global",
+      libraryID,
+    };
+  }
+  const baseItem = resolveConversationBaseItem(item);
+  const paperItemID = normalizeConversationScopeInt(baseItem?.id);
+  const paperLibraryID =
+    normalizeConversationScopeInt(baseItem?.libraryID) || libraryID;
+  if (!paperItemID || !paperLibraryID) return null;
+  return {
+    conversationKey: normalizedConversationKey,
+    system: storageSystem,
+    kind: "paper",
+    libraryID: paperLibraryID,
+    paperItemID,
+  };
+}
+
+async function validateConversationScopeForItem(params: {
+  item: Zotero.Item;
+  conversationKey: number;
+  conversationSystem?: ConversationSystem | null;
+}): Promise<boolean> {
+  const scope = buildConversationRegistryScopeForItem(
+    params.item,
+    params.conversationKey,
+    params.conversationSystem,
+  );
+  if (!scope) return true;
+  const valid = await validateConversationScope(scope);
+  if (!valid) {
+    ztoolkit.log(
+      `LLM: Refused to use mismatched ${scope.system}/${scope.kind} conversation ${scope.conversationKey} for library ${scope.libraryID} paper ${scope.paperItemID || ""}`,
+    );
+  }
+  return valid;
+}
+
+function collectMessagePaperContextIds(
+  refs: (PaperContextRef | undefined)[] | undefined,
+  out: Set<number>,
+): void {
+  if (!Array.isArray(refs)) return;
+  for (const ref of refs) {
+    const itemID = normalizeConversationScopeInt(ref?.itemId);
+    if (itemID) out.add(itemID);
+  }
+}
+
+function storedMessagesMatchActivePaper(
+  item: Zotero.Item,
+  storedMessages: StoredChatMessage[],
+): boolean {
+  if (resolveDisplayConversationKind(item) !== "paper") return true;
+  const baseItem = resolveConversationBaseItem(item);
+  const activePaperItemID = normalizeConversationScopeInt(baseItem?.id);
+  if (!activePaperItemID) return true;
+  const ids = new Set<number>();
+  for (const message of storedMessages) {
+    collectMessagePaperContextIds(message.paperContexts, ids);
+    collectMessagePaperContextIds(message.fullTextPaperContexts, ids);
+    collectMessagePaperContextIds(message.citationPaperContexts, ids);
+    collectMessagePaperContextIds(message.selectedTextPaperContexts, ids);
+  }
+  if (ids.size === 0) return true;
+  return ids.has(activePaperItemID);
 }
 
 function isCompactCommandText(text: string): boolean {
@@ -1408,11 +1506,27 @@ export async function ensureConversationLoaded(
 
   const task = (async () => {
     try {
+      const validScope = await validateConversationScopeForItem({
+        item,
+        conversationKey,
+        conversationSystem,
+      });
+      if (!validScope) {
+        chatHistory.set(conversationKey, []);
+        return;
+      }
       const storedMessages = await loadStoredConversationByKey(
         conversationKey,
         PERSISTED_HISTORY_LIMIT,
         conversationSystem,
       );
+      if (!storedMessagesMatchActivePaper(item, storedMessages)) {
+        ztoolkit.log(
+          `LLM: Refused to render conversation ${conversationKey} because stored paper contexts do not include the active paper.`,
+        );
+        chatHistory.set(conversationKey, []);
+        return;
+      }
       const panelMessages = storedMessages.map((message) =>
         toPanelMessage(message),
       );
@@ -5790,11 +5904,56 @@ function buildAgentEngineDeps(
     finalizeCancelledAssistantMessage,
     sanitizeText,
     appendReasoningPart,
-    persistConversationMessage,
-    updateStoredLatestUserMessage:
-      updateStoredLatestUserMessageByConversation as AgentEngineDeps["updateStoredLatestUserMessage"],
-    updateStoredLatestAssistantMessage:
-      updateStoredLatestAssistantMessageByConversation as AgentEngineDeps["updateStoredLatestAssistantMessage"],
+    persistConversationMessage: async (conversationKey, message) => {
+      const system = getEffectiveConversationSystem();
+      if (
+        currentItem &&
+        !(await validateConversationScopeForItem({
+          item: currentItem,
+          conversationKey,
+          conversationSystem: system,
+        }))
+      ) {
+        return;
+      }
+      await persistConversationMessage(conversationKey, message, system);
+    },
+    updateStoredLatestUserMessage: async (conversationKey, data) => {
+      const system = getEffectiveConversationSystem();
+      if (
+        currentItem &&
+        !(await validateConversationScopeForItem({
+          item: currentItem,
+          conversationKey,
+          conversationSystem: system,
+        }))
+      ) {
+        return;
+      }
+      await updateStoredLatestUserMessageByConversation(
+        conversationKey,
+        data as Parameters<typeof updateStoredLatestUserMessageByConversation>[1],
+        system,
+      );
+    },
+    updateStoredLatestAssistantMessage: async (conversationKey, data) => {
+      const system = getEffectiveConversationSystem();
+      if (
+        currentItem &&
+        !(await validateConversationScopeForItem({
+          item: currentItem,
+          conversationKey,
+          conversationSystem: system,
+        }))
+      ) {
+        return;
+      }
+      await updateStoredLatestAssistantMessageByConversation(
+        conversationKey,
+        data as Parameters<typeof updateStoredLatestAssistantMessageByConversation>[1],
+        system,
+      );
+    },
     sendChatFallback: sendQuestion,
     getAgentRuntime: () =>
       getEffectiveConversationSystem() === "claude_code"
@@ -5890,6 +6049,26 @@ async function sendAgentQuestion(opts: {
   pdfUploadSystemMessages?: string[];
   conversationSystem?: ConversationSystem;
 }): Promise<void> {
+  const conversationKey = getConversationKey(opts.item);
+  const safeConversationScope = await validateConversationScopeForItem({
+    item: opts.item,
+    conversationKey,
+    conversationSystem: opts.conversationSystem,
+  });
+  if (!safeConversationScope) {
+    const ui = getPanelRequestUI(opts.body);
+    const helpers = createPanelUpdateHelpers(
+      opts.body,
+      opts.item,
+      conversationKey,
+      ui,
+    );
+    helpers.setStatusSafely(
+      "Conversation identity mismatch; open a new chat.",
+      "error",
+    );
+    return;
+  }
   await sendAgentTurn(
     opts,
     buildAgentEngineDeps(opts.item, opts.conversationSystem),
@@ -6038,6 +6217,23 @@ export async function sendQuestion(
   optimisticHelpers.refreshChatSafely();
 
   const conversationKey = getConversationKey(item);
+  const safeConversationScope = await validateConversationScopeForItem({
+    item,
+    conversationKey,
+    conversationSystem: effectiveConversationSystem,
+  });
+  if (!safeConversationScope) {
+    removeMessageReference(provisionalHistory, optimisticUserMessage);
+    removeMessageReference(provisionalHistory, optimisticAssistantMessage);
+    optimisticHelpers.refreshChatSafely();
+    optimisticHelpers.setStatusSafely(
+      "Conversation identity mismatch; open a new chat.",
+      "error",
+    );
+    restoreRequestUIIdle(body, conversationKey, thisRequestId);
+    setPendingRequestId(conversationKey, 0);
+    return;
+  }
 
   // Add user message with attached selected text / screenshots metadata
   if (!chatHistory.has(conversationKey)) {

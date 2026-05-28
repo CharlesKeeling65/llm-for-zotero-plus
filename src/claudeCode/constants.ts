@@ -4,6 +4,8 @@ import {
   CLAUDE_GLOBAL_CONVERSATION_KEY_BASE,
   CLAUDE_PAPER_CONVERSATION_KEY_BASE,
   getConversationKeyRange,
+  getRuntimeAllocatedConversationKeyRange,
+  getRuntimeDefaultConversationKeyRange,
   getProfileKeyOffset,
   getProfileKeySlot,
   isConversationKeyFor,
@@ -59,6 +61,32 @@ export function getClaudePaperConversationKeyRange(): {
   return getConversationKeyRange(
     "claude_code",
     "paper",
+    getClaudeProfileSignature(),
+  );
+}
+
+export function getClaudeDefaultConversationKeyRange(
+  kind: "global" | "paper",
+): {
+  start: number;
+  endExclusive: number;
+} {
+  return getRuntimeDefaultConversationKeyRange(
+    "claude_code",
+    kind,
+    getClaudeProfileSignature(),
+  );
+}
+
+export function getClaudeAllocatedConversationKeyRange(
+  kind: "global" | "paper",
+): {
+  start: number;
+  endExclusive: number;
+} {
+  return getRuntimeAllocatedConversationKeyRange(
+    "claude_code",
+    kind,
     getClaudeProfileSignature(),
   );
 }

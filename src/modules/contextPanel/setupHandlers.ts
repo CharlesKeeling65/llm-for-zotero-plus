@@ -510,6 +510,8 @@ import {
   createCodexGlobalPortalItem,
   createCodexPaperPortalItem,
 } from "../../codexAppServer/portal";
+import { resolveConversationStorageSystem } from "../../shared/conversationStorageRouting";
+import { validateConversationScope } from "../../shared/conversationRegistry";
 
 setQueuedFollowUpBodySyncCallback((body) => {
   try {
@@ -6080,6 +6082,45 @@ export function setupHandlers(
       if (hasPendingTurnDeletionForConversation(conversationKey)) {
         clearPendingTurnDeletion();
       }
+    },
+    validateConversationScope: async (conversationKey) => {
+      if (!item) return true;
+      const conversationSystem = resolveConversationSystemForItem(item);
+      const storageSystem = resolveConversationStorageSystem({
+        conversationKey,
+        conversationSystem,
+      });
+      const kind = resolveDisplayConversationKind(item);
+      const libraryID = Number(item.libraryID || 0);
+      if (!storageSystem || !kind || !Number.isFinite(libraryID) || libraryID <= 0) {
+        return true;
+      }
+      if (kind === "global") {
+        return validateConversationScope({
+          conversationKey,
+          system: storageSystem,
+          kind: "global",
+          libraryID: Math.floor(libraryID),
+        });
+      }
+      const baseItem = resolveConversationBaseItem(item);
+      const paperItemID = Number(baseItem?.id || 0);
+      const paperLibraryID = Number(baseItem?.libraryID || libraryID);
+      if (
+        !Number.isFinite(paperItemID) ||
+        paperItemID <= 0 ||
+        !Number.isFinite(paperLibraryID) ||
+        paperLibraryID <= 0
+      ) {
+        return true;
+      }
+      return validateConversationScope({
+        conversationKey,
+        system: storageSystem,
+        kind: "paper",
+        libraryID: Math.floor(paperLibraryID),
+        paperItemID: Math.floor(paperItemID),
+      });
     },
     clearTransientComposeStateForItem,
     resetComposePreviewUI,

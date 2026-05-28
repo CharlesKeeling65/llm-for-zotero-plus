@@ -5,6 +5,7 @@ import type { ConversationSystem } from "../shared/types";
 import {
   CLAUDE_MODEL_OPTIONS,
   CLAUDE_REASONING_OPTIONS,
+  getClaudeAllocatedConversationKeyRange,
   getClaudeGlobalConversationKeyRange,
   getClaudePaperConversationKeyRange,
   type ClaudeReasoningMode,
@@ -302,13 +303,22 @@ export function isConversationKeyInRange(
   return value >= range.start && value < range.endExclusive;
 }
 
+function isConversationKeyInAllocatedRange(
+  value: number,
+  kind: "global" | "paper",
+): boolean {
+  if (!Number.isFinite(value) || value <= 0) return false;
+  const range = getClaudeAllocatedConversationKeyRange(kind);
+  return value >= range.start && value < range.endExclusive;
+}
+
 function getScopedLegacyAllocatedConversationKey(kind: "global" | "paper"): number | null {
   const value = getNumberPref(
     kind === "global"
       ? "claudeCodeLastAllocatedGlobalConversationKey"
       : "claudeCodeLastAllocatedPaperConversationKey",
   );
-  return value && isConversationKeyInRange(value, kind) ? value : null;
+  return value && isConversationKeyInAllocatedRange(value, kind) ? value : null;
 }
 
 export function getLastUsedClaudeGlobalConversationKey(
@@ -396,13 +406,15 @@ function buildLastAllocatedMapKey(kind: "global" | "paper"): string {
 export function getLastAllocatedClaudeGlobalConversationKey(): number | null {
   const map = getJsonPref("claudeCodeLastAllocatedConversationKeyMap");
   const value = Number(map[buildLastAllocatedMapKey("global")]);
-  if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  if (Number.isFinite(value) && isConversationKeyInAllocatedRange(value, "global")) {
+    return Math.floor(value);
+  }
   return getScopedLegacyAllocatedConversationKey("global");
 }
 
 export function setLastAllocatedClaudeGlobalConversationKey(conversationKey: number): void {
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
-  if (!isConversationKeyInRange(conversationKey, "global")) return;
+  if (!isConversationKeyInAllocatedRange(conversationKey, "global")) return;
   const current = getLastAllocatedClaudeGlobalConversationKey() || 0;
   const normalized = Math.floor(conversationKey);
   if (normalized <= current) return;
@@ -415,13 +427,15 @@ export function setLastAllocatedClaudeGlobalConversationKey(conversationKey: num
 export function getLastAllocatedClaudePaperConversationKey(): number | null {
   const map = getJsonPref("claudeCodeLastAllocatedConversationKeyMap");
   const value = Number(map[buildLastAllocatedMapKey("paper")]);
-  if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  if (Number.isFinite(value) && isConversationKeyInAllocatedRange(value, "paper")) {
+    return Math.floor(value);
+  }
   return getScopedLegacyAllocatedConversationKey("paper");
 }
 
 export function setLastAllocatedClaudePaperConversationKey(conversationKey: number): void {
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
-  if (!isConversationKeyInRange(conversationKey, "paper")) return;
+  if (!isConversationKeyInAllocatedRange(conversationKey, "paper")) return;
   const current = getLastAllocatedClaudePaperConversationKey() || 0;
   const normalized = Math.floor(conversationKey);
   if (normalized <= current) return;

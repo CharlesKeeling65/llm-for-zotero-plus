@@ -17,6 +17,10 @@ import {
   UPSTREAM_RUNTIME_CONVERSATION_KEY_END,
 } from "../shared/conversationKeySpace";
 import {
+  initConversationRegistryStore,
+  registerConversationScope,
+} from "../shared/conversationRegistry";
+import {
   normalizeSelectedTextNoteContexts,
   normalizeSelectedTextPaperContexts,
   normalizeSelectedTextSource,
@@ -420,8 +424,69 @@ export async function reconcileConversationCatalogs(): Promise<void> {
   await reconcileLegacyPaperV1ConversationCatalog();
 }
 
+async function backfillUpstreamConversationRegistry(): Promise<void> {
+  const globalRows = (await Zotero.DB.queryAsync(
+    `SELECT conversation_key AS conversationKey,
+            library_id AS libraryID,
+            created_at AS createdAt,
+            title AS title
+     FROM ${GLOBAL_CONVERSATIONS_TABLE}`,
+  )) as Array<{
+    conversationKey?: unknown;
+    libraryID?: unknown;
+    createdAt?: unknown;
+    title?: unknown;
+  }> | undefined;
+  for (const row of globalRows || []) {
+    const conversationKey = normalizeConversationKey(Number(row.conversationKey));
+    const libraryID = normalizeLibraryID(Number(row.libraryID));
+    if (!conversationKey || !libraryID) continue;
+    await registerConversationScope({
+      conversationKey,
+      system: "upstream",
+      kind: "global",
+      libraryID,
+      createdAt: normalizeCatalogTimestamp(row.createdAt),
+      updatedAt: normalizeCatalogTimestamp(row.createdAt),
+      title: typeof row.title === "string" ? row.title : undefined,
+    });
+  }
+
+  const paperRows = (await Zotero.DB.queryAsync(
+    `SELECT conversation_key AS conversationKey,
+            library_id AS libraryID,
+            paper_item_id AS paperItemID,
+            created_at AS createdAt,
+            title AS title
+     FROM ${PAPER_CONVERSATIONS_TABLE}`,
+  )) as Array<{
+    conversationKey?: unknown;
+    libraryID?: unknown;
+    paperItemID?: unknown;
+    createdAt?: unknown;
+    title?: unknown;
+  }> | undefined;
+  for (const row of paperRows || []) {
+    const conversationKey = normalizeConversationKey(Number(row.conversationKey));
+    const libraryID = normalizeLibraryID(Number(row.libraryID));
+    const paperItemID = normalizePaperItemID(Number(row.paperItemID));
+    if (!conversationKey || !libraryID || !paperItemID) continue;
+    await registerConversationScope({
+      conversationKey,
+      system: "upstream",
+      kind: "paper",
+      libraryID,
+      paperItemID,
+      createdAt: normalizeCatalogTimestamp(row.createdAt),
+      updatedAt: normalizeCatalogTimestamp(row.createdAt),
+      title: typeof row.title === "string" ? row.title : undefined,
+    });
+  }
+}
+
 export async function initChatStore(): Promise<void> {
   await Zotero.DB.executeTransaction(async () => {
+    await initConversationRegistryStore();
     await migrateLegacyChatStore();
 
     await Zotero.DB.queryAsync(
@@ -719,6 +784,7 @@ export async function initChatStore(): Promise<void> {
     );
 
     await reconcileConversationCatalogs();
+    await backfillUpstreamConversationRegistry();
   });
 }
 
@@ -1587,6 +1653,15 @@ export async function ensurePaperV1Conversation(
       createdAt,
     ],
   );
+  await registerConversationScope({
+    conversationKey: normalizedPaperItemID,
+    system: "upstream",
+    kind: "paper",
+    libraryID: normalizedLibraryID,
+    paperItemID: normalizedPaperItemID,
+    createdAt,
+    updatedAt: createdAt,
+  });
   return await getPaperConversation(normalizedPaperItemID);
 }
 
@@ -1618,6 +1693,15 @@ export async function createPaperConversation(
         createdAt,
       ],
     );
+    await registerConversationScope({
+      conversationKey: nextConversationKey,
+      system: "upstream",
+      kind: "paper",
+      libraryID: normalizedLibraryID,
+      paperItemID: normalizedPaperItemID,
+      createdAt,
+      updatedAt: createdAt,
+    });
     return await getPaperConversation(nextConversationKey);
   });
 }
@@ -1814,6 +1898,14 @@ export async function ensureGlobalConversationExists(
      VALUES (?, ?, ?, NULL)`,
     [normalizedKey, normalizedLibraryID, Date.now()],
   );
+  await registerConversationScope({
+    conversationKey: normalizedKey,
+    system: "upstream",
+    kind: "global",
+    libraryID: normalizedLibraryID,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
 }
 
 export async function createGlobalConversation(
@@ -1844,6 +1936,14 @@ export async function createGlobalConversation(
        VALUES (?, ?, ?, NULL)`,
       [nextConversationKey, normalizedLibraryID, createdAt],
     );
+    await registerConversationScope({
+      conversationKey: nextConversationKey,
+      system: "upstream",
+      kind: "global",
+      libraryID: normalizedLibraryID,
+      createdAt,
+      updatedAt: createdAt,
+    });
     return nextConversationKey;
   });
 }

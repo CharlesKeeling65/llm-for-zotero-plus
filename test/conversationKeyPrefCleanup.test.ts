@@ -4,6 +4,7 @@ import {
   CLAUDE_PAPER_CONVERSATION_KEY_BASE,
   CODEX_GLOBAL_CONVERSATION_KEY_BASE,
   CODEX_PAPER_CONVERSATION_KEY_BASE,
+  RUNTIME_ALLOCATED_CONVERSATION_KEY_OFFSET,
   UPSTREAM_PAPER_CONVERSATION_KEY_BASE,
 } from "../src/shared/conversationKeySpace";
 import { cleanupRememberedConversationKeyPrefs } from "../src/shared/conversationKeyPrefCleanup";
@@ -68,7 +69,10 @@ describe("conversation key preference cleanup", function () {
     prefStore.set(
       prefKey("claudeCodeLastAllocatedConversationKeyMap"),
       JSON.stringify({
-        "profile-a:global": CLAUDE_GLOBAL_CONVERSATION_KEY_BASE + 2,
+        "profile-a:global":
+          CLAUDE_GLOBAL_CONVERSATION_KEY_BASE +
+          RUNTIME_ALLOCATED_CONVERSATION_KEY_OFFSET +
+          2,
         "profile-a:paper": CLAUDE_GLOBAL_CONVERSATION_KEY_BASE + 3,
       }),
     );
@@ -96,7 +100,10 @@ describe("conversation key preference cleanup", function () {
     assert.deepEqual(
       readMap(prefStore, "claudeCodeLastAllocatedConversationKeyMap"),
       {
-        "profile-a:global": CLAUDE_GLOBAL_CONVERSATION_KEY_BASE + 2,
+        "profile-a:global":
+          CLAUDE_GLOBAL_CONVERSATION_KEY_BASE +
+          RUNTIME_ALLOCATED_CONVERSATION_KEY_OFFSET +
+          2,
       },
     );
     assert.equal(
@@ -105,7 +112,7 @@ describe("conversation key preference cleanup", function () {
     );
     assert.equal(
       prefStore.get(prefKey("claudeCodeLastAllocatedPaperConversationKey")),
-      CLAUDE_PAPER_CONVERSATION_KEY_BASE + 4,
+      0,
     );
   });
 });

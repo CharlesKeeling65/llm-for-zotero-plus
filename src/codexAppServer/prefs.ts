@@ -4,6 +4,7 @@ import { config } from "../../package.json";
 import {
   DEFAULT_CODEX_RUNTIME_MODEL,
   CODEX_REASONING_OPTIONS,
+  getCodexAllocatedConversationKeyRange,
   getCodexGlobalConversationKeyRange,
   getCodexPaperConversationKeyRange,
   getCodexProfileSignature,
@@ -218,6 +219,15 @@ export function isConversationKeyInRange(
   return value >= range.start && value < range.endExclusive;
 }
 
+function isConversationKeyInAllocatedRange(
+  value: number,
+  kind: "global" | "paper",
+): boolean {
+  if (!Number.isFinite(value) || value <= 0) return false;
+  const range = getCodexAllocatedConversationKeyRange(kind);
+  return value >= range.start && value < range.endExclusive;
+}
+
 export function getLastUsedCodexGlobalConversationKey(
   libraryID: number,
 ): number | null {
@@ -294,19 +304,21 @@ function getScopedLegacyAllocatedConversationKey(kind: "global" | "paper"): numb
       ? "codexAppServerLastAllocatedGlobalConversationKey"
       : "codexAppServerLastAllocatedPaperConversationKey",
   );
-  return value && isConversationKeyInRange(value, kind) ? value : null;
+  return value && isConversationKeyInAllocatedRange(value, kind) ? value : null;
 }
 
 export function getLastAllocatedCodexGlobalConversationKey(): number | null {
   const map = getJsonPref("codexAppServerLastAllocatedConversationKeyMap");
   const value = Number(map[buildLastAllocatedMapKey("global")]);
-  if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  if (Number.isFinite(value) && isConversationKeyInAllocatedRange(value, "global")) {
+    return Math.floor(value);
+  }
   return getScopedLegacyAllocatedConversationKey("global");
 }
 
 export function setLastAllocatedCodexGlobalConversationKey(conversationKey: number): void {
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
-  if (!isConversationKeyInRange(conversationKey, "global")) return;
+  if (!isConversationKeyInAllocatedRange(conversationKey, "global")) return;
   const current = getLastAllocatedCodexGlobalConversationKey() || 0;
   const normalized = Math.floor(conversationKey);
   if (normalized <= current) return;
@@ -319,13 +331,15 @@ export function setLastAllocatedCodexGlobalConversationKey(conversationKey: numb
 export function getLastAllocatedCodexPaperConversationKey(): number | null {
   const map = getJsonPref("codexAppServerLastAllocatedConversationKeyMap");
   const value = Number(map[buildLastAllocatedMapKey("paper")]);
-  if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  if (Number.isFinite(value) && isConversationKeyInAllocatedRange(value, "paper")) {
+    return Math.floor(value);
+  }
   return getScopedLegacyAllocatedConversationKey("paper");
 }
 
 export function setLastAllocatedCodexPaperConversationKey(conversationKey: number): void {
   if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
-  if (!isConversationKeyInRange(conversationKey, "paper")) return;
+  if (!isConversationKeyInAllocatedRange(conversationKey, "paper")) return;
   const current = getLastAllocatedCodexPaperConversationKey() || 0;
   const normalized = Math.floor(conversationKey);
   if (normalized <= current) return;

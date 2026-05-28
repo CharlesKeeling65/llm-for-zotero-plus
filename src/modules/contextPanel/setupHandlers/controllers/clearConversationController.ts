@@ -9,6 +9,7 @@ type ClearConversationControllerDeps = {
   setPendingRequestId?: (conversationKey: number, requestId: number) => void;
   setAbortController?: (conversationKey: number, value: AbortController | null) => void;
   clearPendingTurnDeletion?: (conversationKey: number) => void;
+  validateConversationScope?: (conversationKey: number) => Promise<boolean>;
   clearTransientComposeStateForItem: (itemId: number) => void;
   resetComposePreviewUI: () => void;
   resetConversationHistory: (conversationKey: number) => void;
@@ -52,6 +53,20 @@ export function createClearConversationController(
 
     const normalizedConversationKey = Math.floor(conversationKey as number);
     const normalizedItemID = Math.floor(currentItemID as number);
+    if (deps.validateConversationScope) {
+      const validScope = await deps.validateConversationScope(
+        normalizedConversationKey,
+      );
+      if (!validScope) {
+        deps.resetConversationHistory(normalizedConversationKey);
+        deps.markConversationLoaded(normalizedConversationKey);
+        deps.setStatusMessage?.(
+          "Conversation identity mismatch; not clearing stored history.",
+          "error",
+        );
+        return;
+      }
+    }
 
     const pendingRequestId = deps.getPendingRequestId?.(normalizedConversationKey) || 0;
     if (pendingRequestId > 0) {

@@ -3595,10 +3595,6 @@ export function createHistoryLifecycleController(
         }
 
         await refreshGlobalHistoryHeader();
-        if (!latestConversationHistory.length) {
-          closeHistoryMenu();
-          return;
-        }
         if (isHistoryMenuOpen()) {
           closeHistoryMenu();
           return;

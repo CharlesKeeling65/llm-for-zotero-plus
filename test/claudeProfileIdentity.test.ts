@@ -6,7 +6,10 @@ import {
   buildClaudeProfileSignature,
   getClaudeRuntimeRootDir,
 } from "../src/claudeCode/projectSkills";
-import { buildDefaultClaudeGlobalConversationKey } from "../src/claudeCode/constants";
+import {
+  buildDefaultClaudeGlobalConversationKey,
+  getClaudeAllocatedConversationKeyRange,
+} from "../src/claudeCode/constants";
 import { buildClaudeScope } from "../src/claudeCode/runtime";
 import {
   getLastAllocatedClaudeGlobalConversationKey,
@@ -174,13 +177,15 @@ describe("Claude profile-aware identity", function () {
     };
 
     setMockProfile("/profiles/a");
-    const profileAKey = buildDefaultClaudeGlobalConversationKey(1) + 10;
+    const profileAKey =
+      getClaudeAllocatedConversationKeyRange("global").start + 10;
     setLastAllocatedClaudeGlobalConversationKey(profileAKey);
     assert.equal(getLastAllocatedClaudeGlobalConversationKey(), profileAKey);
 
     setMockProfile("/profiles/b");
     assert.isNull(getLastAllocatedClaudeGlobalConversationKey());
-    const profileBKey = buildDefaultClaudeGlobalConversationKey(1) + 20;
+    const profileBKey =
+      getClaudeAllocatedConversationKeyRange("global").start + 20;
     setLastAllocatedClaudeGlobalConversationKey(profileBKey);
     assert.equal(getLastAllocatedClaudeGlobalConversationKey(), profileBKey);
 

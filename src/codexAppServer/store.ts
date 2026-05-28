@@ -26,6 +26,7 @@ import {
   CODEX_HISTORY_LIMIT,
   buildDefaultCodexGlobalConversationKey,
   buildDefaultCodexPaperConversationKey,
+  getCodexAllocatedConversationKeyRange,
   getCodexGlobalConversationKeyRange,
   getCodexPaperConversationKeyRange,
 } from "./constants";
@@ -33,12 +34,23 @@ import {
   getLastAllocatedCodexGlobalConversationKey,
   getLastAllocatedCodexPaperConversationKey,
   isConversationKeyInRange,
+  removeLastUsedCodexPaperConversationKey,
   setLastAllocatedCodexGlobalConversationKey,
   setLastAllocatedCodexPaperConversationKey,
   setLastUsedCodexConversationMode,
   setLastUsedCodexGlobalConversationKey,
   setLastUsedCodexPaperConversationKey,
 } from "./prefs";
+import {
+  getRegisteredConversationScope,
+  inferSinglePaperItemIdFromContextRows,
+  initConversationRegistryStore,
+  invalidateRegisteredConversationScope,
+  registerConversationScope,
+  repairRegisteredConversationScope,
+  validateConversationScope,
+  type PaperContextJsonColumns,
+} from "../shared/conversationRegistry";
 
 const CODEX_MESSAGES_TABLE = "llm_for_zotero_codex_messages";
 const CODEX_MESSAGES_INDEX = "llm_for_zotero_codex_messages_conversation_idx";
@@ -195,9 +207,6 @@ async function migrateLegacyCodexConversationKeys(): Promise<void> {
     }
     if (!targetConversationKey) {
       targetConversationKey = Math.max(
-        kind === "paper"
-          ? buildDefaultCodexPaperConversationKey(paperItemID || 1)
-          : buildDefaultCodexGlobalConversationKey(libraryID),
         ((kind === "paper"
           ? getLastAllocatedCodexPaperConversationKey()
           : getLastAllocatedCodexGlobalConversationKey()) || 0) + 1,
@@ -441,8 +450,116 @@ export async function repairMisroutedCodexConversationRows(): Promise<void> {
   }
 }
 
+async function getCodexMessagePaperContextRows(
+  conversationKey: number,
+): Promise<PaperContextJsonColumns[]> {
+  return ((await Zotero.DB.queryAsync(
+    `SELECT paper_contexts_json AS paperContextsJson,
+            full_text_paper_contexts_json AS fullTextPaperContextsJson,
+            selected_text_paper_contexts_json AS selectedTextPaperContextsJson,
+            citation_paper_contexts_json AS citationPaperContextsJson
+     FROM ${CODEX_MESSAGES_TABLE}
+     WHERE conversation_key = ?
+       AND (
+         paper_contexts_json IS NOT NULL OR
+         full_text_paper_contexts_json IS NOT NULL OR
+         selected_text_paper_contexts_json IS NOT NULL OR
+         citation_paper_contexts_json IS NOT NULL
+       )`,
+    [conversationKey],
+  )) || []) as PaperContextJsonColumns[];
+}
+
+export async function repairCodexConversationIdentityRegistry(): Promise<void> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT conversation_key AS conversationKey,
+            library_id AS libraryID,
+            kind AS kind,
+            paper_item_id AS paperItemID,
+            created_at AS createdAt,
+            ${CODEX_CONVERSATION_ACTIVITY_TIMESTAMP_SQL} AS updatedAt,
+            title AS title
+     FROM ${CODEX_CONVERSATIONS_TABLE}
+     ORDER BY updatedAt DESC, conversation_key DESC`,
+  )) as CodexConversationRow[] | undefined;
+  for (const row of rows || []) {
+    const summary = toCodexConversationSummary(row);
+    if (!summary) continue;
+    if (summary.kind === "paper") {
+      const contextRows = await getCodexMessagePaperContextRows(
+        summary.conversationKey,
+      );
+      const inferredPaperItemID =
+        inferSinglePaperItemIdFromContextRows(contextRows);
+      if (inferredPaperItemID === "ambiguous") {
+        await repairRegisteredConversationScope({
+          conversationKey: summary.conversationKey,
+          system: "codex",
+          kind: "paper",
+          libraryID: summary.libraryID,
+          paperItemID: summary.paperItemID,
+          createdAt: summary.createdAt,
+          updatedAt: summary.updatedAt,
+          title: summary.title,
+        });
+        await invalidateRegisteredConversationScope(
+          summary.conversationKey,
+          "ambiguous paper context evidence",
+        );
+        continue;
+      }
+      if (
+        inferredPaperItemID &&
+        summary.paperItemID &&
+        inferredPaperItemID !== summary.paperItemID
+      ) {
+        await Zotero.DB.queryAsync(
+          `UPDATE ${CODEX_CONVERSATIONS_TABLE}
+           SET paper_item_id = ?
+           WHERE conversation_key = ?`,
+          [inferredPaperItemID, summary.conversationKey],
+        );
+        removeLastUsedCodexPaperConversationKey(
+          summary.libraryID,
+          summary.paperItemID,
+        );
+        setLastUsedCodexPaperConversationKey(
+          summary.libraryID,
+          inferredPaperItemID,
+          summary.conversationKey,
+        );
+        await repairRegisteredConversationScope({
+          conversationKey: summary.conversationKey,
+          system: "codex",
+          kind: "paper",
+          libraryID: summary.libraryID,
+          paperItemID: inferredPaperItemID,
+          createdAt: summary.createdAt,
+          updatedAt: summary.updatedAt,
+          title: summary.title,
+        });
+        logCodexScopeWarning(
+          `Repaired Codex conversation ${summary.conversationKey} from paper ${summary.paperItemID} to paper ${inferredPaperItemID} based on stored paper contexts.`,
+        );
+        continue;
+      }
+    }
+    await registerConversationScope({
+      conversationKey: summary.conversationKey,
+      system: "codex",
+      kind: summary.kind,
+      libraryID: summary.libraryID,
+      paperItemID: summary.paperItemID,
+      createdAt: summary.createdAt,
+      updatedAt: summary.updatedAt,
+      title: summary.title,
+    });
+  }
+}
+
 export async function initCodexAppServerStore(): Promise<void> {
   await Zotero.DB.executeTransaction(async () => {
+    await initConversationRegistryStore();
     await Zotero.DB.queryAsync(
       `CREATE TABLE IF NOT EXISTS ${CODEX_MESSAGES_TABLE} (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -553,6 +670,7 @@ export async function initCodexAppServerStore(): Promise<void> {
     );
     await repairMisroutedCodexConversationRows();
     await migrateLegacyCodexConversationKeys();
+    await repairCodexConversationIdentityRegistry();
   });
   cleanupRememberedConversationKeyPrefs();
 }
@@ -1208,6 +1326,160 @@ function toCodexConversationSummary(
   };
 }
 
+function sameCodexCatalogScope(
+  existing: CodexConversationSummary,
+  params: {
+    libraryID: number;
+    kind: CodexConversationKind;
+    paperItemID?: number | null;
+  },
+): boolean {
+  const requestedPaperItemID =
+    params.kind === "paper"
+      ? normalizePaperItemID(Number(params.paperItemID))
+      : null;
+  return (
+    existing.libraryID === params.libraryID &&
+    existing.kind === params.kind &&
+    (existing.paperItemID || null) === (requestedPaperItemID || null)
+  );
+}
+
+function logCodexScopeWarning(message: string): void {
+  const debug = (globalThis as typeof globalThis & {
+    Zotero?: { debug?: (message: string) => void };
+  }).Zotero?.debug;
+  debug?.(`LLM: ${message}`);
+}
+
+async function filterValidCodexConversationSummaries(
+  summaries: CodexConversationSummary[],
+  expectedPaperItemID?: number | null,
+): Promise<CodexConversationSummary[]> {
+  const filtered: CodexConversationSummary[] = [];
+  for (const summary of summaries) {
+    const validSummary = await validateOrRepairCodexConversationSummary(summary);
+    if (!validSummary) continue;
+    const normalizedExpectedPaperItemID = normalizePaperItemID(
+      Number(expectedPaperItemID),
+    );
+    if (
+      normalizedExpectedPaperItemID &&
+      validSummary.kind === "paper" &&
+      validSummary.paperItemID !== normalizedExpectedPaperItemID
+    ) {
+      continue;
+    }
+    filtered.push(validSummary);
+  }
+  return filtered;
+}
+
+async function validateOrRepairCodexConversationSummary(
+  summary: CodexConversationSummary,
+): Promise<CodexConversationSummary | null> {
+  const valid = await validateConversationScope({
+    conversationKey: summary.conversationKey,
+    system: "codex",
+    kind: summary.kind,
+    libraryID: summary.libraryID,
+    paperItemID: summary.paperItemID,
+  });
+  if (valid) return summary;
+
+  const registered = await getRegisteredConversationScope(
+    summary.conversationKey,
+  );
+  if (registered) return null;
+
+  if (summary.kind === "global") {
+    const registeredMissingGlobal = await registerConversationScope({
+      conversationKey: summary.conversationKey,
+      system: "codex",
+      kind: summary.kind,
+      libraryID: summary.libraryID,
+      paperItemID: summary.paperItemID,
+      createdAt: summary.createdAt,
+      updatedAt: summary.updatedAt,
+      title: summary.title,
+    });
+    return registeredMissingGlobal ? summary : null;
+  }
+
+  const contextRows = await getCodexMessagePaperContextRows(
+    summary.conversationKey,
+  );
+  const inferredPaperItemID = inferSinglePaperItemIdFromContextRows(contextRows);
+  if (inferredPaperItemID === "ambiguous") {
+    await repairRegisteredConversationScope({
+      conversationKey: summary.conversationKey,
+      system: "codex",
+      kind: "paper",
+      libraryID: summary.libraryID,
+      paperItemID: summary.paperItemID,
+      createdAt: summary.createdAt,
+      updatedAt: summary.updatedAt,
+      title: summary.title,
+    });
+    await invalidateRegisteredConversationScope(
+      summary.conversationKey,
+      "ambiguous paper context evidence",
+    );
+    return null;
+  }
+
+  if (
+    inferredPaperItemID &&
+    summary.paperItemID &&
+    inferredPaperItemID !== summary.paperItemID
+  ) {
+    await Zotero.DB.queryAsync(
+      `UPDATE ${CODEX_CONVERSATIONS_TABLE}
+       SET paper_item_id = ?
+       WHERE conversation_key = ?`,
+      [inferredPaperItemID, summary.conversationKey],
+    );
+    removeLastUsedCodexPaperConversationKey(
+      summary.libraryID,
+      summary.paperItemID,
+    );
+    setLastUsedCodexPaperConversationKey(
+      summary.libraryID,
+      inferredPaperItemID,
+      summary.conversationKey,
+    );
+    await repairRegisteredConversationScope({
+      conversationKey: summary.conversationKey,
+      system: "codex",
+      kind: "paper",
+      libraryID: summary.libraryID,
+      paperItemID: inferredPaperItemID,
+      createdAt: summary.createdAt,
+      updatedAt: summary.updatedAt,
+      title: summary.title,
+    });
+    logCodexScopeWarning(
+      `Repaired Codex conversation ${summary.conversationKey} from paper ${summary.paperItemID} to paper ${inferredPaperItemID} while loading history.`,
+    );
+    return {
+      ...summary,
+      paperItemID: inferredPaperItemID,
+    };
+  }
+
+  const registeredMissingPaper = await registerConversationScope({
+    conversationKey: summary.conversationKey,
+    system: "codex",
+    kind: "paper",
+    libraryID: summary.libraryID,
+    paperItemID: summary.paperItemID,
+    createdAt: summary.createdAt,
+    updatedAt: summary.updatedAt,
+    title: summary.title,
+  });
+  return registeredMissingPaper ? summary : null;
+}
+
 export async function getCodexConversationSummary(
   conversationKey: number,
 ): Promise<CodexConversationSummary | null> {
@@ -1260,7 +1532,7 @@ export async function upsertCodexConversationSummary(params: {
   cwd?: string;
   model?: string;
   effort?: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const conversationKey = normalizeConversationKey(params.conversationKey);
   const libraryID = normalizeLibraryID(params.libraryID);
   if (
@@ -1268,10 +1540,37 @@ export async function upsertCodexConversationSummary(params: {
     !libraryID ||
     !isCodexStoreConversationKeyForKind(conversationKey, params.kind)
   ) {
-    return;
+    return false;
   }
   const createdAt = normalizeCatalogTimestamp(params.createdAt);
   const updatedAt = normalizeCatalogTimestamp(params.updatedAt);
+  const paperItemID = normalizePaperItemID(Number(params.paperItemID));
+  const title = normalizeConversationTitleSeed(params.title || "") || null;
+  const existing = await getCodexConversationSummary(conversationKey);
+  if (
+    existing &&
+    !sameCodexCatalogScope(existing, {
+      libraryID,
+      kind: params.kind,
+      paperItemID,
+    })
+  ) {
+    logCodexScopeWarning(
+      `Refused to reassign Codex conversation ${conversationKey} from ${existing.kind}/${existing.libraryID}/${existing.paperItemID || ""} to ${params.kind}/${libraryID}/${paperItemID || ""}.`,
+    );
+    return false;
+  }
+  const registryOk = await registerConversationScope({
+    conversationKey,
+    system: "codex",
+    kind: params.kind,
+    libraryID,
+    paperItemID,
+    createdAt,
+    updatedAt,
+    title,
+  });
+  if (!registryOk) return false;
   await Zotero.DB.queryAsync(
     `INSERT INTO ${CODEX_CONVERSATIONS_TABLE}
       (conversation_key, library_id, kind, paper_item_id, created_at, updated_at, title, provider_session_id, scoped_conversation_key, scope_type, scope_id, scope_label, cwd, model_name, effort)
@@ -1295,10 +1594,10 @@ export async function upsertCodexConversationSummary(params: {
       conversationKey,
       libraryID,
       params.kind,
-      normalizePaperItemID(Number(params.paperItemID)) || null,
+      paperItemID || null,
       createdAt,
       updatedAt,
-      normalizeConversationTitleSeed(params.title || "") || null,
+      title,
       params.providerSessionId?.trim() || null,
       params.scopedConversationKey?.trim() || null,
       params.scopeType?.trim() || null,
@@ -1309,6 +1608,7 @@ export async function upsertCodexConversationSummary(params: {
       params.effort?.trim() || null,
     ],
   );
+  return true;
 }
 
 async function listCodexConversations(params: {
@@ -1383,9 +1683,13 @@ async function listCodexConversations(params: {
       : [libraryID, limit],
   )) as CodexConversationRow[] | undefined;
   if (!rows?.length) return [];
-  return rows
+  const summaries = rows
     .map((row) => toCodexConversationSummary(row))
     .filter((row): row is CodexConversationSummary => Boolean(row));
+  return filterValidCodexConversationSummaries(
+    summaries,
+    params.kind === "paper" ? normalizePaperItemID(Number(params.paperItemID)) : null,
+  );
 }
 
 export async function listCodexGlobalConversations(
@@ -1448,9 +1752,10 @@ export async function listAllCodexPaperConversationsByLibrary(
     [normalizedLibraryID, normalizedLimit],
   )) as CodexConversationRow[] | undefined;
   if (!rows?.length) return [];
-  return rows
+  const summaries = rows
     .map((row) => toCodexConversationSummary(row))
     .filter((row): row is CodexConversationSummary => Boolean(row));
+  return filterValidCodexConversationSummaries(summaries);
 }
 
 export async function ensureCodexGlobalConversation(
@@ -1459,13 +1764,16 @@ export async function ensureCodexGlobalConversation(
   const normalizedLibraryID = normalizeLibraryID(libraryID);
   if (!normalizedLibraryID) return null;
   const conversationKey = buildDefaultCodexGlobalConversationKey(normalizedLibraryID);
-  await upsertCodexConversationSummary({
+  const stored = await upsertCodexConversationSummary({
     conversationKey,
     libraryID: normalizedLibraryID,
     kind: "global",
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
+  if (!stored) {
+    return createCodexGlobalConversation(normalizedLibraryID);
+  }
   return getCodexConversationSummary(conversationKey);
 }
 
@@ -1477,7 +1785,7 @@ export async function ensureCodexPaperConversation(
   const normalizedPaperItemID = normalizePaperItemID(paperItemID);
   if (!normalizedLibraryID || !normalizedPaperItemID) return null;
   const conversationKey = buildDefaultCodexPaperConversationKey(normalizedPaperItemID);
-  await upsertCodexConversationSummary({
+  const stored = await upsertCodexConversationSummary({
     conversationKey,
     libraryID: normalizedLibraryID,
     kind: "paper",
@@ -1485,13 +1793,14 @@ export async function ensureCodexPaperConversation(
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
+  if (!stored) {
+    return createCodexPaperConversation(normalizedLibraryID, normalizedPaperItemID);
+  }
   return getCodexConversationSummary(conversationKey);
 }
 
 async function getMaxCodexConversationKey(kind: CodexConversationKind): Promise<number> {
-  const range = kind === "global"
-    ? getCodexGlobalConversationKeyRange()
-    : getCodexPaperConversationKeyRange();
+  const range = getCodexAllocatedConversationKeyRange(kind);
   const rows = (await Zotero.DB.queryAsync(
     `SELECT MAX(conversation_key) AS maxConversationKey
      FROM ${CODEX_CONVERSATIONS_TABLE}
@@ -1502,7 +1811,7 @@ async function getMaxCodexConversationKey(kind: CodexConversationKind): Promise<
   )) as Array<{ maxConversationKey?: unknown }> | undefined;
   const maxConversationKey = Number(rows?.[0]?.maxConversationKey);
   if (!Number.isFinite(maxConversationKey) || maxConversationKey <= 0) {
-    return range.start;
+    return range.start - 1;
   }
   return Math.floor(maxConversationKey);
 }
@@ -1513,17 +1822,18 @@ export async function createCodexGlobalConversation(
   const normalizedLibraryID = normalizeLibraryID(libraryID);
   if (!normalizedLibraryID) return null;
   const nextKey = Math.max(
-    buildDefaultCodexGlobalConversationKey(normalizedLibraryID),
+    getCodexAllocatedConversationKeyRange("global").start,
     (getLastAllocatedCodexGlobalConversationKey() || 0) + 1,
     (await getMaxCodexConversationKey("global")) + 1,
   );
-  await upsertCodexConversationSummary({
+  const stored = await upsertCodexConversationSummary({
     conversationKey: nextKey,
     libraryID: normalizedLibraryID,
     kind: "global",
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
+  if (!stored) return null;
   setLastAllocatedCodexGlobalConversationKey(nextKey);
   return getCodexConversationSummary(nextKey);
 }
@@ -1536,11 +1846,11 @@ export async function createCodexPaperConversation(
   const normalizedPaperItemID = normalizePaperItemID(paperItemID);
   if (!normalizedLibraryID || !normalizedPaperItemID) return null;
   const nextKey = Math.max(
-    buildDefaultCodexPaperConversationKey(normalizedPaperItemID),
+    getCodexAllocatedConversationKeyRange("paper").start,
     (getLastAllocatedCodexPaperConversationKey() || 0) + 1,
     (await getMaxCodexConversationKey("paper")) + 1,
   );
-  await upsertCodexConversationSummary({
+  const stored = await upsertCodexConversationSummary({
     conversationKey: nextKey,
     libraryID: normalizedLibraryID,
     kind: "paper",
@@ -1548,6 +1858,7 @@ export async function createCodexPaperConversation(
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
+  if (!stored) return null;
   setLastAllocatedCodexPaperConversationKey(nextKey);
   return getCodexConversationSummary(nextKey);
 }
