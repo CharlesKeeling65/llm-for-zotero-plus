@@ -228,9 +228,7 @@ export async function registerConversationScope(
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL)
      ON CONFLICT(conversation_key) DO UPDATE SET
        updated_at = excluded.updated_at,
-       title = COALESCE(excluded.title, ${CONVERSATION_REGISTRY_TABLE}.title),
-       valid = 1,
-       invalid_reason = NULL`,
+       title = COALESCE(excluded.title, ${CONVERSATION_REGISTRY_TABLE}.title)`,
     [
       normalized.conversationKey,
       normalized.system,
