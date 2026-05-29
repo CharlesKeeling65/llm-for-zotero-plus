@@ -25,6 +25,14 @@ export type ChatAttachment = {
   contentHash?: string;
 };
 
+export type GeneratedChatImage = {
+  id: string;
+  label?: string;
+  path?: string;
+  src?: string;
+  revisedPrompt?: string;
+};
+
 export type PaperContentSourceMode =
   | "text"
   | "mineru"

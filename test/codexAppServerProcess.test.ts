@@ -1112,6 +1112,108 @@ describe("codexAppServerProcess", function () {
     );
   });
 
+  it("preserves image generation metadata from app-server item events", async function () {
+    const proc = createProcess();
+    const completed: unknown[] = [];
+
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/completed",
+        params: {
+          turnId: "turn-image-items",
+          item: {
+            id: "img-saved",
+            type: "imageGeneration",
+            status: "completed",
+            result: "opaque-result-id",
+            savedPath: "/tmp/result.png",
+            revisedPrompt: "A concise chart",
+          },
+        },
+      });
+    }, 5);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/completed",
+        params: {
+          turnId: "turn-image-items",
+          item: {
+            id: "img-data-url",
+            type: "imageGeneration",
+            status: "completed",
+            result: "data:image/png;base64,abc123",
+          },
+        },
+      });
+    }, 10);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "item/completed",
+        params: {
+          turnId: "turn-image-items",
+          item: {
+            id: "img-opaque",
+            type: "imageGeneration",
+            status: "failed",
+            result: "opaque-result-id",
+          },
+        },
+      });
+    }, 15);
+    setTimeout(() => {
+      void (
+        proc as unknown as {
+          handleMessage: (msg: Record<string, unknown>) => void;
+        }
+      ).handleMessage({
+        method: "turn/completed",
+        params: {
+          turnId: "turn-image-items",
+          status: "completed",
+        },
+      });
+    }, 20);
+
+    await waitForCodexAppServerTurnCompletion({
+      proc,
+      turnId: "turn-image-items",
+      onItemCompleted: async (event) => {
+        completed.push(event);
+      },
+      timeoutMs: 50,
+    });
+
+    assert.deepInclude(completed[0] as Record<string, unknown>, {
+      id: "img-saved",
+      type: "imagegeneration",
+      status: "completed",
+      result: "opaque-result-id",
+      savedPath: "/tmp/result.png",
+      revisedPrompt: "A concise chart",
+    });
+    assert.deepInclude(completed[1] as Record<string, unknown>, {
+      id: "img-data-url",
+      result: "data:image/png;base64,abc123",
+    });
+    assert.deepInclude(completed[2] as Record<string, unknown>, {
+      id: "img-opaque",
+      status: "failed",
+      result: "opaque-result-id",
+    });
+  });
+
   it("emits token usage updates for the active turn", async function () {
     const proc = createProcess();
     const usage: Array<{

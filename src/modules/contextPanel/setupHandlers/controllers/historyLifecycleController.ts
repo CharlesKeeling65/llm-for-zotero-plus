@@ -542,6 +542,9 @@ export function createHistoryLifecycleController(
     attachments: Array.isArray(message.attachments)
       ? message.attachments.map((attachment) => ({ ...attachment }))
       : undefined,
+    generatedImages: Array.isArray(message.generatedImages)
+      ? message.generatedImages.map((image) => ({ ...image }))
+      : undefined,
   });
 
   const findTurnPairByTimestamps = (

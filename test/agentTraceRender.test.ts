@@ -1,5 +1,7 @@
 import { assert } from "chai";
+import { readFileSync } from "node:fs";
 import {
+  buildAgentTraceChipDetails,
   buildAgentTraceDisplayItems,
   buildAgentTraceMarkdownForRender,
   getPendingActionButtonLayout,
@@ -7,6 +9,7 @@ import {
 } from "../src/modules/contextPanel/agentTrace/render";
 import {
   renderAssistantMarkdownHtmlForChat,
+  renderAssistantGeneratedImagesInto,
   shouldAttachAssistantResponseContextMenu,
   shouldDecorateInterleavedAgentTraceCitations,
   shouldSuppressAssistantResponseContextMenu,
@@ -145,6 +148,14 @@ class FakeElement {
     return null;
   }
 
+  findAllByClass(className: string): FakeElement[] {
+    const matches = this.classList.contains(className) ? [this] : [];
+    for (const child of this.children) {
+      matches.push(...child.findAllByClass(className));
+    }
+    return matches;
+  }
+
   getCopyableChildren(): FakeElement[] {
     return this.copyableChildren;
   }
@@ -160,7 +171,16 @@ class FakeCopyableElement extends FakeElement {
 
 const fakeDocument = {
   createElement: (tagName: string) => new FakeElement(tagName),
+  createElementNS: (_namespace: string, tagName: string) =>
+    new FakeElement(tagName),
 } as unknown as Document;
+
+function collectFakeText(element: FakeElement | null | undefined): string {
+  if (!element) return "";
+  return [element.textContent, ...element.children.map(collectFakeText)].join(
+    "",
+  );
+}
 
 const obsidianStyleMermaidFixture = [
   "flowchart TB",
@@ -790,6 +810,241 @@ describe("agentTrace render", function () {
 
     assert.notInclude(actionTexts, "Using Query Library");
     assert.include(actionTexts, "Used Query Library");
+  });
+
+  it("renders generated assistant images outside user screenshot UI", function () {
+    const savedPathContainer = fakeDocument.createElement("div") as unknown as
+      | HTMLElement
+      | FakeElement;
+    const renderedSavedPath = renderAssistantGeneratedImagesInto(
+      savedPathContainer as HTMLElement,
+      [
+        {
+          id: "img-1",
+          label: "result.png",
+          path: "/tmp/result.png",
+          revisedPrompt: "A concise chart",
+        },
+      ],
+      fakeDocument,
+    );
+    assert.isTrue(renderedSavedPath);
+    const savedPathRoot = savedPathContainer as FakeElement;
+    const savedImg = savedPathRoot.findByClass(
+      "llm-assistant-generated-image",
+    ) as unknown as { src?: string; alt?: string; title?: string } | null;
+    assert.equal(savedImg?.src, "file:///tmp/result.png");
+    assert.equal(savedImg?.alt, "result.png");
+    assert.equal(savedImg?.title, "A concise chart");
+    assert.isNull(savedPathRoot.findByClass("llm-user-screenshots-preview"));
+
+    const dataUrlContainer = fakeDocument.createElement("div") as HTMLElement;
+    assert.isTrue(
+      renderAssistantGeneratedImagesInto(
+        dataUrlContainer,
+        [{ id: "img-2", src: "data:image/png;base64,abc123" }],
+        fakeDocument,
+      ),
+    );
+    const dataImg = (dataUrlContainer as unknown as FakeElement).findByClass(
+      "llm-assistant-generated-image",
+    ) as unknown as { src?: string } | null;
+    assert.equal(dataImg?.src, "data:image/png;base64,abc123");
+
+    const opaqueContainer = fakeDocument.createElement("div") as HTMLElement;
+    assert.isFalse(
+      renderAssistantGeneratedImagesInto(
+        opaqueContainer,
+        [{ id: "img-3", src: "opaque-result-id" }],
+        fakeDocument,
+      ),
+    );
+  });
+
+  it("renders full expandable details for long Codex trace values", function () {
+    const longQuery =
+      "Anticevic Cole Repovs Savic Driesen connectivity pharmacology computational psychiatry";
+    const longUrl =
+      "https://www.frontiersin.org/journals/psychiatry/articles/10.3389/fpsyt.2013.00169/full";
+    const longPath =
+      "/tmp/codex/screenshots/frontiers-article-page-0001-full-width.png";
+    const command = `python scripts/fetch.py --url ${longUrl}`;
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-1",
+        seq: 1,
+        eventType: "codex_tool_activity",
+        payload: {
+          type: "codex_tool_activity",
+          itemId: "web-1",
+          phase: "completed",
+          toolName: "web_search",
+          toolLabel: "Opened web page",
+          args: {
+            query: longQuery,
+            url: longUrl,
+            pattern: "connectivity pharmacology",
+          },
+        },
+        createdAt: 1,
+      },
+      {
+        runId: "run-1",
+        seq: 2,
+        eventType: "codex_tool_activity",
+        payload: {
+          type: "codex_tool_activity",
+          itemId: "image-1",
+          phase: "completed",
+          toolName: "image_view",
+          toolLabel: "Viewed image",
+          args: { path: longPath },
+        },
+        createdAt: 2,
+      },
+      {
+        runId: "run-1",
+        seq: 3,
+        eventType: "codex_tool_activity",
+        payload: {
+          type: "codex_tool_activity",
+          itemId: "cmd-1",
+          phase: "completed",
+          toolName: "command",
+          toolLabel: "Command",
+          args: { status: "exit 0" },
+          codeBlock: command,
+        },
+        createdAt: 3,
+      },
+    ];
+
+    const trace = renderAgentTrace({
+      doc: fakeDocument,
+      message: {
+        role: "assistant",
+        text: "",
+        timestamp: 1,
+        runMode: "agent",
+        modelProviderLabel: "Codex",
+      },
+      events,
+    }) as unknown as FakeElement;
+
+    const values = trace
+      .findAllByClass("llm-agent-process-detail-value")
+      .map(collectFakeText);
+    assert.include(values, longQuery);
+    assert.include(values, longUrl);
+    assert.include(values, "connectivity pharmacology");
+    assert.include(values, longPath);
+    assert.include(values, command);
+    assert.isEmpty(trace.findAllByClass("llm-at-expand"));
+
+    const chipLabels = trace
+      .findAllByClass("llm-agent-process-chip-label")
+      .map(collectFakeText);
+    assert.includeMembers(chipLabels, [
+      "Query",
+      "URL",
+      "Pattern",
+      "Path",
+      "Status",
+    ]);
+    assert.isFalse(chipLabels.some((label) => label.includes("...")));
+  });
+
+  it("renders full expandable details for request context chips", function () {
+    const longPaperTitle =
+      "A very long paper title about hippocampal attractor dynamics and entorhinal grid cell scaffolds across episodic memory";
+    const longSelectedText = [
+      "This is a long selected passage from the paper that should remain fully available",
+      "inside the expanded agent trace details instead of disappearing behind a chip.",
+    ].join(" ");
+    const longFileName =
+      "supplementary-analysis-notebook-with-long-descriptive-filename-and-version-history.md";
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-1",
+        seq: 1,
+        eventType: "final",
+        payload: { type: "final", text: "Done." },
+        createdAt: 1,
+      },
+    ];
+
+    const trace = renderAgentTrace({
+      doc: fakeDocument,
+      userMessage: {
+        role: "user",
+        text: "Use this context.",
+        timestamp: 1,
+        selectedTexts: [longSelectedText],
+        selectedTextSources: ["pdf"],
+        paperContexts: [
+          {
+            itemId: 10,
+            contextItemId: 11,
+            title: longPaperTitle,
+          },
+        ],
+        attachments: [
+          {
+            id: "file-1",
+            name: longFileName,
+            mimeType: "text/markdown",
+            sizeBytes: 42,
+            category: "markdown",
+          },
+        ],
+      },
+      message: {
+        role: "assistant",
+        text: "Done.",
+        timestamp: 2,
+        runMode: "agent",
+        modelProviderLabel: "OpenAI",
+      },
+      events,
+    }) as unknown as FakeElement;
+
+    const values = trace
+      .findAllByClass("llm-agent-process-detail-value")
+      .map(collectFakeText);
+    assert.include(values, longPaperTitle);
+    assert.include(values, longSelectedText);
+    assert.include(values, longFileName);
+
+    const chipLabels = trace
+      .findAllByClass("llm-agent-process-chip-label")
+      .map(collectFakeText);
+    assert.includeMembers(chipLabels, ["Paper", "Selected text", "File"]);
+    assert.isFalse(chipLabels.some((label) => label.includes("...")));
+  });
+
+  it("preserves custom chip title and long label values as details", function () {
+    const longTitle =
+      "https://example.org/articles/with/a/very/long/path/that/must/remain/recoverable";
+    const longLabel =
+      "Custom tool output with a long label that should become an expandable detail value";
+
+    assert.deepEqual(buildAgentTraceChipDetails({ label: "URL", title: longTitle }), [
+      { label: "URL", value: longTitle, kind: "url" },
+    ]);
+    assert.deepEqual(buildAgentTraceChipDetails({ label: longLabel }), [
+      { label: "Detail", value: longLabel, kind: "text" },
+    ]);
+  });
+
+  it("does not ellipsize agent trace chip labels in CSS", function () {
+    const css = readFileSync("addon/content/zoteroPane.css", "utf8");
+    const chipLabelRule =
+      css.match(/\.llm-agent-process-chip-label\s*\{[\s\S]*?\}/)?.[0] || "";
+
+    assert.include(chipLabelRule, "white-space: normal");
+    assert.include(chipLabelRule, "overflow: visible");
+    assert.include(chipLabelRule, "text-overflow: clip");
+    assert.notInclude(chipLabelRule, "text-overflow: ellipsis");
   });
 
   it("falls back to a Zotero MCP tool label when Codex omits the exact tool name", function () {

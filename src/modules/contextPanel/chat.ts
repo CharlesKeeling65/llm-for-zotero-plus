@@ -81,7 +81,15 @@ import {
   type BlockStreamCoalescer,
   type BlockStreamFlushReason,
 } from "./blockStreamCoalescer";
-import type { ConversationSystem, QuoteCitation } from "../../shared/types";
+import type {
+  ConversationSystem,
+  GeneratedChatImage,
+  QuoteCitation,
+} from "../../shared/types";
+import {
+  isRenderableGeneratedImageSrc,
+  normalizeGeneratedChatImages,
+} from "../../shared/generatedImages";
 import { ensureMineruCacheDirForAttachment } from "./mineruSync";
 import type {
   Message,
@@ -502,6 +510,56 @@ function openStoredAttachmentFromMessage(attachment: ChatAttachment): boolean {
     void _err;
   }
   return false;
+}
+
+function resolveGeneratedChatImageSrc(image: GeneratedChatImage): string {
+  const fileUrl = toFileUrl(image.path);
+  if (fileUrl) return fileUrl;
+  return isRenderableGeneratedImageSrc(image.src) ? image.src.trim() : "";
+}
+
+export function renderAssistantGeneratedImagesInto(
+  container: HTMLElement,
+  images: GeneratedChatImage[] | undefined,
+  doc: Document,
+  options: { onImageLoaded?: () => void } = {},
+): boolean {
+  const normalized = normalizeGeneratedChatImages(images);
+  const renderable = normalized
+    .map((image) => ({ image, src: resolveGeneratedChatImageSrc(image) }))
+    .filter((entry) => Boolean(entry.src));
+  if (!renderable.length) return false;
+
+  const wrap = doc.createElement("div") as HTMLDivElement;
+  wrap.className = "llm-assistant-generated-images";
+  for (const { image, src } of renderable) {
+    const figure = doc.createElement("figure") as HTMLElement;
+    figure.className = "llm-assistant-generated-image-frame";
+
+    const img = doc.createElement("img") as HTMLImageElement;
+    img.className = "llm-assistant-generated-image";
+    img.src = src;
+    img.alt = image.label || "Generated image";
+    img.title = image.revisedPrompt || image.label || "";
+    img.loading = "lazy";
+    if (options.onImageLoaded) {
+      img.addEventListener("load", options.onImageLoaded);
+      img.addEventListener("error", options.onImageLoaded);
+    }
+    figure.appendChild(img);
+
+    if (image.label) {
+      const caption = doc.createElement("figcaption") as HTMLElement;
+      caption.className = "llm-assistant-generated-image-caption";
+      caption.textContent = image.label;
+      caption.title = image.label;
+      figure.appendChild(caption);
+    }
+
+    wrap.appendChild(figure);
+  }
+  container.appendChild(wrap);
+  return true;
 }
 
 function normalizeSelectedTexts(
@@ -1418,6 +1476,7 @@ function toPanelMessage(message: StoredChatMessage): Message {
           Boolean(entry.name.trim()),
       )
     : undefined;
+  const generatedImages = normalizeGeneratedChatImages(message.generatedImages);
   const selectedTexts = normalizeSelectedTexts(
     message.selectedTexts,
     message.selectedText,
@@ -1475,6 +1534,7 @@ function toPanelMessage(message: StoredChatMessage): Message {
     screenshotImages,
     attachments,
     modelAttachments,
+    generatedImages: generatedImages.length ? generatedImages : undefined,
     attachmentsExpanded: false,
     screenshotExpanded: false,
     screenshotActiveIndex: screenshotImages?.length ? 0 : undefined,
@@ -2961,6 +3021,7 @@ type AssistantMessageSnapshot = Pick<
   | "modelEntryId"
   | "modelProviderLabel"
   | "pendingAgentTraceEvents"
+  | "generatedImages"
   | "reasoningSummary"
   | "reasoningDetails"
   | "reasoningOpen"
@@ -2997,6 +3058,9 @@ function takeAssistantSnapshot(message: Message): AssistantMessageSnapshot {
           payload: { ...entry.payload },
         }))
       : undefined,
+    generatedImages: message.generatedImages
+      ? message.generatedImages.map((entry) => ({ ...entry }))
+      : undefined,
     reasoningSummary: message.reasoningSummary,
     reasoningDetails: message.reasoningDetails,
     reasoningOpen: message.reasoningOpen,
@@ -3022,6 +3086,9 @@ function restoreAssistantSnapshot(
         ...entry,
         payload: { ...entry.payload },
       }))
+    : undefined;
+  message.generatedImages = snapshot.generatedImages
+    ? snapshot.generatedImages.map((entry) => ({ ...entry }))
     : undefined;
   message.reasoningSummary = snapshot.reasoningSummary;
   message.reasoningDetails = snapshot.reasoningDetails;
@@ -3060,6 +3127,7 @@ type CodexNativeTraceItemEvent = {
   id?: string;
   type?: string;
   role?: string;
+  status?: string;
   summary?: string;
   details?: string;
   error?: string;
@@ -3068,6 +3136,21 @@ type CodexNativeTraceItemEvent = {
   title?: string;
   serverName?: string;
   arguments?: unknown;
+  query?: string;
+  action?: unknown;
+  command?: string;
+  cwd?: string;
+  path?: string;
+  result?: unknown;
+  savedPath?: string;
+  revisedPrompt?: string;
+  exitCode?: number;
+  durationMs?: number;
+  changes?: unknown;
+  success?: boolean;
+  namespace?: string;
+  model?: string;
+  receiverThreadIds?: unknown;
   raw?: Record<string, unknown>;
 };
 
@@ -3203,7 +3286,10 @@ function humanizeCodexNativeItemType(type: string | undefined): string {
     .toLowerCase();
 }
 
-function compactCodexNativeTraceLine(text: string, maxLength = 260): string {
+function compactCodexNativeTraceLine(
+  text: string,
+  maxLength = Number.MAX_SAFE_INTEGER,
+): string {
   const clean = sanitizeText(text).replace(/\s+/g, " ").trim();
   if (clean.length <= maxLength) return clean;
   return `${clean.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
@@ -3211,6 +3297,81 @@ function compactCodexNativeTraceLine(text: string, maxLength = 260): string {
 
 function normalizeCodexNativeTraceCompare(text: string): string {
   return sanitizeText(text).replace(/\s+/g, " ").trim();
+}
+
+function normalizeCodexNativeItemTypeKey(type: string | undefined): string {
+  return sanitizeText(type || "")
+    .replace(/[-_\s]+/g, "")
+    .toLowerCase();
+}
+
+function getCodexNativeRawString(
+  event: CodexNativeTraceItemEvent,
+  keys: string[],
+  maxLength = 4000,
+): string {
+  for (const key of keys) {
+    const value =
+      (event as unknown as Record<string, unknown>)[key] ??
+      readCodexNativeRawField(event, [key]);
+    if (typeof value !== "string") continue;
+    const text = value.trim();
+    if (text) return text.slice(0, maxLength);
+  }
+  return "";
+}
+
+function getCodexNativeStatus(event: CodexNativeTraceItemEvent): string {
+  return (
+    sanitizeText(event.status || "").trim() ||
+    getCodexNativeRawString(event, ["status"], 120)
+  );
+}
+
+function isCodexNativeItemType(
+  event: CodexNativeTraceItemEvent,
+  keys: string[],
+): boolean {
+  const itemType = normalizeCodexNativeItemTypeKey(event.type);
+  return keys.some((key) => itemType.includes(key));
+}
+
+function compactCodexNativePathBasename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+function getCodexNativeGeneratedImage(
+  event: CodexNativeTraceItemEvent,
+): GeneratedChatImage | null {
+  const itemId = sanitizeText(event.id || "").trim();
+  if (!itemId) return null;
+  const savedPath =
+    sanitizeText(event.savedPath || "").trim() ||
+    getCodexNativeRawString(event, ["savedPath", "saved_path"], 4000);
+  const result =
+    typeof event.result === "string"
+      ? event.result.trim()
+      : getCodexNativeRawString(event, ["result"], Number.MAX_SAFE_INTEGER);
+  const revisedPrompt =
+    sanitizeText(event.revisedPrompt || "").trim() ||
+    getCodexNativeRawString(event, ["revisedPrompt", "revised_prompt"], 8000);
+  if (savedPath) {
+    return {
+      id: itemId,
+      label: compactCodexNativePathBasename(savedPath),
+      path: savedPath,
+      ...(revisedPrompt ? { revisedPrompt } : {}),
+    };
+  }
+  if (isRenderableGeneratedImageSrc(result)) {
+    return {
+      id: itemId,
+      label: "Generated image",
+      src: result,
+      ...(revisedPrompt ? { revisedPrompt } : {}),
+    };
+  }
+  return null;
 }
 
 function createCodexNativeActivityTraceController(
@@ -3381,6 +3542,7 @@ function createCodexNativeActivityTraceController(
       args?: unknown;
       ok?: boolean;
       text?: string;
+      codeBlock?: string;
     },
     options: { matchRecentUnknown?: boolean } = {},
   ): string | null => {
@@ -3410,6 +3572,7 @@ function createCodexNativeActivityTraceController(
       ...(activity.args !== undefined ? { args: activity.args } : {}),
       ...(typeof activity.ok === "boolean" ? { ok: activity.ok } : {}),
       ...(activity.text ? { text: activity.text } : {}),
+      ...(activity.codeBlock ? { codeBlock: activity.codeBlock } : {}),
     };
     if (existingIndex !== undefined) {
       const existing = events[existingIndex];
@@ -3424,6 +3587,7 @@ function createCodexNativeActivityTraceController(
           serverName: payload.serverName || existing.payload.serverName,
           args:
             payload.args !== undefined ? payload.args : existing.payload.args,
+          codeBlock: payload.codeBlock || existing.payload.codeBlock,
         },
         createdAt: Date.now(),
       };
@@ -3448,6 +3612,200 @@ function createCodexNativeActivityTraceController(
     return true;
   };
 
+  const addGeneratedImage = (image: GeneratedChatImage | null): boolean => {
+    const normalized = normalizeGeneratedChatImages(image ? [image] : []);
+    const next = normalized[0];
+    if (!next) return false;
+    const existing = normalizeGeneratedChatImages(assistantMessage.generatedImages);
+    const index = existing.findIndex((entry) => entry.id === next.id);
+    if (index >= 0) {
+      existing[index] = { ...existing[index], ...next };
+    } else {
+      existing.push(next);
+    }
+    assistantMessage.generatedImages = existing.length ? existing : undefined;
+    return true;
+  };
+
+  const appendStructuredOperationStatus = (
+    event: CodexNativeTraceItemEvent,
+    phase: "started" | "completed",
+  ): boolean => {
+    const itemType = normalizeCodexNativeItemTypeKey(event.type);
+    const itemId =
+      sanitizeText(event.id || "").trim() || `codex-${itemType || "item"}-${phase}-${seq + 1}`;
+    const status = getCodexNativeStatus(event);
+    const failed =
+      Boolean(event.error) ||
+      /failed|error|cancelled|denied|rejected/i.test(
+        sanitizeText(status || event.summary || event.details || ""),
+      ) ||
+      event.success === false;
+
+    const readWebSearchArgs = ():
+      | { args?: Record<string, string>; actionType: string }
+      | null => {
+      const action =
+        event.action || readCodexNativeRawField(event, ["action"]);
+      const record =
+        action && typeof action === "object" && !Array.isArray(action)
+          ? (action as Record<string, unknown>)
+          : null;
+      const actionType = sanitizeText(String(record?.type || "")).trim();
+      const query =
+        sanitizeText(event.query || "").trim() ||
+        getCodexNativeRawString(event, ["query"], 1000) ||
+        sanitizeText(String(record?.query || "")).trim() ||
+        (Array.isArray(record?.queries)
+          ? record.queries
+              .filter((entry): entry is string => typeof entry === "string")
+              .map((entry) => sanitizeText(entry).trim())
+              .filter(Boolean)
+              .join("; ")
+          : "");
+      const url = sanitizeText(String(record?.url || "")).trim();
+      const pattern = sanitizeText(String(record?.pattern || "")).trim();
+      const args: Record<string, string> = {};
+      if (query) args.query = query;
+      if (url) args.url = url;
+      if (pattern) args.pattern = pattern;
+      return Object.keys(args).length || actionType
+        ? { args: Object.keys(args).length ? args : undefined, actionType }
+        : null;
+    };
+
+    if (isCodexNativeItemType(event, ["websearch", "websearchcall"])) {
+      const webSearch = readWebSearchArgs();
+      const actionType = normalizeCodexNativeItemTypeKey(
+        webSearch?.actionType,
+      );
+      const verb =
+        actionType === "openpage"
+          ? phase === "completed"
+            ? "Opened web page"
+            : "Opening web page"
+          : actionType === "findinpage"
+            ? phase === "completed"
+              ? "Searched within page"
+              : "Searching within page"
+            : phase === "completed"
+              ? "Searched web"
+              : "Searching web";
+      const query =
+        sanitizeText(event.query || "").trim() ||
+        getCodexNativeRawString(event, ["query"], 1000);
+      const updated = upsertToolActivity({
+        itemId,
+        phase,
+        toolName: "web_search",
+        toolLabel: "Web search",
+        args: webSearch?.args || (query ? { query } : undefined),
+        ok: phase === "completed" ? !failed : undefined,
+        text: failed && phase === "completed" ? "Web search failed" : verb,
+      });
+      return Boolean(updated);
+    }
+
+    if (isCodexNativeItemType(event, ["imagegeneration"])) {
+      const generatedImage =
+        phase === "completed" ? getCodexNativeGeneratedImage(event) : null;
+      const changedImage = addGeneratedImage(generatedImage);
+      const savedPath =
+        generatedImage?.path ||
+        sanitizeText(event.savedPath || "").trim() ||
+        getCodexNativeRawString(event, ["savedPath", "saved_path"], 4000);
+      const updated = upsertToolActivity({
+        itemId,
+        phase,
+        toolName: "image_generation",
+        toolLabel: "Generated image",
+        args: {
+          ...(status ? { status } : {}),
+          ...(savedPath ? { saved: compactCodexNativePathBasename(savedPath) } : {}),
+        },
+        ok: phase === "completed" ? !failed : undefined,
+        text:
+          phase === "completed"
+            ? failed
+              ? `Generated image: ${status || "failed"}`
+              : "Generated image"
+            : "Generating image",
+      });
+      return Boolean(updated) || changedImage;
+    }
+
+    if (isCodexNativeItemType(event, ["imageview"])) {
+      const path =
+        sanitizeText(event.path || "").trim() ||
+        getCodexNativeRawString(event, ["path"], 4000);
+      const updated = upsertToolActivity({
+        itemId,
+        phase,
+        toolName: "image_view",
+        toolLabel: "Viewed image",
+        args: path ? { path } : undefined,
+        ok: phase === "completed" ? !failed : undefined,
+        text: phase === "completed" ? "Viewed image" : "Viewing image",
+      });
+      return Boolean(updated);
+    }
+
+    const command =
+      sanitizeText(event.command || "").trim() ||
+      getCodexNativeRawString(event, ["command"], 8000);
+    if (command || isCodexNativeItemType(event, ["command", "exec"])) {
+      const cwd =
+        sanitizeText(event.cwd || "").trim() ||
+        getCodexNativeRawString(event, ["cwd"], 4000);
+      const exitCode =
+        typeof event.exitCode === "number" && Number.isFinite(event.exitCode)
+          ? event.exitCode
+          : undefined;
+      const updated = upsertToolActivity({
+        itemId,
+        phase,
+        toolName: "command",
+        toolLabel: "Command",
+        args: {
+          ...(cwd ? { cwd } : {}),
+          ...(typeof exitCode === "number" ? { status: `exit ${exitCode}` } : {}),
+        },
+        ok: phase === "completed" ? !failed : undefined,
+        text:
+          phase === "completed"
+            ? failed || (typeof exitCode === "number" && exitCode !== 0)
+              ? "Command failed"
+              : "Ran command"
+            : "Running command",
+        codeBlock: command || undefined,
+      });
+      return Boolean(updated);
+    }
+
+    if (
+      event.changes !== undefined ||
+      isCodexNativeItemType(event, ["filechange", "filechanges", "patch"])
+    ) {
+      const updated = upsertToolActivity({
+        itemId,
+        phase,
+        toolName: "file_changes",
+        toolLabel: "File changes",
+        args: event.changes,
+        ok: phase === "completed" ? !failed : undefined,
+        text:
+          phase === "completed"
+            ? failed
+              ? "File changes failed"
+              : "Updated files"
+            : "Updating files",
+      });
+      return Boolean(updated);
+    }
+
+    return false;
+  };
+
   const noteSkillActivated = (skillId: string): void => {
     const cleanSkillId = sanitizeText(skillId || "").trim();
     if (!cleanSkillId || activatedSkillIds.has(cleanSkillId)) return;
@@ -3470,6 +3828,10 @@ function createCodexNativeActivityTraceController(
   ): void => {
     if (isCodexNativeAgentMessageItem(event)) return;
     flushAllProgressCoalescers("event");
+    if (appendStructuredOperationStatus(event, phase)) {
+      sync();
+      return;
+    }
     if (isCodexNativeToolItem(event)) {
       const itemId =
         sanitizeText(event.id || "").trim() || `codex-tool-${phase}-${seq + 1}`;
@@ -4676,6 +5038,7 @@ export async function retryLatestAssistantResponse(
   assistantMessage.reasoningOpen = isReasoningExpandedByDefault();
   assistantMessage.agentRunId = undefined;
   assistantMessage.pendingAgentTraceEvents = undefined;
+  assistantMessage.generatedImages = undefined;
   assistantMessage.streaming = true;
   assistantMessage.quoteCitations = buildSelectedTextQuoteCitations(
     retryPair.userMessage.selectedTexts,
@@ -4785,9 +5148,10 @@ export async function retryLatestAssistantResponse(
         reasoningDetails: assistantMessage.reasoningDetails,
         compactMarker: assistantMessage.compactMarker,
         contextTokens: latestContextSnapshot?.contextTokens,
-        contextWindow: latestContextSnapshot?.contextWindow,
-        quoteCitations: assistantMessage.quoteCitations,
-      },
+      contextWindow: latestContextSnapshot?.contextWindow,
+      quoteCitations: assistantMessage.quoteCitations,
+      generatedImages: assistantMessage.generatedImages,
+    },
       effectiveStorageSystem,
     );
     setStatusSafely("Cancelled", "ready");
@@ -5214,10 +5578,13 @@ export async function retryLatestAssistantResponse(
     }
 
     flushResponseStream("final");
+    const hasGeneratedOutput = normalizeGeneratedChatImages(
+      assistantMessage.generatedImages,
+    ).length;
     assistantMessage.text =
       sanitizeText(answer) ||
       responseStreamCoalescer?.getFullText() ||
-      "No response.";
+      (hasGeneratedOutput ? "" : "No response.");
     codexActivityTrace?.finish(assistantMessage.text);
     assistantMessage.timestamp = Date.now();
     assistantMessage.modelName = effectiveRequestConfig.model;
@@ -5251,6 +5618,7 @@ export async function retryLatestAssistantResponse(
         contextTokens: latestContextSnapshot?.contextTokens,
         contextWindow: latestContextSnapshot?.contextWindow,
         quoteCitations: assistantMessage.quoteCitations,
+        generatedImages: assistantMessage.generatedImages,
       },
       effectiveStorageSystem,
     );
@@ -6781,6 +7149,7 @@ export async function sendQuestion(
         webchatChatUrl: assistantMessage.webchatChatUrl,
         webchatChatId: assistantMessage.webchatChatId,
         quoteCitations: assistantMessage.quoteCitations,
+        generatedImages: assistantMessage.generatedImages,
         compactMarker: assistantMessage.compactMarker,
       },
       effectiveStorageSystem,
@@ -7268,8 +7637,13 @@ export async function sendQuestion(
     }
 
     flushResponseStream("final");
+    const hasGeneratedOutput = normalizeGeneratedChatImages(
+      assistantMessage.generatedImages,
+    ).length;
     assistantMessage.text =
-      sanitizeText(answer) || assistantMessage.text || "No response.";
+      sanitizeText(answer) ||
+      assistantMessage.text ||
+      (hasGeneratedOutput ? "" : "No response.");
     codexActivityTrace?.finish(assistantMessage.text);
     assistantMessage.runMode = isCodexNativeTurn
       ? "agent"
@@ -8318,6 +8692,8 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       }
     } else {
       const hasModelName = Boolean(msg.modelName?.trim());
+      const generatedImages = normalizeGeneratedChatImages(msg.generatedImages);
+      const hasGeneratedImages = generatedImages.length > 0;
       const hasAnswerText = Boolean(msg.text) || Boolean(msg.compactMarker);
       const previousUserMessage =
         index > 0 && history[index - 1]?.role === "user"
@@ -8548,6 +8924,18 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         bubble.insertBefore(bubbleHeaderNodes[i], bubble.firstChild);
       }
 
+      if (hasGeneratedImages) {
+        renderAssistantGeneratedImagesInto(bubble, generatedImages, doc, {
+          onImageLoaded: () => {
+            stabilizeFollowBottomAfterAsyncChatContent(
+              body,
+              conversationKey,
+              chatBox,
+            );
+          },
+        });
+      }
+
       if (
         shouldDecorateInterleavedAgentTraceCitations({
           agentTraceEl,
@@ -8589,7 +8977,11 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
         }
       }
 
-      if (!hasAnswerText && !(msg.streaming && isClaudeStreamingConversation)) {
+      if (
+        !hasAnswerText &&
+        !hasGeneratedImages &&
+        !(msg.streaming && isClaudeStreamingConversation)
+      ) {
         const typing = doc.createElement("div") as HTMLDivElement;
         typing.className = "llm-typing";
         typing.innerHTML =

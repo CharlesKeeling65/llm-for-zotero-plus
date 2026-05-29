@@ -3565,6 +3565,49 @@
   overflow-x: hidden;
 }
 
+.llm-assistant-generated-images {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(100%, 620px);
+  max-width: 100%;
+  margin-top: 8px;
+}
+
+.llm-assistant-generated-image-frame {
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 8px;
+  background: color-mix(
+    in srgb,
+    var(--material-background) 86%,
+    transparent
+  );
+}
+
+.llm-assistant-generated-image {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  object-fit: contain;
+}
+
+.llm-assistant-generated-image-caption {
+  min-width: 0;
+  padding: 6px 8px;
+  border-top: 1px solid var(--stroke-secondary);
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-11);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .llm-model-header {
   display: flex;
   align-items: center;
@@ -3836,6 +3879,22 @@
   gap: 4px;
 }
 
+.llm-agent-process-action-expandable {
+  display: block;
+}
+
+.llm-agent-process-action-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.llm-agent-process-action-summary::-webkit-details-marker {
+  display: none;
+}
+
 .llm-agent-process-chips {
   display: flex;
   flex-wrap: wrap;
@@ -3845,9 +3904,9 @@
 
 .llm-agent-process-chip {
   display: inline-flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
-  max-width: min(100%, 320px);
+  max-width: 100%;
   padding: 4px 8px;
   border-radius: 8px;
   background: color-mix(
@@ -3858,7 +3917,7 @@
   color: var(--fill-secondary);
   font-size: var(--llm-fs-10);
   line-height: 1.25;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .llm-agent-process-chip-icon {
@@ -3878,9 +3937,11 @@
 
 .llm-agent-process-chip-label {
   min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 /* ── Online Search Results (selectable paper cards from search_literature_online) ── */
@@ -4037,6 +4098,68 @@ label.llm-search-results-item:hover {
   color: var(--fill-secondary);
   font-size: var(--llm-fs-11);
   font-weight: 400;
+}
+
+.llm-agent-process-details {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 4px 0 2px 18px;
+  padding-left: 8px;
+  border-left: 1px solid
+    color-mix(in srgb, var(--stroke-secondary) 80%, transparent);
+}
+
+.llm-agent-process-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.llm-agent-process-detail-label {
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-10);
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.llm-agent-process-detail-value {
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-11);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.llm-agent-process-detail-value-url {
+  color: var(--color-accent);
+}
+
+.llm-agent-process-detail-value-code,
+.llm-agent-process-detail-value-json {
+  margin: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--stroke-secondary);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--fill-quaternary) 80%, black 20%);
+  color: var(--fill-primary);
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  font-size: var(--llm-fs-10);
+}
+
+.llm-agent-process-detail-value-code code,
+.llm-agent-process-detail-value-json code {
+  background: none;
+  padding: 0;
+  border: none;
+  font: inherit;
+  color: inherit;
+  white-space: inherit;
+  overflow-wrap: inherit;
 }
 
 .llm-at-plan-text {

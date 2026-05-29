@@ -3,10 +3,12 @@ declare const Zotero: any;
 import type {
   CodexConversationSummary,
   CodexConversationKind,
+  GeneratedChatImage,
   NoteContextRef,
   QuoteCitation,
   SelectedTextSource,
 } from "../shared/types";
+import { normalizeGeneratedChatImages } from "../shared/generatedImages";
 import {
   normalizeSelectedTextNoteContexts,
   normalizeSelectedTextPaperContexts,
@@ -96,6 +98,7 @@ const CODEX_MESSAGE_SELECT_COLUMNS_SQL = `id,
             quote_citations_json AS quoteCitationsJson,
             screenshot_images AS screenshotImages,
             attachments_json AS attachmentsJson,
+            generated_images_json AS generatedImagesJson,
             model_name AS modelName,
             model_entry_id AS modelEntryId,
             model_provider_label AS modelProviderLabel,
@@ -432,6 +435,7 @@ const MESSAGE_TRANSFER_COLUMNS = [
   "quote_citations_json",
   "screenshot_images",
   "attachments_json",
+  "generated_images_json",
   "model_name",
   "model_entry_id",
   "model_provider_label",
@@ -943,6 +947,7 @@ export async function initCodexAppServerStore(): Promise<void> {
         quote_citations_json TEXT,
         screenshot_images TEXT,
         attachments_json TEXT,
+        generated_images_json TEXT,
         model_name TEXT,
         model_entry_id TEXT,
         model_provider_label TEXT,
@@ -1009,6 +1014,12 @@ export async function initCodexAppServerStore(): Promise<void> {
          ADD COLUMN quote_citations_json TEXT`,
       );
     }
+    await ensureColumn(
+      CODEX_MESSAGES_TABLE,
+      columns,
+      "generated_images_json",
+      "generated_images_json TEXT",
+    );
     await Zotero.DB.queryAsync(
       `CREATE INDEX IF NOT EXISTS ${CODEX_MESSAGES_INDEX}
        ON ${CODEX_MESSAGES_TABLE} (conversation_key, timestamp, id)`,
@@ -1124,6 +1135,7 @@ export async function appendCodexMessage(
         (entry) => entry && typeof entry.id === "string" && entry.id.trim(),
       )
     : [];
+  const generatedImages = normalizeGeneratedChatImages(message.generatedImages);
   const messageTimestamp = Number.isFinite(message.timestamp)
     ? Math.floor(message.timestamp)
     : Date.now();
@@ -1132,8 +1144,8 @@ export async function appendCodexMessage(
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
       `INSERT INTO ${CODEX_MESSAGES_TABLE}
-        (conversation_id, conversation_key, role, text, timestamp, run_mode, agent_run_id, selected_text, selected_texts_json, selected_text_sources_json, selected_text_paper_contexts_json, selected_text_note_contexts_json, paper_contexts_json, full_text_paper_contexts_json, citation_paper_contexts_json, quote_citations_json, screenshot_images, attachments_json, model_name, model_entry_id, model_provider_label, webchat_run_state, webchat_completion_reason, reasoning_summary, reasoning_details, compact_marker, context_tokens, context_window)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (conversation_id, conversation_key, role, text, timestamp, run_mode, agent_run_id, selected_text, selected_texts_json, selected_text_sources_json, selected_text_paper_contexts_json, selected_text_note_contexts_json, paper_contexts_json, full_text_paper_contexts_json, citation_paper_contexts_json, quote_citations_json, screenshot_images, attachments_json, generated_images_json, model_name, model_entry_id, model_provider_label, webchat_run_state, webchat_completion_reason, reasoning_summary, reasoning_details, compact_marker, context_tokens, context_window)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         conversationID,
         normalizedKey,
@@ -1157,6 +1169,7 @@ export async function appendCodexMessage(
         quoteCitations.length ? JSON.stringify(quoteCitations) : null,
         screenshotImages.length ? JSON.stringify(screenshotImages) : null,
         attachments.length ? JSON.stringify(attachments) : null,
+        generatedImages.length ? JSON.stringify(generatedImages) : null,
         message.modelName || null,
         message.modelEntryId || null,
         message.modelProviderLabel || null,
@@ -1324,6 +1337,17 @@ export async function loadCodexConversation(
         return undefined;
       }
     })();
+    const generatedImages: GeneratedChatImage[] | undefined = (() => {
+      if (typeof row.generatedImagesJson !== "string" || !row.generatedImagesJson) return undefined;
+      try {
+        const normalized = normalizeGeneratedChatImages(
+          JSON.parse(row.generatedImagesJson) as unknown,
+        );
+        return normalized.length ? normalized : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
 
     messages.push({
       role,
@@ -1342,6 +1366,7 @@ export async function loadCodexConversation(
       quoteCitations,
       screenshotImages,
       attachments,
+      generatedImages,
       modelName: typeof row.modelName === "string" ? row.modelName : undefined,
       modelEntryId: typeof row.modelEntryId === "string" ? row.modelEntryId : undefined,
       modelProviderLabel:
@@ -1585,6 +1610,7 @@ export async function updateLatestCodexAssistantMessage(
     | "contextTokens"
     | "contextWindow"
     | "quoteCitations"
+    | "generatedImages"
   >,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
@@ -1593,6 +1619,7 @@ export async function updateLatestCodexAssistantMessage(
     ? Math.floor(message.timestamp)
     : Date.now();
   const quoteCitations = normalizeQuoteCitations(message.quoteCitations);
+  const generatedImages = normalizeGeneratedChatImages(message.generatedImages);
   const selector = await resolveRepairingMessageConversationSelector(normalizedKey);
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
@@ -1610,6 +1637,7 @@ export async function updateLatestCodexAssistantMessage(
            reasoning_details = ?,
            compact_marker = ?,
            quote_citations_json = ?,
+           generated_images_json = ?,
            context_tokens = COALESCE(?, context_tokens),
            context_window = COALESCE(?, context_window)
        WHERE id = (
@@ -1633,6 +1661,7 @@ export async function updateLatestCodexAssistantMessage(
         message.reasoningDetails || null,
         message.compactMarker ? 1 : 0,
         quoteCitations.length ? JSON.stringify(quoteCitations) : null,
+        generatedImages.length ? JSON.stringify(generatedImages) : null,
         Number.isFinite(Number(message.contextTokens)) && Number(message.contextTokens) > 0
           ? Math.floor(Number(message.contextTokens))
           : null,

@@ -1,5 +1,10 @@
 import { assert } from "chai";
 import { appendMessage, loadConversation } from "../src/utils/chatStore";
+import {
+  appendCodexMessage,
+  loadCodexConversation,
+} from "../src/codexAppServer/store";
+import { CODEX_GLOBAL_CONVERSATION_KEY_BASE } from "../src/shared/conversationKeySpace";
 import { buildConversationID } from "../src/shared/conversationRegistry";
 
 describe("chatStore note contexts", function () {
@@ -87,9 +92,9 @@ describe("chatStore note contexts", function () {
     });
 
     const insert = findChatMessageInsert(queries);
-    assert.lengthOf(insert.params, 29);
-    assert.equal(insert.params[27], 1234);
-    assert.equal(insert.params[28], 200000);
+    assert.lengthOf(insert.params, 30);
+    assert.equal(insert.params[28], 1234);
+    assert.equal(insert.params[29], 200000);
   });
 
   it("persists an explicit empty model attachment split", async function () {
@@ -115,6 +120,111 @@ describe("chatStore note contexts", function () {
     const insert = findChatMessageInsert(queries);
     assert.include(insert.sql, "model_attachments_json");
     assert.equal(insert.params[19], JSON.stringify([]));
+  });
+
+  it("persists generated assistant images separately from screenshots", async function () {
+    const queries = installAppendMessageDbFixture();
+
+    await appendMessage(42, {
+      role: "assistant",
+      text: "",
+      timestamp: 100,
+      generatedImages: [
+        {
+          id: "img-1",
+          label: "result.png",
+          path: "/tmp/result.png",
+          revisedPrompt: "A concise chart",
+        },
+      ],
+      screenshotImages: ["data:image/png;base64,user-input"],
+    });
+
+    const insert = findChatMessageInsert(queries);
+    assert.include(insert.sql, "generated_images_json");
+    assert.equal(
+      insert.params[20],
+      JSON.stringify([
+        {
+          id: "img-1",
+          label: "result.png",
+          path: "/tmp/result.png",
+          revisedPrompt: "A concise chart",
+        },
+      ]),
+    );
+    assert.equal(
+      insert.params[17],
+      JSON.stringify(["data:image/png;base64,user-input"]),
+    );
+  });
+
+  it("persists and loads Codex generated assistant images", async function () {
+    const queries = installAppendMessageDbFixture();
+    const conversationKey = CODEX_GLOBAL_CONVERSATION_KEY_BASE + 1;
+
+    await appendCodexMessage(conversationKey, {
+      role: "assistant",
+      text: "",
+      timestamp: 100,
+      generatedImages: [
+        {
+          id: "codex-img-1",
+          path: "/tmp/codex-result.png",
+        },
+      ],
+    });
+
+    const insert = queries.find(({ sql }) =>
+      sql.includes("INSERT INTO llm_for_zotero_codex_messages"),
+    );
+    assert.isOk(insert, "expected Codex message insert query");
+    assert.include(insert?.sql || "", "generated_images_json");
+    assert.include(
+      insert?.params || [],
+      JSON.stringify([
+        {
+          id: "codex-img-1",
+          path: "/tmp/codex-result.png",
+        },
+      ]),
+    );
+
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      DB: {
+        queryAsync: async (sql: string) => {
+          if (
+            sql.includes("FROM llm_for_zotero_codex_messages") &&
+            sql.includes("ORDER BY timestamp ASC")
+          ) {
+            return [
+              {
+                role: "assistant",
+                text: "",
+                timestamp: 100,
+                generatedImagesJson: JSON.stringify([
+                  {
+                    id: "codex-img-1",
+                    path: "/tmp/codex-result.png",
+                  },
+                ]),
+              },
+            ];
+          }
+          return [];
+        },
+      },
+    };
+
+    const messages = await loadCodexConversation(conversationKey, 20);
+
+    assert.deepEqual(messages[0]?.generatedImages, [
+      {
+        id: "codex-img-1",
+        path: "/tmp/codex-result.png",
+      },
+    ]);
   });
 
   it("persists selectedCollectionContexts when appending a message", async function () {
@@ -174,6 +284,13 @@ describe("chatStore note contexts", function () {
               },
             ]),
             modelAttachmentsJson: JSON.stringify([]),
+            generatedImagesJson: JSON.stringify([
+              {
+                id: "img-1",
+                label: "result.png",
+                path: "/tmp/result.png",
+              },
+            ]),
             contextTokens: 321,
             contextWindow: 64000,
           },
@@ -203,6 +320,13 @@ describe("chatStore note contexts", function () {
       },
     ]);
     assert.deepEqual(messages[0]?.modelAttachments, []);
+    assert.deepEqual(messages[0]?.generatedImages, [
+      {
+        id: "img-1",
+        label: "result.png",
+        path: "/tmp/result.png",
+      },
+    ]);
     assert.equal(messages[0]?.contextTokens, 321);
     assert.equal(messages[0]?.contextWindow, 64000);
   });

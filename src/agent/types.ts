@@ -314,6 +314,7 @@ export type AgentEvent =
       args?: unknown;
       ok?: boolean;
       text?: string;
+      codeBlock?: string;
     }
   | {
       type: "usage";
@@ -359,11 +360,21 @@ export type AgentToolCall = {
   arguments: unknown;
 };
 
+export type AgentTraceDetailKind = "text" | "code" | "json" | "url";
+
+export type AgentTraceDetail = {
+  label: string;
+  value: string;
+  kind?: AgentTraceDetailKind;
+};
+
 export type AgentTraceChip = {
   icon?: string;
   iconName?: string;
   label: string;
   title?: string;
+  detail?: AgentTraceDetail;
+  details?: AgentTraceDetail[];
 };
 
 export type AgentTraceRequestSummary = {

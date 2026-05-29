@@ -4,9 +4,11 @@ import type {
   SelectedTextSource,
   PaperContextRef,
   QuoteCitation,
+  GeneratedChatImage,
   GlobalConversationSummary,
   PaperConversationSummary,
 } from "../shared/types";
+import { normalizeGeneratedChatImages } from "../shared/generatedImages";
 import {
   GLOBAL_CONVERSATION_KEY_BASE,
   PAPER_CONVERSATION_KEY_BASE,
@@ -77,6 +79,7 @@ export type StoredChatMessage = {
   screenshotImages?: string[];
   attachments?: StoredChatAttachment[];
   modelAttachments?: StoredChatAttachment[];
+  generatedImages?: GeneratedChatImage[];
   modelName?: string;
   modelEntryId?: string;
   modelProviderLabel?: string;
@@ -136,6 +139,7 @@ const CHAT_MESSAGE_SELECT_COLUMNS_SQL = `id,
             screenshot_images AS screenshotImages,
             attachments_json AS attachmentsJson,
             model_attachments_json AS modelAttachmentsJson,
+            generated_images_json AS generatedImagesJson,
             model_name AS modelName,
             model_entry_id AS modelEntryId,
             model_provider_label AS modelProviderLabel,
@@ -1003,6 +1007,7 @@ export async function initChatStore(): Promise<void> {
         screenshot_images TEXT,
         attachments_json TEXT,
         model_attachments_json TEXT,
+        generated_images_json TEXT,
         model_name TEXT,
         model_entry_id TEXT,
         model_provider_label TEXT,
@@ -1022,6 +1027,12 @@ export async function initChatStore(): Promise<void> {
       (columns || [])
         .map((column) => (typeof column?.name === "string" ? column.name : ""))
         .filter(Boolean),
+    );
+    await ensureColumn(
+      CHAT_MESSAGES_TABLE,
+      messageColumns,
+      "generated_images_json",
+      "generated_images_json TEXT",
     );
     await ensureColumn(
       CHAT_MESSAGES_TABLE,
@@ -1411,6 +1422,7 @@ export async function loadConversation(
         screenshotImages?: unknown;
         attachmentsJson?: unknown;
         modelAttachmentsJson?: unknown;
+        generatedImagesJson?: unknown;
         modelName?: unknown;
         modelEntryId?: unknown;
         modelProviderLabel?: unknown;
@@ -1601,6 +1613,17 @@ export async function loadConversation(
       row.modelAttachmentsJson,
       { preserveEmpty: true },
     );
+    let generatedImages: GeneratedChatImage[] | undefined;
+    if (typeof row.generatedImagesJson === "string" && row.generatedImagesJson) {
+      try {
+        const normalized = normalizeGeneratedChatImages(
+          JSON.parse(row.generatedImagesJson) as unknown,
+        );
+        if (normalized.length) generatedImages = normalized;
+      } catch (_err) {
+        generatedImages = undefined;
+      }
+    }
     if (!attachments?.length && screenshotImages?.length) {
       attachments = screenshotImages.map((url, index) => ({
         id: `legacy-screenshot-${index + 1}`,
@@ -1644,6 +1667,7 @@ export async function loadConversation(
       screenshotImages,
       attachments,
       modelAttachments,
+      generatedImages,
       modelName: typeof row.modelName === "string" ? row.modelName : undefined,
       modelEntryId:
         typeof row.modelEntryId === "string" ? row.modelEntryId : undefined,
@@ -1733,12 +1757,13 @@ export async function appendMessage(
     "modelAttachments",
   );
   const modelAttachments = normalizeStoredAttachments(message.modelAttachments);
+  const generatedImages = normalizeGeneratedChatImages(message.generatedImages);
   const conversationID = await resolveRegisteredConversationID(normalizedKey);
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
       `INSERT INTO ${CHAT_MESSAGES_TABLE}
-        (conversation_id, conversation_key, role, text, timestamp, run_mode, agent_run_id, selected_text, selected_texts_json, selected_text_sources_json, selected_text_paper_contexts_json, selected_text_note_contexts_json, paper_contexts_json, full_text_paper_contexts_json, citation_paper_contexts_json, quote_citations_json, collection_contexts_json, screenshot_images, attachments_json, model_attachments_json, model_name, model_entry_id, model_provider_label, webchat_run_state, webchat_completion_reason, reasoning_summary, reasoning_details, context_tokens, context_window)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (conversation_id, conversation_key, role, text, timestamp, run_mode, agent_run_id, selected_text, selected_texts_json, selected_text_sources_json, selected_text_paper_contexts_json, selected_text_note_contexts_json, paper_contexts_json, full_text_paper_contexts_json, citation_paper_contexts_json, quote_citations_json, collection_contexts_json, screenshot_images, attachments_json, model_attachments_json, generated_images_json, model_name, model_entry_id, model_provider_label, webchat_run_state, webchat_completion_reason, reasoning_summary, reasoning_details, context_tokens, context_window)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         conversationID,
         normalizedKey,
@@ -1770,6 +1795,7 @@ export async function appendMessage(
         screenshotImages.length ? JSON.stringify(screenshotImages) : null,
         attachments.length ? JSON.stringify(attachments) : null,
         hasExplicitModelAttachments ? JSON.stringify(modelAttachments) : null,
+        generatedImages.length ? JSON.stringify(generatedImages) : null,
         message.modelName || null,
         message.modelEntryId || null,
         message.modelProviderLabel || null,
@@ -1810,6 +1836,7 @@ export async function updateLatestUserMessage(
     | "screenshotImages"
     | "attachments"
     | "modelAttachments"
+    | "generatedImages"
     | "modelName"
     | "modelEntryId"
     | "modelProviderLabel"
@@ -1857,6 +1884,7 @@ export async function updateLatestUserMessage(
     "modelAttachments",
   );
   const modelAttachments = normalizeStoredAttachments(message.modelAttachments);
+  const generatedImages = normalizeGeneratedChatImages(message.generatedImages);
   const selector = await resolveRepairingMessageConversationSelector(normalizedKey);
 
   await Zotero.DB.executeTransaction(async () => {
@@ -1878,6 +1906,7 @@ export async function updateLatestUserMessage(
            screenshot_images = ?,
            attachments_json = ?,
            model_attachments_json = ?,
+           generated_images_json = ?,
            model_name = ?,
            model_entry_id = ?,
            model_provider_label = ?
@@ -1915,6 +1944,7 @@ export async function updateLatestUserMessage(
         screenshotImages.length ? JSON.stringify(screenshotImages) : null,
         attachments.length ? JSON.stringify(attachments) : null,
         hasExplicitModelAttachments ? JSON.stringify(modelAttachments) : null,
+        generatedImages.length ? JSON.stringify(generatedImages) : null,
         message.modelName || null,
         message.modelEntryId || null,
         message.modelProviderLabel || null,
@@ -1945,6 +1975,7 @@ export async function updateLatestAssistantMessage(
     | "contextTokens"
     | "contextWindow"
     | "quoteCitations"
+    | "generatedImages"
   >,
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
@@ -1952,6 +1983,7 @@ export async function updateLatestAssistantMessage(
 
   const timestamp = Number(message.timestamp);
   const quoteCitations = normalizeQuoteCitations(message.quoteCitations);
+  const generatedImages = normalizeGeneratedChatImages(message.generatedImages);
   const selector = await resolveRepairingMessageConversationSelector(normalizedKey);
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
@@ -1968,6 +2000,7 @@ export async function updateLatestAssistantMessage(
            reasoning_summary = ?,
            reasoning_details = ?,
            quote_citations_json = ?,
+           generated_images_json = ?,
            context_tokens = ?,
            context_window = ?
        WHERE id = (
@@ -1990,6 +2023,7 @@ export async function updateLatestAssistantMessage(
         message.reasoningSummary || null,
         message.reasoningDetails || null,
         quoteCitations.length ? JSON.stringify(quoteCitations) : null,
+        generatedImages.length ? JSON.stringify(generatedImages) : null,
         Number.isFinite(Number(message.contextTokens))
           ? Math.floor(Number(message.contextTokens))
           : null,

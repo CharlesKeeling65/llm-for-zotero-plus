@@ -3,6 +3,7 @@ import type {
   SelectedTextSource,
   ChatAttachmentCategory,
   ChatAttachment,
+  GeneratedChatImage,
   PaperContentSourceMode,
   AdvancedModelParams,
   ActiveNoteSession,
@@ -19,6 +20,7 @@ export type {
   SelectedTextSource,
   ChatAttachmentCategory,
   ChatAttachment,
+  GeneratedChatImage,
   PaperContentSourceMode,
   AdvancedModelParams,
   ActiveNoteSession,
@@ -65,6 +67,7 @@ export interface Message {
   paperContextsExpanded?: boolean;
   attachments?: ChatAttachment[];
   modelAttachments?: ChatAttachment[];
+  generatedImages?: GeneratedChatImage[];
   attachmentsExpanded?: boolean;
   attachmentActiveIndex?: number;
   screenshotExpanded?: boolean;
