@@ -31,6 +31,7 @@ import sql from "highlight.js/lib/languages/sql";
 import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
+import { Marked, Renderer, type Tokens } from "marked";
 
 // =============================================================================
 // Types
@@ -63,6 +64,8 @@ interface TextBlock {
  */
 let zoteroNoteMode = false;
 let activeImageResolver: ((src: string) => string | null) | null = null;
+let markedMarkdownDisabled = false;
+let markedMarkdownFailureReported = false;
 
 hljs.registerLanguage("bash", bash);
 hljs.registerLanguage("css", css);
@@ -115,6 +118,76 @@ function escapeHtml(text: string): string {
 
 function escapeAttribute(text: string): string {
   return escapeHtml(text).replace(/\r/g, "&#13;").replace(/\n/g, "&#10;");
+}
+
+type MarkdownRenderTarget = "chat" | "zotero-note";
+
+type MarkdownMathToken = Tokens.Generic & {
+  type: "llmMathBlock" | "llmInlineMath";
+  raw: string;
+  text: string;
+  display: boolean;
+  block: boolean;
+};
+
+function stripMarkdownUrlControls(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f\s]+/g, "");
+}
+
+function sanitizeMarkdownUrl(
+  rawUrl: string,
+  kind: "link" | "image",
+): string | null {
+  const trimmed = (rawUrl || "").trim();
+  if (!trimmed) return null;
+
+  const compact = stripMarkdownUrlControls(trimmed);
+  if (!compact || compact.startsWith("//")) return null;
+  if (compact.startsWith("#")) return trimmed;
+
+  const protocolMatch = compact.match(/^([a-z][a-z0-9+.-]*):/i);
+  if (!protocolMatch) return trimmed;
+
+  const protocol = protocolMatch[1].toLowerCase();
+  if (kind === "link") {
+    return ["http", "https", "mailto", "zotero"].includes(protocol)
+      ? trimmed
+      : null;
+  }
+
+  if (["http", "https", "file"].includes(protocol)) return trimmed;
+  if (
+    protocol === "data" &&
+    /^data:image\/[a-z0-9.+-]+;base64,/i.test(compact)
+  ) {
+    return trimmed;
+  }
+  return null;
+}
+
+function getHtmlAttribute(html: string, name: string): string | null {
+  const pattern = new RegExp(
+    `\\s${escapeRegex(name)}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
+    "i",
+  );
+  const match = html.match(pattern);
+  return match ? match[1] || match[2] || match[3] || "" : null;
+}
+
+function renderSafeRawHtml(rawHtml: string): string {
+  const html = rawHtml.trim();
+  if (!/^<img\b[^>]*\/?>$/i.test(html)) return escapeHtml(rawHtml);
+
+  const attachmentKey = getHtmlAttribute(html, "data-attachment-key");
+  const alt = getHtmlAttribute(html, "alt") || "";
+  if (attachmentKey && /^[A-Za-z0-9_-]+$/.test(attachmentKey)) {
+    return `<img data-attachment-key="${escapeAttribute(attachmentKey)}" alt="${escapeAttribute(alt)}" />`;
+  }
+
+  const src = getHtmlAttribute(html, "src");
+  const safeSrc = src ? sanitizeMarkdownUrl(src, "image") : null;
+  if (!safeSrc) return escapeHtml(rawHtml);
+  return `<img src="${escapeAttribute(safeSrc)}" alt="${escapeAttribute(alt)}" class="llm-chat-inline-figure" />`;
 }
 
 function wrapCopyable(
@@ -274,7 +347,11 @@ function renderMermaidPreview(code: string): string {
 }
 
 function hasUnescapedPipe(text: string, start: number, end: number): boolean {
-  for (let index = Math.max(0, start); index < Math.min(text.length, end); index++) {
+  for (
+    let index = Math.max(0, start);
+    index < Math.min(text.length, end);
+    index++
+  ) {
     if (text[index] !== "|") continue;
     let slashCount = 0;
     for (let prev = index - 1; prev >= 0 && text[prev] === "\\"; prev--) {
@@ -425,10 +502,7 @@ function buildWrappedDisplayMath(math: string): string | null {
 
   const terms = splitTopLevelAdditiveTerms(math);
   if (terms.length < 3) return null;
-  const lines = [
-    `& ${terms[0]}`,
-    ...terms.slice(1).map((term) => `& ${term}`),
-  ];
+  const lines = [`& ${terms[0]}`, ...terms.slice(1).map((term) => `& ${term}`)];
   return `\\begin{aligned}${lines.join(" \\\\ ")}\\end{aligned}`;
 }
 
@@ -478,6 +552,153 @@ function findClosingInlineDollarMath(text: string, openIndex: number): number {
     if (canCloseInlineDollarMath(text, index)) return index;
   }
   return -1;
+}
+
+function findClosingEscapedMathDelimiter(
+  text: string,
+  openIndex: number,
+  closeDelimiter: "\\)" | "\\]",
+): number {
+  for (let index = openIndex + 2; index < text.length - 1; index++) {
+    if (text.slice(index, index + 2) !== closeDelimiter) continue;
+    if (!isEscapedDelimiter(text, index)) return index;
+  }
+  return -1;
+}
+
+function renderInlineMathToken(
+  math: string,
+  copySource: string,
+  display: boolean,
+): string {
+  const trimmed = math.trim();
+  if (!trimmed) return escapeHtml(copySource);
+
+  if (zoteroNoteMode) {
+    return `<span class="math">$${escapeHtml(trimmed)}$</span>`;
+  }
+
+  if (display) {
+    return wrapCopyable(
+      `<span class="math-display-inline">${renderDisplayLatex(trimmed)}</span>`,
+      copySource,
+      "math",
+      "inline",
+    );
+  }
+
+  return wrapCopyable(
+    `<span class="math-inline">${renderLatex(trimmed, false)}</span>`,
+    copySource,
+    "math",
+    "inline",
+  );
+}
+
+function createMathExtensions() {
+  return [
+    {
+      name: "llmMathBlock",
+      level: "block" as const,
+      start(src: string) {
+        const dollar = src.indexOf("$$");
+        const bracket = src.indexOf("\\[");
+        if (dollar < 0) return bracket >= 0 ? bracket : undefined;
+        if (bracket < 0) return dollar;
+        return Math.min(dollar, bracket);
+      },
+      tokenizer(src: string) {
+        const dollarMatch = src.match(
+          /^\$\$[ \t]*\n?([\s\S]+?)\n?[ \t]*\$\$(?:[ \t]*(?:\n+|$))/,
+        );
+        if (dollarMatch) {
+          return {
+            type: "llmMathBlock",
+            raw: dollarMatch[0],
+            text: dollarMatch[1],
+            display: true,
+            block: true,
+          } satisfies MarkdownMathToken;
+        }
+
+        const bracketMatch = src.match(
+          /^\\\[[ \t]*\n?([\s\S]+?)\n?[ \t]*\\\](?:[ \t]*(?:\n+|$))/,
+        );
+        if (bracketMatch) {
+          return {
+            type: "llmMathBlock",
+            raw: bracketMatch[0],
+            text: bracketMatch[1],
+            display: true,
+            block: true,
+          } satisfies MarkdownMathToken;
+        }
+
+        return undefined;
+      },
+      renderer(token: MarkdownMathToken) {
+        return renderMathBlock(token.raw);
+      },
+    },
+    {
+      name: "llmInlineMath",
+      level: "inline" as const,
+      start(src: string) {
+        const candidates = ["$", "\\(", "\\["]
+          .map((needle) => src.indexOf(needle))
+          .filter((index) => index >= 0);
+        return candidates.length ? Math.min(...candidates) : undefined;
+      },
+      tokenizer(src: string) {
+        if (src.startsWith("\\(")) {
+          const closeIndex = findClosingEscapedMathDelimiter(src, 0, "\\)");
+          if (closeIndex > 2) {
+            const raw = src.slice(0, closeIndex + 2);
+            return {
+              type: "llmInlineMath",
+              raw,
+              text: src.slice(2, closeIndex),
+              display: false,
+              block: false,
+            } satisfies MarkdownMathToken;
+          }
+        }
+
+        if (src.startsWith("\\[")) {
+          const closeIndex = findClosingEscapedMathDelimiter(src, 0, "\\]");
+          if (closeIndex > 2) {
+            const raw = src.slice(0, closeIndex + 2);
+            return {
+              type: "llmInlineMath",
+              raw,
+              text: src.slice(2, closeIndex),
+              display: true,
+              block: false,
+            } satisfies MarkdownMathToken;
+          }
+        }
+
+        if (canOpenInlineDollarMath(src, 0)) {
+          const closeIndex = findClosingInlineDollarMath(src, 0);
+          if (closeIndex > 0) {
+            const raw = src.slice(0, closeIndex + 1);
+            return {
+              type: "llmInlineMath",
+              raw,
+              text: src.slice(1, closeIndex),
+              display: false,
+              block: false,
+            } satisfies MarkdownMathToken;
+          }
+        }
+
+        return undefined;
+      },
+      renderer(token: MarkdownMathToken) {
+        return renderInlineMathToken(token.text, token.raw, token.display);
+      },
+    },
+  ];
 }
 
 // =============================================================================
@@ -926,6 +1147,57 @@ function splitTextBlocks(text: string): TextBlock[] {
   return blocks;
 }
 
+function normalizeHardWrappedTables(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const result: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const tableBlock = collectTableBlock(lines, i);
+    if (tableBlock) {
+      result.push(tableBlock.raw);
+      i = tableBlock.nextIndex;
+      if (i < lines.length && lines[i].trim()) {
+        result.push("");
+      }
+      continue;
+    }
+    result.push(lines[i]);
+    i++;
+  }
+
+  return result.join("\n");
+}
+
+function normalizeMarkdownSegmentForMarked(text: string): string {
+  return normalizeHardWrappedTables(normalizeBlockBoundaries(text));
+}
+
+function normalizeMarkdownForMarked(text: string): string {
+  if (!hasBalancedCodeBlocks(text)) return text;
+
+  const codeBlockRegex = /```[ \t]*([^\s`]*)[^\n`]*\n?([\s\S]*?)```/g;
+  let result = "";
+  let lastEnd = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = codeBlockRegex.exec(text)) !== null) {
+    if (match.index > lastEnd) {
+      result += normalizeMarkdownSegmentForMarked(
+        text.slice(lastEnd, match.index),
+      );
+    }
+    result += match[0];
+    lastEnd = match.index + match[0].length;
+  }
+
+  if (lastEnd < text.length) {
+    result += normalizeMarkdownSegmentForMarked(text.slice(lastEnd));
+  }
+
+  return result;
+}
+
 // =============================================================================
 // Block Rendering
 // =============================================================================
@@ -1003,7 +1275,11 @@ function renderMathBlock(content: string): string {
   }
 
   const rendered = renderDisplayLatex(math);
-  return wrapCopyable(`<div class="math-display">${rendered}</div>`, copySource, "math");
+  return wrapCopyable(
+    `<div class="math-display">${rendered}</div>`,
+    copySource,
+    "math",
+  );
 }
 
 /** Render header */
@@ -1057,6 +1333,34 @@ function renderInlineWithSoftBreaks(content: string): string {
     .join("<br/>");
 }
 
+function normalizeInlineTextToken(text: string): string {
+  if (!/[\r\n]/.test(text)) return text;
+
+  const lines = text.split(/\r?\n/);
+  let result = lines[0].replace(/[ \t]+$/, "");
+  let previousLineHadHardBreak =
+    / {2,}$/.test(lines[0]) || /\\$/.test(lines[0]);
+
+  for (let index = 1; index < lines.length; index++) {
+    const rawLine = lines[index];
+    const hardBreak = / {2,}$/.test(rawLine) || /\\$/.test(rawLine);
+    const lineText = rawLine
+      .replace(/\\$/, "")
+      .replace(/[ \t]+$/, "")
+      .trim();
+
+    if (previousLineHadHardBreak) {
+      result += HARD_BREAK_TOKEN;
+    } else if (!/^[,.;:!?%)}\]"'’”]/.test(lineText)) {
+      result += " ";
+    }
+    result += lineText;
+    previousLineHadHardBreak = hardBreak;
+  }
+
+  return result;
+}
+
 /** Render list (ordered or unordered) */
 function renderList(content: string): string {
   const lines = content.split(/\r?\n/).filter((l) => l.trim());
@@ -1101,13 +1405,15 @@ function renderBlockquote(content: string): string {
   // constructs (display math, code blocks, etc.) inside blockquotes work.
   const innerText = innerLines.join("\n");
   const innerBlocks = splitTextBlocks(innerText);
-  const innerHtml = innerBlocks.map((block) => {
-    try {
-      return renderBlock(block);
-    } catch {
-      return `<div class="render-fallback">${escapeHtml(block.raw)}</div>`;
-    }
-  }).join("\n");
+  const innerHtml = innerBlocks
+    .map((block) => {
+      try {
+        return renderBlock(block);
+      } catch {
+        return `<div class="render-fallback">${escapeHtml(block.raw)}</div>`;
+      }
+    })
+    .join("\n");
   return `<blockquote>${innerHtml}</blockquote>`;
 }
 
@@ -1225,7 +1531,7 @@ function renderInline(text: string): string {
   // 3b. Protect <img> tags (embedded figures, data URLs, Zotero attachment keys)
   result = result.replace(
     /<img\s+[^>]*(?:src|data-attachment-key)\s*=\s*"[^"]*"[^>]*\/?>/gi,
-    (match) => protect(match),
+    (match) => protect(renderSafeRawHtml(match)),
   );
 
   // 4. HTML escape (after protecting code, math, and images)
@@ -1287,9 +1593,11 @@ function renderInline(text: string): string {
           );
         }
       }
+      const safeSrc = sanitizeMarkdownUrl(trimmedSrc, "image");
+      if (!safeSrc) return escapeHtml(alt || trimmedSrc);
       // Always render as <img> — works for file://, data:, and http(s):// URLs
       return protect(
-        `<img src="${escapeHtml(trimmedSrc)}" alt="${escapeHtml(alt)}" style="max-width:100%; border-radius:4px; margin:4px 0;" />`,
+        `<img src="${escapeAttribute(safeSrc)}" alt="${escapeAttribute(alt)}" style="max-width:100%; border-radius:4px; margin:4px 0;" />`,
       );
     },
   );
@@ -1297,8 +1605,11 @@ function renderInline(text: string): string {
   // 11. Links [text](url)
   result = result.replace(
     /\[([^\]]+)\]\(([^)]+)\)/g,
-    (_match, text: string, href: string) =>
-      `<a href="${escapeAttribute(href.trim())}" target="_blank" rel="noopener">${escapeHtml(text)}</a>`,
+    (_match, text: string, href: string) => {
+      const safeHref = sanitizeMarkdownUrl(href.trim(), "link");
+      if (!safeHref) return text;
+      return `<a href="${escapeAttribute(safeHref)}" target="_blank" rel="noopener">${text}</a>`;
+    },
   );
 
   // 11. Restore protected blocks.
@@ -1312,6 +1623,190 @@ function renderInline(text: string): string {
   }
 
   return result;
+}
+
+function renderMarkdownImage(
+  alt: string,
+  href: string,
+  title: string | null | undefined,
+  target: MarkdownRenderTarget,
+): string {
+  let resolvedSrc: string | null = null;
+  const trimmedHref = href.trim();
+  if (activeImageResolver) {
+    resolvedSrc = activeImageResolver(trimmedHref);
+  }
+  const safeSrc = sanitizeMarkdownUrl(resolvedSrc || trimmedHref, "image");
+  if (!safeSrc) return escapeHtml(alt || trimmedHref);
+
+  const titleAttr = title ? ` title="${escapeAttribute(title)}"` : "";
+  const classAttr = target === "chat" ? ' class="llm-chat-inline-figure"' : "";
+  return `<img src="${escapeAttribute(safeSrc)}" alt="${escapeAttribute(alt)}"${titleAttr}${classAttr} />`;
+}
+
+function createMarkedRenderer(
+  target: MarkdownRenderTarget,
+): Renderer<string, string> {
+  const renderer = new Renderer<string, string>();
+
+  renderer.code = function (token: Tokens.Code): string {
+    return renderCodeBlock(token.text, token.raw);
+  };
+
+  renderer.html = function (token: Tokens.HTML | Tokens.Tag): string {
+    return renderSafeRawHtml(token.text);
+  };
+
+  renderer.heading = function (token: Tokens.Heading): string {
+    if (
+      !/^#{1,6}(?:\s|$)/.test(token.raw) &&
+      /\n[ \t]*-{3,}[ \t]*(?:\n|$)/.test(token.raw)
+    ) {
+      return `<p>${this.parser.parseInline(token.tokens)}</p><hr/>`;
+    }
+    const level = Math.min(5, Math.max(2, token.depth + 1));
+    return `<h${level}>${this.parser.parseInline(token.tokens)}</h${level}>`;
+  };
+
+  renderer.hr = function (): string {
+    return "<hr/>";
+  };
+
+  renderer.blockquote = function (token: Tokens.Blockquote): string {
+    return `<blockquote>${this.parser.parse(token.tokens)}</blockquote>`;
+  };
+
+  renderer.list = function (token: Tokens.List): string {
+    const tag = token.ordered ? "ol" : "ul";
+    const startAttr =
+      token.ordered && token.start !== "" && token.start !== 1
+        ? ` start="${token.start}"`
+        : "";
+    const items = token.items.map((item) => this.listitem(item)).join("");
+    return `<${tag}${startAttr}>${items}</${tag}>`;
+  };
+
+  renderer.listitem = function (token: Tokens.ListItem): string {
+    let body = this.parser.parse(token.tokens, Boolean(token.loose));
+    if (token.task) {
+      const checkbox = this.checkbox({ checked: Boolean(token.checked) });
+      body = body.startsWith("<p>")
+        ? body.replace(/^<p>/, `<p>${checkbox} `)
+        : `${checkbox} ${body}`;
+    }
+    return `<li>${body}</li>`;
+  };
+
+  renderer.checkbox = function (token: Tokens.Checkbox): string {
+    const checked = token.checked ? ' checked="checked"' : "";
+    return `<input type="checkbox" disabled="disabled"${checked} />`;
+  };
+
+  renderer.paragraph = function (token: Tokens.Paragraph): string {
+    return `<p>${this.parser.parseInline(token.tokens)}</p>`;
+  };
+
+  renderer.table = function (token: Tokens.Table): string {
+    const headerHtml = `<tr>${token.header
+      .map((cell) => `<th>${this.parser.parseInline(cell.tokens)}</th>`)
+      .join("")}</tr>`;
+    const bodyHtml = token.rows
+      .map(
+        (row) =>
+          `<tr>${row
+            .map((cell) => `<td>${this.parser.parseInline(cell.tokens)}</td>`)
+            .join("")}</tr>`,
+      )
+      .join("");
+    const html = `<div class="llm-table-scroll"><table><thead>${headerHtml}</thead><tbody>${bodyHtml}</tbody></table></div>`;
+    if (zoteroNoteMode) return html;
+    return wrapCopyable(html, token.raw.trim(), "table");
+  };
+
+  renderer.codespan = function (token: Tokens.Codespan): string {
+    return `<code>${escapeHtml(token.text)}</code>`;
+  };
+
+  renderer.br = function (): string {
+    return "<br/>";
+  };
+
+  renderer.text = function (token: Tokens.Text | Tokens.Escape): string {
+    if ("tokens" in token && token.tokens?.length) {
+      return this.parser.parseInline(token.tokens);
+    }
+    return escapeHtml(normalizeInlineTextToken(token.text))
+      .split(HARD_BREAK_TOKEN)
+      .join("<br/>");
+  };
+
+  renderer.link = function (token: Tokens.Link): string {
+    const body = this.parser.parseInline(token.tokens);
+    const safeHref = sanitizeMarkdownUrl(token.href, "link");
+    if (!safeHref) return body;
+    const titleAttr = token.title
+      ? ` title="${escapeAttribute(token.title)}"`
+      : "";
+    return `<a href="${escapeAttribute(safeHref)}"${titleAttr} target="_blank" rel="noopener">${body}</a>`;
+  };
+
+  renderer.image = function (token: Tokens.Image): string {
+    return renderMarkdownImage(token.text, token.href, token.title, target);
+  };
+
+  return renderer;
+}
+
+function createMarkedMarkdownRenderer(target: MarkdownRenderTarget): Marked {
+  return new Marked({
+    async: false,
+    breaks: false,
+    gfm: true,
+    renderer: createMarkedRenderer(target),
+    extensions: createMathExtensions(),
+  });
+}
+
+export function renderMarkdownWithLegacyParser(
+  text: string,
+  options?: { resolveImage?: (src: string) => string | null },
+): string {
+  const prevResolver = activeImageResolver;
+  if (options?.resolveImage) activeImageResolver = options.resolveImage;
+  try {
+    const blocks = splitIntoBlocks(text);
+    return blocks
+      .map((block) => {
+        try {
+          return renderBlock(block);
+        } catch (err) {
+          console.warn("Markdown block render error:", err);
+          return `<div class="render-fallback">${escapeHtml(block.raw)}</div>`;
+        }
+      })
+      .join("\n")
+      .trim();
+  } catch (err) {
+    console.warn("Markdown legacy render error:", err);
+    return `<div class="render-fallback">${escapeHtml(text)}</div>`;
+  } finally {
+    activeImageResolver = prevResolver;
+  }
+}
+
+function reportMarkedMarkdownFailure(err: unknown): void {
+  markedMarkdownDisabled = true;
+  if (markedMarkdownFailureReported) return;
+  markedMarkdownFailureReported = true;
+  console.warn(
+    "Markdown parser failed; falling back to Zotero-compatible renderer:",
+    err,
+  );
+}
+
+export function __setMarkdownParserDisabledForTest(disabled: boolean): void {
+  markedMarkdownDisabled = disabled;
+  markedMarkdownFailureReported = false;
 }
 
 // =============================================================================
@@ -1339,21 +1834,25 @@ export function renderMarkdown(
   if (options?.resolveImage) activeImageResolver = options.resolveImage;
 
   try {
-    // Split into blocks
-    const blocks = splitIntoBlocks(text);
+    if (markedMarkdownDisabled) {
+      return renderMarkdownWithLegacyParser(text);
+    }
 
-    // Render each block independently (errors isolated)
-    const renderedBlocks = blocks.map((block) => {
-      try {
-        return renderBlock(block);
-      } catch (err) {
-        // Graceful fallback: show raw text
-        console.warn("Markdown block render error:", err);
-        return `<div class="render-fallback">${escapeHtml(block.raw)}</div>`;
-      }
-    });
-
-    return renderedBlocks.join("\n");
+    const normalized = normalizeMarkdownForMarked(text);
+    const target: MarkdownRenderTarget = zoteroNoteMode
+      ? "zotero-note"
+      : "chat";
+    const rendered = createMarkedMarkdownRenderer(target).parse(normalized);
+    if (typeof rendered === "string") {
+      return rendered.trim();
+    }
+    reportMarkedMarkdownFailure(
+      new Error("Markdown parser returned non-string output"),
+    );
+    return renderMarkdownWithLegacyParser(text);
+  } catch (err) {
+    reportMarkedMarkdownFailure(err);
+    return renderMarkdownWithLegacyParser(text);
   } finally {
     activeImageResolver = prevResolver;
   }

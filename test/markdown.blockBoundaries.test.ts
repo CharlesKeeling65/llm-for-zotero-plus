@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import {
+  __setMarkdownParserDisabledForTest,
   normalizeBlockBoundaries,
   renderMarkdown,
   renderMarkdownForNote,
@@ -159,6 +160,31 @@ describe("renderMarkdown with inline block tokens", function () {
     assert.include(html, "olfactory bulb");
   });
 
+  it("keeps dashed separator lines as horizontal rules, matching the legacy renderer", function () {
+    const input = "Paragraph before\n---\nParagraph after";
+    const html = renderMarkdown(input);
+
+    assert.include(html, "<p>Paragraph before</p><hr/>");
+    assert.include(html, "<p>Paragraph after</p>");
+    assert.notInclude(html, "<h2>Paragraph before</h2>");
+    assert.notInclude(html, "<h3>Paragraph before</h3>");
+  });
+
+  it("emits XHTML-compatible void tags for Zotero chrome documents", function () {
+    const html = renderMarkdown(
+      ["---", "", "First line  ", "Second line", "", "- [x] done"].join("\n"),
+    );
+
+    assert.include(html, "<hr/>");
+    assert.notInclude(html, "<hr>");
+    assert.include(html, "<br/>");
+    assert.include(
+      html,
+      '<input type="checkbox" disabled="disabled" checked="checked" />',
+    );
+    assert.notInclude(html, 'type="checkbox">');
+  });
+
   it("renders blockquote + citation combo correctly for decoration", function () {
     const input =
       "discussed:\n\n> How the olfactory bulb maintains stability\n\n(Zheng et al., 2026)";
@@ -302,6 +328,70 @@ describe("renderMarkdown with inline block tokens", function () {
     );
     assert.include(html, " costs $5 in the toy example.");
   });
+
+  it("renders nested lists without flattening child items", function () {
+    const html = renderMarkdown("- parent\n  - child\n- next");
+    assert.include(html, "<li>parent<ul>");
+    assert.include(html, "<li>child</li>");
+    assert.include(html, "<li>next</li>");
+  });
+
+  it("renders GFM task lists and strikethrough", function () {
+    const html = renderMarkdown("- [x] done\n- [ ] todo\n\n~~deleted~~");
+    assert.include(html, 'type="checkbox"');
+    assert.include(html, "checked");
+    assert.include(html, "<del>deleted</del>");
+  });
+
+  it("renders autolinks and links containing parentheses", function () {
+    const html = renderMarkdown(
+      "Visit https://example.com and [paper](https://example.com/a(b)).",
+    );
+    assert.include(
+      html,
+      '<a href="https://example.com" target="_blank" rel="noopener">https://example.com</a>',
+    );
+    assert.include(html, 'href="https://example.com/a(b)"');
+  });
+
+  it("does not render unsafe link or image URLs", function () {
+    const html = renderMarkdown(
+      "[bad](javascript:alert(1)) ![x](vbscript:alert(1)) ![y](data:text/html;base64,AAAA)",
+    );
+    assert.notInclude(html.toLowerCase(), "javascript:");
+    assert.notInclude(html.toLowerCase(), "vbscript:");
+    assert.notInclude(html.toLowerCase(), "data:text/html");
+    assert.notInclude(html, "<img");
+  });
+
+  it("escapes raw unsafe HTML while preserving safe attachment images", function () {
+    const unsafe = renderMarkdown('<script>alert("x")</script>');
+    assert.include(unsafe, "&lt;script&gt;");
+    assert.notInclude(unsafe, "<script>");
+
+    const safeImage = renderMarkdown(
+      '<img data-attachment-key="ABC_123" alt="Figure 1" />',
+    );
+    assert.include(safeImage, 'data-attachment-key="ABC_123"');
+    assert.include(safeImage, 'alt="Figure 1"');
+  });
+
+  it("falls back to the Zotero renderer instead of escaped raw Markdown", function () {
+    __setMarkdownParserDisabledForTest(true);
+    try {
+      const html = renderMarkdown(
+        "## Methods\n\nThis is **important**.\n\n- one",
+      );
+      assert.include(html, "<h3>Methods</h3>");
+      assert.include(html, "<strong>important</strong>");
+      assert.include(html, "<li>one</li>");
+      assert.notInclude(html, "## Methods");
+      assert.notInclude(html, "**important**");
+      assert.notInclude(html, "render-fallback");
+    } finally {
+      __setMarkdownParserDisabledForTest(false);
+    }
+  });
 });
 
 describe("renderMarkdown code block presentation", function () {
@@ -367,7 +457,7 @@ describe("renderMarkdown code block presentation", function () {
 
   it("recognizes Mermaid aliases and fence metadata", function () {
     const input = [
-      "``` mmd title=\"example\"",
+      '``` mmd title="example"',
       "flowchart TD",
       '  A["One<br/>Two"] <--> B["Three"]',
       "```",
@@ -377,8 +467,11 @@ describe("renderMarkdown code block presentation", function () {
     assert.include(html, 'data-code-lang="mmd"');
     assert.include(html, "llm-mermaid-preview");
     assert.include(html, 'data-mermaid-state="pending"');
-    assert.include(html, 'A[&quot;One&lt;br/&gt;Two&quot;]');
-    assert.include(html, 'data-llm-copy-source="``` mmd title=&quot;example&quot;&#10;');
+    assert.include(html, "A[&quot;One&lt;br/&gt;Two&quot;]");
+    assert.include(
+      html,
+      'data-llm-copy-source="``` mmd title=&quot;example&quot;&#10;',
+    );
   });
 
   it("falls back to a normal code block for unsafe SVG", function () {

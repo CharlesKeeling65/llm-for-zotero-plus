@@ -20,6 +20,7 @@ import {
   normalizeMermaidFlowchartLabels,
   normalizeMermaidSourceForTheme,
   polishRenderedMermaidSvg,
+  renderRenderedMarkdownInto,
   resolveMermaidThemeFromColors,
 } from "../src/modules/contextPanel/renderedMarkdown";
 import {
@@ -169,8 +170,52 @@ class FakeCopyableElement extends FakeElement {
   }
 }
 
+class ThrowingTemplateElement extends FakeElement {
+  public readonly content = {
+    querySelectorAll: () => [],
+  };
+
+  set innerHTML(_value: string) {
+    throw new Error("template parser unavailable");
+  }
+
+  get innerHTML(): string {
+    return "";
+  }
+}
+
+class OneShotInnerHtmlFailureElement extends FakeElement {
+  private htmlSetCount = 0;
+  private storedHtml = "";
+
+  set innerHTML(value: string) {
+    this.htmlSetCount++;
+    if (this.htmlSetCount === 1) {
+      throw new Error("strict chrome innerHTML rejected fragment");
+    }
+    this.storedHtml = value;
+  }
+
+  get innerHTML(): string {
+    return this.storedHtml;
+  }
+
+  getInnerHtmlSetCount(): number {
+    return this.htmlSetCount;
+  }
+}
+
 const fakeDocument = {
   createElement: (tagName: string) => new FakeElement(tagName),
+  createElementNS: (_namespace: string, tagName: string) =>
+    new FakeElement(tagName),
+} as unknown as Document;
+
+const throwingTemplateDocument = {
+  createElement: (tagName: string) =>
+    tagName === "template"
+      ? new ThrowingTemplateElement(tagName)
+      : new FakeElement(tagName),
   createElementNS: (_namespace: string, tagName: string) =>
     new FakeElement(tagName),
 } as unknown as Document;
@@ -542,6 +587,47 @@ describe("agentTrace render", function () {
       "| A | B |\n|---|---|\n| 1 | 2 |",
     );
     assert.include(tableHtml, "<table");
+  });
+
+  it("keeps rendered Markdown when template sanitizer parsing fails", function () {
+    const target = new FakeElement("div") as unknown as HTMLElement;
+
+    renderRenderedMarkdownInto(
+      target,
+      ["## Methodology Overview", "", "**Fiber photometry**", "", "---"].join(
+        "\n",
+      ),
+      throwingTemplateDocument,
+    );
+
+    const html = (target as unknown as FakeElement).innerHTML;
+    assert.include(html, "<h3>Methodology Overview</h3>");
+    assert.include(html, "<strong>Fiber photometry</strong>");
+    assert.include(html, "<hr");
+    assert.notInclude(html, "## Methodology Overview");
+    assert.isTrue(
+      (target as unknown as FakeElement).classList.contains(
+        "llm-rendered-markdown",
+      ),
+    );
+  });
+
+  it("falls back to the legacy renderer when chrome innerHTML rejects marked HTML", function () {
+    const target = new OneShotInnerHtmlFailureElement(
+      "div",
+    ) as unknown as HTMLElement;
+
+    renderRenderedMarkdownInto(
+      target,
+      ["## Methodology Overview", "", "The study used photometry."].join("\n"),
+      throwingTemplateDocument,
+    );
+
+    const fakeTarget = target as unknown as OneShotInnerHtmlFailureElement;
+    assert.equal(fakeTarget.getInnerHtmlSetCount(), 2);
+    assert.include(fakeTarget.innerHTML, "<h3>Methodology Overview</h3>");
+    assert.include(fakeTarget.innerHTML, "<p>The study used photometry.</p>");
+    assert.notInclude(fakeTarget.innerHTML, "## Methodology Overview");
   });
 
   it("renders trace inline math through the shared Markdown surface", function () {
