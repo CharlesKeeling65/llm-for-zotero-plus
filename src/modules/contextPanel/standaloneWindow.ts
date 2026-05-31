@@ -60,10 +60,14 @@ import {
   GLOBAL_HISTORY_UNDO_WINDOW_MS,
   groupHistoryEntriesByDay,
   isOrphanHistoryEntry,
+  maybeSelectPaperHistoryTarget,
+  normalizeHistoryPaperItemID,
   normalizeHistoryTitle,
+  resolvePaperHistoryNavigationDecision,
   resolveHistoryEntryPaperBaseItem,
   resolveHistoryEntrySourceState,
   type ConversationHistoryEntry,
+  type HistoryPaperPaneSelector,
 } from "./setupHandlers/controllers/conversationHistoryController";
 import {
   createHistorySearchDocument,
@@ -2039,6 +2043,32 @@ export function openStandaloneChat(options?: {
         return document;
       };
 
+      const getCurrentStandaloneHistoryPaperItemID = (): number => {
+        return normalizeHistoryPaperItemID(currentBasePaperItem?.id);
+      };
+
+      const maybeSelectStandaloneHistoryPaperItem = async (
+        decision: ReturnType<typeof resolvePaperHistoryNavigationDecision>,
+        paperItem: Zotero.Item,
+      ): Promise<boolean> => {
+        try {
+          return await maybeSelectPaperHistoryTarget({
+            decision,
+            paperItemID: paperItem.id,
+            getPane: () =>
+              Zotero.getActiveZoteroPane?.() as
+                | HistoryPaperPaneSelector
+                | undefined,
+          });
+        } catch (err) {
+          ztoolkit.log("LLM: Failed to select standalone history paper", {
+            paperItemID: paperItem.id,
+            error: err,
+          });
+          return false;
+        }
+      };
+
       const selectStandaloneSearchEntry = async (
         entry: ConversationHistoryEntry,
       ): Promise<boolean> => {
@@ -2074,6 +2104,19 @@ export function openStandaloneChat(options?: {
               }
               return false;
             }
+            const navigationDecision = resolvePaperHistoryNavigationDecision({
+              entryPaperItemID: paperItem.id,
+              currentPaperItemID: getCurrentStandaloneHistoryPaperItemID(),
+            });
+            if (navigationDecision === "missing-target-paper") {
+              const statusEl = contentArea.querySelector(
+                "#llm-status",
+              ) as HTMLElement | null;
+              if (statusEl) {
+                setStatus(statusEl, t("Could not find this paper"), "error");
+              }
+              return false;
+            }
             const sessionVersion = Number(entry.sessionVersion || 0);
             const sv = sessionVersion > 0 ? sessionVersion : 1;
             const portalItem = buildStandalonePortalItem({
@@ -2095,13 +2138,33 @@ export function openStandaloneChat(options?: {
             });
             let mounted = false;
             try {
+              if (navigationDecision === "select-target-paper") {
+                const selected = await maybeSelectStandaloneHistoryPaperItem(
+                  navigationDecision,
+                  paperItem,
+                );
+                if (!selected) {
+                  const statusEl = contentArea.querySelector(
+                    "#llm-status",
+                  ) as HTMLElement | null;
+                  if (statusEl) {
+                    setStatus(
+                      statusEl,
+                      t("Could not focus this paper"),
+                      "error",
+                    );
+                  }
+                  return false;
+                }
+              }
               standaloneMode = "paper";
               currentPaperItem = paperItem;
               currentBasePaperItem = paperItem;
+              currentRawContextItem = paperItem;
               paperTab.classList.add("active");
               openTab.classList.remove("active");
               syncPaperTabLabel();
-              mountChatPanel(portalItem);
+              mountChatPanel(portalItem, paperItem);
               mounted = true;
             } finally {
               if (!mounted) targetModeSnapshot.restore();
