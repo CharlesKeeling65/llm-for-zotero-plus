@@ -107,7 +107,11 @@ describe("historyLoader", function () {
       DB: {
         queryAsync: async (sql: string, params?: unknown[]) => {
           const normalizedParams = Array.isArray(params) ? params : [];
-          if (sql.includes("INSERT OR IGNORE INTO llm_for_zotero_paper_conversations")) {
+          if (
+            sql.includes(
+              "INSERT OR IGNORE INTO llm_for_zotero_paper_conversations",
+            )
+          ) {
             return [];
           }
           if (
@@ -433,6 +437,17 @@ describe("historyLoader", function () {
         queryAsync: async (sql: string, params?: unknown[]) => {
           const normalizedParams = Array.isArray(params) ? params : [];
           if (
+            sql.includes("SELECT conversation_key AS conversationKey") &&
+            sql.includes("FROM llm_for_zotero_global_conversations") &&
+            sql.includes("WHERE conversation_key = ?")
+          ) {
+            return conversations
+              .filter(
+                (row) => row.conversationKey === Number(normalizedParams[0]),
+              )
+              .map((row) => ({ conversationKey: row.conversationKey }));
+          }
+          if (
             sql.includes("SELECT MAX(conversation_key)") &&
             sql.includes("FROM llm_for_zotero_global_conversations")
           ) {
@@ -444,9 +459,7 @@ describe("historyLoader", function () {
               },
             ];
           }
-          if (
-            sql.includes("INSERT INTO llm_for_zotero_global_conversations")
-          ) {
+          if (sql.includes("INSERT INTO llm_for_zotero_global_conversations")) {
             conversations.push({
               conversationKey: Number(normalizedParams[1]),
               libraryID: Number(normalizedParams[2]),

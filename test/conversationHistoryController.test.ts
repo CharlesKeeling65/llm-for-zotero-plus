@@ -73,7 +73,10 @@ describe("conversationHistoryController", function () {
 
     assert.deepEqual(calls, [42]);
     assert.deepEqual(resolved, { id: 42, title: "Paper" });
-    assert.equal(resolveHistoryEntryPaperItem({}, () => ({ id: 1 })), null);
+    assert.equal(
+      resolveHistoryEntryPaperItem({}, () => ({ id: 1 })),
+      null,
+    );
     assert.equal(normalizeHistoryPaperItemID("not-a-number"), 0);
   });
 
@@ -98,18 +101,25 @@ describe("conversationHistoryController", function () {
       isAttachment: () => false,
       isNote: () => true,
     };
-    const items = new Map<number, typeof parent | typeof attachment | typeof note>([
+    const items = new Map<
+      number,
+      typeof parent | typeof attachment | typeof note
+    >([
       [42, parent],
       [99, attachment],
       [100, note],
     ]);
 
     assert.equal(
-      resolveHistoryEntryPaperBaseItem({ paperItemID: 99 }, (id) => items.get(id)),
+      resolveHistoryEntryPaperBaseItem({ paperItemID: 99 }, (id) =>
+        items.get(id),
+      ),
       parent,
     );
     assert.equal(
-      resolveHistoryEntryPaperBaseItem({ paperItemID: 100 }, (id) => items.get(id)),
+      resolveHistoryEntryPaperBaseItem({ paperItemID: 100 }, (id) =>
+        items.get(id),
+      ),
       parent,
     );
   });
@@ -132,7 +142,10 @@ describe("conversationHistoryController", function () {
       firstCreator: "Fallback Creator",
       year: "2017",
     });
-    assert.equal(formatHistoryPaperScopeLabel(metadata), "Fallback Creator, 2017");
+    assert.equal(
+      formatHistoryPaperScopeLabel(metadata),
+      "Fallback Creator, 2017",
+    );
   });
 
   it("resolves paper display metadata through child-item parent IDs", function () {
@@ -201,7 +214,9 @@ describe("conversationHistoryController", function () {
       ),
       "orphan",
     );
-    assert.isTrue(isOrphanHistoryEntry({ kind: "paper", sourceState: "orphan" }));
+    assert.isTrue(
+      isOrphanHistoryEntry({ kind: "paper", sourceState: "orphan" }),
+    );
     assert.equal(
       getHistoryEntryLabelType({ kind: "paper", sourceState: "orphan" }),
       "orphan",
@@ -246,9 +261,8 @@ describe("conversationHistoryController", function () {
     ]);
 
     assert.equal(
-      resolveHistoryEntrySourceState(
-        { kind: "paper", paperItemID: 99 },
-        (id) => items.get(id),
+      resolveHistoryEntrySourceState({ kind: "paper", paperItemID: 99 }, (id) =>
+        items.get(id),
       ),
       "active",
     );
@@ -293,9 +307,8 @@ describe("conversationHistoryController", function () {
     ]);
 
     assert.equal(
-      resolveHistoryEntrySourceState(
-        { kind: "paper", paperItemID: 99 },
-        (id) => items.get(id),
+      resolveHistoryEntrySourceState({ kind: "paper", paperItemID: 99 }, (id) =>
+        items.get(id),
       ),
       "orphan",
     );
@@ -322,9 +335,8 @@ describe("conversationHistoryController", function () {
     ]);
 
     assert.equal(
-      resolveHistoryEntrySourceState(
-        { kind: "paper", paperItemID: 99 },
-        (id) => items.get(id),
+      resolveHistoryEntrySourceState({ kind: "paper", paperItemID: 99 }, (id) =>
+        items.get(id),
       ),
       "active",
     );
@@ -384,19 +396,24 @@ describe("conversationHistoryController", function () {
   });
 
   it("selects the target paper for different-paper history targets", async function () {
-    const calls: Array<{ ids: number[]; selectInLibrary?: boolean }> = [];
+    const calls: Array<{
+      ids: number[];
+      options?: boolean | { selectInLibrary?: boolean };
+    }> = [];
     const selected = await maybeSelectPaperHistoryTarget({
       decision: "select-target-paper",
       paperItemID: 202,
       getPane: () => ({
-        selectItems: (ids, selectInLibrary) => {
-          calls.push({ ids, selectInLibrary });
+        selectItems: (ids, options) => {
+          calls.push({ ids, options });
         },
       }),
     });
 
     assert.isTrue(selected);
-    assert.deepEqual(calls, [{ ids: [202], selectInLibrary: true }]);
+    assert.deepEqual(calls, [
+      { ids: [202], options: { selectInLibrary: true } },
+    ]);
   });
 
   it("does not select a paper for missing paper history metadata", async function () {

@@ -165,29 +165,230 @@ function sanitizeMarkdownUrl(
   return null;
 }
 
-function getHtmlAttribute(html: string, name: string): string | null {
-  const pattern = new RegExp(
-    `\\s${escapeRegex(name)}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
-    "i",
-  );
-  const match = html.match(pattern);
-  return match ? match[1] || match[2] || match[3] || "" : null;
+const SAFE_RAW_HTML_TAG_ALIASES: Record<string, string> = {
+  b: "strong",
+  blockquote: "blockquote",
+  br: "br",
+  code: "code",
+  del: "del",
+  em: "em",
+  h1: "h2",
+  h2: "h2",
+  h3: "h3",
+  h4: "h4",
+  h5: "h5",
+  h6: "h5",
+  hr: "hr",
+  i: "em",
+  img: "img",
+  li: "li",
+  ol: "ol",
+  p: "p",
+  s: "del",
+  strike: "del",
+  strong: "strong",
+  sub: "sub",
+  sup: "sup",
+  table: "table",
+  tbody: "tbody",
+  td: "td",
+  th: "th",
+  thead: "thead",
+  tr: "tr",
+  ul: "ul",
+  a: "a",
+};
+
+const VOID_RAW_HTML_TAGS = new Set(["br", "hr", "img"]);
+const RAW_HTML_SINGLE_TAG_PATTERN =
+  /^<\s*\/?\s*[a-z][a-z0-9-]*(?:"[^"]*"|'[^']*'|[^'">])*>$/i;
+const ESCAPED_RAW_HTML_TAG_PATTERN =
+  /&lt;\s*(\/?)\s*([a-z][a-z0-9-]*)([\s\S]*?)(\/?)\s*&gt;/gi;
+
+type RawHtmlRenderState = {
+  stack: string[];
+};
+
+function readRawHtmlAttributes(rawAttrs: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const pattern =
+    /([^\s"'=<>`]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(rawAttrs)) !== null) {
+    const name = match[1]?.toLowerCase();
+    if (!name || name.startsWith("on")) continue;
+    attrs[name] = match[2] ?? match[3] ?? match[4] ?? "";
+  }
+  return attrs;
 }
 
-function renderSafeRawHtml(rawHtml: string): string {
-  const html = rawHtml.trim();
-  if (!/^<img\b[^>]*\/?>$/i.test(html)) return escapeHtml(rawHtml);
+function renderSafeRawHtmlAttributes(
+  tagName: string,
+  rawAttrs: string,
+): string | null {
+  const attrs = readRawHtmlAttributes(rawAttrs);
 
-  const attachmentKey = getHtmlAttribute(html, "data-attachment-key");
-  const alt = getHtmlAttribute(html, "alt") || "";
-  if (attachmentKey && /^[A-Za-z0-9_-]+$/.test(attachmentKey)) {
-    return `<img data-attachment-key="${escapeAttribute(attachmentKey)}" alt="${escapeAttribute(alt)}" />`;
+  if (tagName === "a") {
+    const safeHref = attrs.href ? sanitizeMarkdownUrl(attrs.href, "link") : null;
+    const hrefAttr = safeHref ? ` href="${escapeAttribute(safeHref)}"` : "";
+    const titleAttr = attrs.title
+      ? ` title="${escapeAttribute(attrs.title)}"`
+      : "";
+    return `${hrefAttr}${titleAttr} target="_blank" rel="noopener"`;
   }
 
-  const src = getHtmlAttribute(html, "src");
-  const safeSrc = src ? sanitizeMarkdownUrl(src, "image") : null;
-  if (!safeSrc) return escapeHtml(rawHtml);
-  return `<img src="${escapeAttribute(safeSrc)}" alt="${escapeAttribute(alt)}" class="llm-chat-inline-figure" />`;
+  if (tagName === "img") {
+    const alt = attrs.alt || "";
+    const attachmentKey = attrs["data-attachment-key"] || "";
+    if (attachmentKey && /^[A-Za-z0-9_-]+$/.test(attachmentKey)) {
+      return ` data-attachment-key="${escapeAttribute(attachmentKey)}" alt="${escapeAttribute(alt)}"`;
+    }
+    const safeSrc = attrs.src ? sanitizeMarkdownUrl(attrs.src, "image") : null;
+    if (!safeSrc) return null;
+    return ` src="${escapeAttribute(safeSrc)}" alt="${escapeAttribute(alt)}" class="llm-chat-inline-figure"`;
+  }
+
+  if (tagName === "ol" && attrs.start) {
+    const start = Number.parseInt(attrs.start, 10);
+    return Number.isFinite(start) && start > 1 ? ` start="${start}"` : "";
+  }
+
+  return "";
+}
+
+function renderSafeRawHtmlTag(
+  rawTag: string,
+  state: RawHtmlRenderState,
+): string | null {
+  const tagMatch = rawTag.match(
+    /^<\s*(\/?)\s*([a-z][a-z0-9-]*)([\s\S]*?)(\/?)\s*>$/i,
+  );
+  if (!tagMatch) return null;
+
+  const tagName = SAFE_RAW_HTML_TAG_ALIASES[tagMatch[2].toLowerCase()] || null;
+  if (!tagName) return null;
+
+  if (tagMatch[1]) {
+    if (VOID_RAW_HTML_TAGS.has(tagName)) return "";
+    const last = state.stack[state.stack.length - 1];
+    if (last !== tagName) return null;
+    state.stack.pop();
+    return `</${tagName}>`;
+  }
+
+  const attrs = renderSafeRawHtmlAttributes(tagName, tagMatch[3] || "");
+  if (attrs === null) return null;
+
+  if (VOID_RAW_HTML_TAGS.has(tagName) || tagMatch[4]) {
+    return tagName === "br" || tagName === "hr"
+      ? `<${tagName}/>`
+      : `<${tagName}${attrs} />`;
+  }
+
+  state.stack.push(tagName);
+  return `<${tagName}${attrs}>`;
+}
+
+function renderSafeRawHtmlFragment(rawHtml: string): string {
+  const state: RawHtmlRenderState = { stack: [] };
+  const tagPattern = /<(?:"[^"]*"|'[^']*'|[^'">])*>/g;
+  let result = "";
+  let lastEnd = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tagPattern.exec(rawHtml)) !== null) {
+    if (match.index > lastEnd) {
+      result += escapeHtml(rawHtml.slice(lastEnd, match.index));
+    }
+
+    const safeTag = renderSafeRawHtmlTag(match[0], state);
+    result += safeTag === null ? escapeHtml(match[0]) : safeTag;
+    lastEnd = match.index + match[0].length;
+  }
+
+  if (lastEnd < rawHtml.length) {
+    result += escapeHtml(rawHtml.slice(lastEnd));
+  }
+
+  while (state.stack.length) {
+    result += `</${state.stack.pop()}>`;
+  }
+
+  return result;
+}
+
+function renderSafeRawHtml(
+  rawHtml: string,
+  rawHtmlState?: RawHtmlRenderState,
+): string {
+  const html = rawHtml.trim();
+
+  if (RAW_HTML_SINGLE_TAG_PATTERN.test(html)) {
+    const state = rawHtmlState || { stack: [] };
+    const safeTag = renderSafeRawHtmlTag(html, state);
+    if (safeTag !== null) return safeTag;
+  }
+
+  if (/<[^>]*>/.test(rawHtml)) {
+    return renderSafeRawHtmlFragment(rawHtml);
+  }
+
+  return escapeHtml(rawHtml);
+}
+
+function decodeEscapedRawHtmlTagEntities(text: string): string {
+  return text
+    .replace(/&(quot|#34|#x22);/gi, '"')
+    .replace(/&(apos|#39|#x27);/gi, "'");
+}
+
+function restoreEscapedSafeRawHtmlTagsInSegment(text: string): string {
+  const state: RawHtmlRenderState = { stack: [] };
+  return text.replace(
+    ESCAPED_RAW_HTML_TAG_PATTERN,
+    (
+      match,
+      closingSlash: string,
+      tagName: string,
+      rawAttrs: string,
+      selfClosingSlash: string,
+    ) => {
+      const decodedAttrs = decodeEscapedRawHtmlTagEntities(rawAttrs || "");
+      const rawTag = `<${closingSlash}${tagName}${decodedAttrs}${selfClosingSlash}>`;
+      return renderSafeRawHtmlTag(rawTag, state) ?? match;
+    },
+  );
+}
+
+function restoreEscapedSafeRawHtmlTags(text: string): string {
+  if (!/&lt;\s*\/?\s*[a-z][a-z0-9-]*[\s\S]*?&gt;/i.test(text)) {
+    return text;
+  }
+
+  if (!hasBalancedCodeBlocks(text)) {
+    return restoreEscapedSafeRawHtmlTagsInSegment(text);
+  }
+
+  const codeBlockRegex = /```[ \t]*([^\s`]*)[^\n`]*\n?([\s\S]*?)```/g;
+  let result = "";
+  let lastEnd = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = codeBlockRegex.exec(text)) !== null) {
+    if (match.index > lastEnd) {
+      result += restoreEscapedSafeRawHtmlTagsInSegment(
+        text.slice(lastEnd, match.index),
+      );
+    }
+    result += match[0];
+    lastEnd = match.index + match[0].length;
+  }
+
+  if (lastEnd < text.length) {
+    result += restoreEscapedSafeRawHtmlTagsInSegment(text.slice(lastEnd));
+  }
+
+  return result;
 }
 
 function wrapCopyable(
@@ -1648,13 +1849,27 @@ function createMarkedRenderer(
   target: MarkdownRenderTarget,
 ): Renderer<string, string> {
   const renderer = new Renderer<string, string>();
+  const rawHtmlRenderState: RawHtmlRenderState = { stack: [] };
+  const parseInlineTokens = (
+    parser: { parseInline: (tokens: Tokens.Generic[]) => string },
+    tokens: Tokens.Generic[],
+  ): string => {
+    const stackStart = rawHtmlRenderState.stack.length;
+    const html = parser.parseInline(tokens);
+    const danglingTags = rawHtmlRenderState.stack.splice(stackStart);
+    if (!danglingTags.length) return html;
+    return `${html}${danglingTags
+      .reverse()
+      .map((tagName) => `</${tagName}>`)
+      .join("")}`;
+  };
 
   renderer.code = function (token: Tokens.Code): string {
     return renderCodeBlock(token.text, token.raw);
   };
 
   renderer.html = function (token: Tokens.HTML | Tokens.Tag): string {
-    return renderSafeRawHtml(token.text);
+    return renderSafeRawHtml(token.text, rawHtmlRenderState);
   };
 
   renderer.heading = function (token: Tokens.Heading): string {
@@ -1662,10 +1877,10 @@ function createMarkedRenderer(
       !/^#{1,6}(?:\s|$)/.test(token.raw) &&
       /\n[ \t]*-{3,}[ \t]*(?:\n|$)/.test(token.raw)
     ) {
-      return `<p>${this.parser.parseInline(token.tokens)}</p><hr/>`;
+      return `<p>${parseInlineTokens(this.parser, token.tokens)}</p><hr/>`;
     }
     const level = Math.min(5, Math.max(2, token.depth + 1));
-    return `<h${level}>${this.parser.parseInline(token.tokens)}</h${level}>`;
+    return `<h${level}>${parseInlineTokens(this.parser, token.tokens)}</h${level}>`;
   };
 
   renderer.hr = function (): string {
@@ -1687,7 +1902,20 @@ function createMarkedRenderer(
   };
 
   renderer.listitem = function (token: Tokens.ListItem): string {
-    let body = this.parser.parse(token.tokens, Boolean(token.loose));
+    const renderChildToken = (child: Tokens.Generic): string => {
+      if (child.type === "text") {
+        const textToken = child as Tokens.Text;
+        const inlineHtml =
+          "tokens" in textToken && textToken.tokens?.length
+            ? parseInlineTokens(this.parser, textToken.tokens)
+            : escapeHtml(normalizeInlineTextToken(textToken.text || ""))
+                .split(HARD_BREAK_TOKEN)
+                .join("<br/>");
+        return token.loose ? `<p>${inlineHtml}</p>` : inlineHtml;
+      }
+      return this.parser.parse([child], Boolean(token.loose));
+    };
+    let body = token.tokens.map(renderChildToken).join("");
     if (token.task) {
       const checkbox = this.checkbox({ checked: Boolean(token.checked) });
       body = body.startsWith("<p>")
@@ -1703,18 +1931,20 @@ function createMarkedRenderer(
   };
 
   renderer.paragraph = function (token: Tokens.Paragraph): string {
-    return `<p>${this.parser.parseInline(token.tokens)}</p>`;
+    return `<p>${parseInlineTokens(this.parser, token.tokens)}</p>`;
   };
 
   renderer.table = function (token: Tokens.Table): string {
     const headerHtml = `<tr>${token.header
-      .map((cell) => `<th>${this.parser.parseInline(cell.tokens)}</th>`)
+      .map((cell) => `<th>${parseInlineTokens(this.parser, cell.tokens)}</th>`)
       .join("")}</tr>`;
     const bodyHtml = token.rows
       .map(
         (row) =>
           `<tr>${row
-            .map((cell) => `<td>${this.parser.parseInline(cell.tokens)}</td>`)
+            .map(
+              (cell) => `<td>${parseInlineTokens(this.parser, cell.tokens)}</td>`,
+            )
             .join("")}</tr>`,
       )
       .join("");
@@ -1733,7 +1963,7 @@ function createMarkedRenderer(
 
   renderer.text = function (token: Tokens.Text | Tokens.Escape): string {
     if ("tokens" in token && token.tokens?.length) {
-      return this.parser.parseInline(token.tokens);
+      return parseInlineTokens(this.parser, token.tokens);
     }
     return escapeHtml(normalizeInlineTextToken(token.text))
       .split(HARD_BREAK_TOKEN)
@@ -1741,7 +1971,7 @@ function createMarkedRenderer(
   };
 
   renderer.link = function (token: Tokens.Link): string {
-    const body = this.parser.parseInline(token.tokens);
+    const body = parseInlineTokens(this.parser, token.tokens);
     const safeHref = sanitizeMarkdownUrl(token.href, "link");
     if (!safeHref) return body;
     const titleAttr = token.title
@@ -1774,7 +2004,7 @@ export function renderMarkdownWithLegacyParser(
   const prevResolver = activeImageResolver;
   if (options?.resolveImage) activeImageResolver = options.resolveImage;
   try {
-    const blocks = splitIntoBlocks(text);
+    const blocks = splitIntoBlocks(restoreEscapedSafeRawHtmlTags(text));
     return blocks
       .map((block) => {
         try {
@@ -1838,7 +2068,9 @@ export function renderMarkdown(
       return renderMarkdownWithLegacyParser(text);
     }
 
-    const normalized = normalizeMarkdownForMarked(text);
+    const normalized = normalizeMarkdownForMarked(
+      restoreEscapedSafeRawHtmlTags(text),
+    );
     const target: MarkdownRenderTarget = zoteroNoteMode
       ? "zotero-note"
       : "chat";

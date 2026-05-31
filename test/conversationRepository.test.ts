@@ -1,8 +1,6 @@
 import { assert } from "chai";
 import { conversationRepository } from "../src/core/conversations/repository";
-import {
-  CODEX_GLOBAL_CONVERSATION_KEY_BASE,
-} from "../src/shared/conversationKeySpace";
+import { CODEX_GLOBAL_CONVERSATION_KEY_BASE } from "../src/shared/conversationKeySpace";
 import { buildConversationID } from "../src/shared/conversationRegistry";
 
 describe("conversationRepository", function () {
@@ -75,6 +73,102 @@ describe("conversationRepository", function () {
     );
     assert.notInclude(listQuery?.sql || "", "HAVING");
     assert.notInclude(listQuery?.sql || "", "llm_for_zotero_chat_messages");
+  });
+
+  it("keeps upstream paper history visible without consulting stale runtime registry", async function () {
+    const conversationKey = 42;
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      DB: {
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          queries.push({ sql, params });
+          if (sql.includes("llm_for_zotero_conversation_registry")) {
+            throw new Error("history lists must not depend on registry state");
+          }
+          if (sql.includes("FROM llm_for_zotero_paper_conversations pc")) {
+            return [
+              {
+                conversationID: buildConversationID({
+                  conversationKey,
+                  system: "upstream",
+                  kind: "paper",
+                  libraryID: 1,
+                  paperItemID: 42,
+                }),
+                conversationKey,
+                libraryID: 1,
+                paperItemID: 42,
+                sessionVersion: 1,
+                createdAt: 100,
+                title: "Paper chat",
+                lastActivityAt: 200,
+                userTurnCount: 1,
+              },
+            ];
+          }
+          return [];
+        },
+      },
+    };
+
+    const rows = await conversationRepository.listCatalogEntries({
+      system: "upstream",
+      kind: "paper",
+      libraryID: 1,
+      paperItemID: 42,
+      limit: 10,
+    });
+
+    assert.lengthOf(rows, 1);
+    assert.equal(rows[0]?.conversationKey, conversationKey);
+    assert.isFalse(
+      queries.some(({ sql }) =>
+        sql.includes("llm_for_zotero_conversation_registry"),
+      ),
+    );
+  });
+
+  it("drops upstream paper rows whose key is in the global range", async function () {
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      DB: {
+        queryAsync: async (sql: string) => {
+          if (sql.includes("FROM llm_for_zotero_paper_conversations pc")) {
+            return [
+              {
+                conversationID: buildConversationID({
+                  conversationKey: 2_000_000_003,
+                  system: "upstream",
+                  kind: "paper",
+                  libraryID: 1,
+                  paperItemID: 42,
+                }),
+                conversationKey: 2_000_000_003,
+                libraryID: 1,
+                paperItemID: 42,
+                sessionVersion: 1,
+                createdAt: 100,
+                title: "Bad paper row",
+                lastActivityAt: 200,
+                userTurnCount: 1,
+              },
+            ];
+          }
+          return [];
+        },
+      },
+    };
+
+    const rows = await conversationRepository.listCatalogEntries({
+      system: "upstream",
+      kind: "paper",
+      libraryID: 1,
+      paperItemID: 42,
+      limit: 10,
+    });
+
+    assert.deepEqual(rows, []);
   });
 
   it("routes catalog title updates by conversation system", async function () {
@@ -258,9 +352,10 @@ describe("conversationRepository", function () {
       timestamp: 1234,
     });
 
-    const update = queries.find(({ sql }) =>
-      sql.includes("UPDATE llm_for_zotero_global_conversations") &&
-      sql.includes("SET created_at = ?"),
+    const update = queries.find(
+      ({ sql }) =>
+        sql.includes("UPDATE llm_for_zotero_global_conversations") &&
+        sql.includes("SET created_at = ?"),
     );
     assert.isOk(update);
     assert.deepEqual(update?.params?.slice(0, 3), [
@@ -268,5 +363,59 @@ describe("conversationRepository", function () {
       1234,
       conversationKey,
     ]);
+  });
+
+  it("refuses to ensure an upstream global key owned by another library", async function () {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    const conversationKey = 2_000_000_003;
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      DB: {
+        queryAsync: async (sql: string, params?: unknown[]) => {
+          queries.push({ sql, params });
+          if (
+            sql.includes("FROM llm_for_zotero_global_conversations gc") &&
+            sql.includes("WHERE gc.conversation_key = ?")
+          ) {
+            return [
+              {
+                conversationID: buildConversationID({
+                  conversationKey,
+                  system: "upstream",
+                  kind: "global",
+                  libraryID: 3,
+                }),
+                conversationKey,
+                libraryID: 3,
+                createdAt: 100,
+                title: "Other library",
+                lastActivityAt: 200,
+                userTurnCount: 1,
+              },
+            ];
+          }
+          return [];
+        },
+      },
+    };
+
+    const entry = await conversationRepository.ensureCatalogEntry({
+      system: "upstream",
+      kind: "global",
+      libraryID: 1,
+      conversationKey,
+    });
+
+    assert.equal(entry, null);
+    assert.isFalse(
+      queries.some(({ sql }) =>
+        sql.includes("INSERT OR IGNORE INTO llm_for_zotero_global_conversations"),
+      ),
+    );
+    assert.isFalse(
+      queries.some(({ sql }) =>
+        sql.includes("llm_for_zotero_conversation_registry"),
+      ),
+    );
   });
 });

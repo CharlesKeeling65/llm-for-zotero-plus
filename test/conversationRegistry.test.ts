@@ -1,6 +1,7 @@
 import { assert } from "chai";
 import {
   buildConversationID,
+  getConversationScopeValidationDetails,
   inferSinglePaperItemIdFromContextRows,
   registerConversationScope,
   validateConversationScope,
@@ -111,6 +112,66 @@ describe("conversation registry", function () {
       }),
       true,
     );
+  });
+
+  it("allows implicit validation for same-scope legacy conversation ids", async function () {
+    const conversationKey = 2_000_000_003;
+    const legacyConversationID =
+      "llm-chat:v1:profile-dev:upstream:2000000000";
+    const canonicalConversationID = buildConversationID({
+      conversationKey,
+      system: "upstream",
+      kind: "global",
+      profileSignature: "profile-dev",
+      libraryID: 1,
+    });
+    globalScope.Zotero = {
+      Profile: {
+        dir: "/tmp/llm-for-zotero-registry-test",
+      },
+      DB: {
+        queryAsync: async (sql: string) => {
+          if (
+            sql.includes("FROM llm_for_zotero_conversation_registry") &&
+            sql.includes("WHERE legacy_conversation_key = ?")
+          ) {
+            return [
+              {
+                conversationID: legacyConversationID,
+                conversationKey,
+                system: "upstream",
+                kind: "global",
+                profileSignature: "profile-dev",
+                libraryID: 1,
+                paperItemID: null,
+                valid: 1,
+              },
+            ];
+          }
+          return [];
+        },
+      },
+    };
+
+    const implicit = await getConversationScopeValidationDetails({
+      conversationKey,
+      system: "upstream",
+      kind: "global",
+      profileSignature: "profile-dev",
+      libraryID: 1,
+    });
+    assert.isTrue(implicit.valid);
+
+    const explicit = await getConversationScopeValidationDetails({
+      conversationID: canonicalConversationID,
+      conversationKey,
+      system: "upstream",
+      kind: "global",
+      profileSignature: "profile-dev",
+      libraryID: 1,
+    });
+    assert.isFalse(explicit.valid);
+    assert.equal(explicit.reason, "conversation_id_mismatch");
   });
 
   it("does not clear invalid registry state during ordinary registration", async function () {

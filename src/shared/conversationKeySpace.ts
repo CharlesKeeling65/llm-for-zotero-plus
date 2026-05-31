@@ -14,6 +14,7 @@ export type ConversationKeyRange = {
 
 export const UPSTREAM_PAPER_CONVERSATION_KEY_BASE = 1_500_000_000;
 export const UPSTREAM_GLOBAL_CONVERSATION_KEY_BASE = 2_000_000_000;
+export const UPSTREAM_GLOBAL_ALLOCATED_CONVERSATION_KEY_BASE = 2_500_000_000;
 export const UPSTREAM_RUNTIME_CONVERSATION_KEY_END = 3_000_000_000;
 
 export const RUNTIME_PROFILE_KEY_MULTIPLIER = 1_000_000_000;
@@ -41,16 +42,13 @@ function normalizeScopeId(value: number): number {
 function containsKey(range: ConversationKeyRange, value: number): boolean {
   const normalized = normalizeConversationKey(value);
   return Boolean(
-    normalized &&
-      normalized >= range.start &&
-      normalized < range.endExclusive,
+    normalized && normalized >= range.start && normalized < range.endExclusive,
   );
 }
 
 export function getProfileKeySlot(profileSignature?: string | null): number {
-  const signature = typeof profileSignature === "string"
-    ? profileSignature.trim()
-    : "";
+  const signature =
+    typeof profileSignature === "string" ? profileSignature.trim() : "";
   const hex = signature.replace(/^profile-/, "");
   const parsed = Number.parseInt(hex, 16);
   if (!Number.isFinite(parsed) || parsed < 0) return 1;
@@ -106,13 +104,14 @@ export function getConversationKeyRange(
   if (system === "upstream" || profileSignature === undefined) {
     return fullKindRange(system, kind);
   }
-  const base = system === "claude_code"
-    ? kind === "global"
-      ? CLAUDE_GLOBAL_CONVERSATION_KEY_BASE
-      : CLAUDE_PAPER_CONVERSATION_KEY_BASE
-    : kind === "global"
-      ? CODEX_GLOBAL_CONVERSATION_KEY_BASE
-      : CODEX_PAPER_CONVERSATION_KEY_BASE;
+  const base =
+    system === "claude_code"
+      ? kind === "global"
+        ? CLAUDE_GLOBAL_CONVERSATION_KEY_BASE
+        : CLAUDE_PAPER_CONVERSATION_KEY_BASE
+      : kind === "global"
+        ? CODEX_GLOBAL_CONVERSATION_KEY_BASE
+        : CODEX_PAPER_CONVERSATION_KEY_BASE;
   const start = base + getProfileKeyOffset(profileSignature);
   return {
     start,
@@ -157,8 +156,8 @@ export function buildDefaultConversationKey(
     return normalizeScopeId(scopeId);
   }
   return (
-    getRuntimeDefaultConversationKeyRange(system, kind, profileSignature || "").start +
-    normalizeScopeId(scopeId)
+    getRuntimeDefaultConversationKeyRange(system, kind, profileSignature || "")
+      .start + normalizeScopeId(scopeId)
   );
 }
 
@@ -198,10 +197,7 @@ export function isConversationKeyForKind(
   key: number,
 ): boolean {
   const classification = classifyConversationKey(key);
-  return (
-    classification?.system === system &&
-    classification.kind === kind
-  );
+  return classification?.system === system && classification.kind === kind;
 }
 
 export function isRuntimeAllocatedConversationKeyForKind(

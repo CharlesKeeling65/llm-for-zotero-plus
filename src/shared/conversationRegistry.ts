@@ -562,18 +562,22 @@ export async function getConversationScopeValidationDetails(
       registered: existing,
     };
   }
-  if (existing.conversationID !== normalized.conversationID) {
-    return {
-      valid: false,
-      reason: "conversation_id_mismatch",
-      target,
-      registered: existing,
-    };
-  }
   if (!sameRegistryScope(existing, normalized)) {
     return {
       valid: false,
       reason: "scope_mismatch",
+      target,
+      registered: existing,
+    };
+  }
+  const explicitConversationID = normalizeConversationID(params.conversationID);
+  if (
+    explicitConversationID &&
+    existing.conversationID !== normalized.conversationID
+  ) {
+    return {
+      valid: false,
+      reason: "conversation_id_mismatch",
       target,
       registered: existing,
     };

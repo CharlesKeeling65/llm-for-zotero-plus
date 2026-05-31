@@ -376,6 +376,105 @@ describe("renderMarkdown with inline block tokens", function () {
     assert.include(safeImage, 'alt="Figure 1"');
   });
 
+  it("renders simple raw HTML formatting tags without allowing attributes", function () {
+    const html = renderMarkdown(
+      "<strong>Core Method:</strong> The paper introduces <strong>Gamma-VAE</strong> and <em>latent geometry</em>.<br>Done.",
+    );
+
+    assert.include(html, "<strong>Core Method:</strong>");
+    assert.include(html, "<strong>Gamma-VAE</strong>");
+    assert.include(html, "<em>latent geometry</em>");
+    assert.include(html, "<br/>Done.");
+    assert.notInclude(html, "&lt;strong&gt;");
+
+    const unsafe = renderMarkdown(
+      '<strong onclick="alert(1)">Core</strong>',
+    );
+    assert.include(unsafe, "<strong>Core</strong>");
+    assert.notInclude(unsafe, "<strong onclick");
+  });
+
+  it("renders escaped safe HTML tags from historical messages", function () {
+    const html = renderMarkdown(
+      "- &lt;strong&gt;Core Method:&lt;/strong&gt; The paper introduces &lt;strong&gt;Gamma-VAE&lt;/strong&gt;.\n- &lt;em&gt;Still formatted&lt;/em&gt;",
+    );
+
+    assert.include(html, "<li><strong>Core Method:</strong>");
+    assert.include(html, "<strong>Gamma-VAE</strong>");
+    assert.include(html, "<li><em>Still formatted</em></li>");
+    assert.notInclude(html, "&lt;strong&gt;");
+    assert.notInclude(html, "&amp;lt;strong");
+  });
+
+  it("does not leak bold tags in loose lists with quote citations", function () {
+    const html = renderMarkdown(
+      [
+        "*   **Core Method:** The paper introduces **Gamma-VAE**.",
+        "> quoted evidence",
+        "(Kim et al., 2024)",
+        "",
+        "*   **Geometric Advantage:** It learns a **smoother** manifold.",
+      ].join("\n"),
+    );
+
+    assert.include(html, "<strong>Core Method:</strong>");
+    assert.include(html, "<strong>Gamma-VAE</strong>");
+    assert.include(html, "<strong>Geometric Advantage:</strong>");
+    assert.include(html, "<strong>smoother</strong>");
+    assert.include(html, "<blockquote>");
+    assert.notInclude(html, "&lt;strong&gt;");
+  });
+
+  it("does not restore escaped unsafe HTML tags", function () {
+    const html = renderMarkdown(
+      '&lt;script&gt;alert("x")&lt;/script&gt; &lt;a href=&quot;javascript:alert(1)&quot; onclick=&quot;alert(2)&quot;&gt;link&lt;/a&gt;',
+    );
+
+    assert.include(html, "&amp;lt;script&amp;gt;");
+    assert.include(html, '<a target="_blank" rel="noopener">link</a>');
+    assert.notInclude(html, "<script>");
+    assert.notInclude(html, "onclick");
+    assert.notInclude(html.toLowerCase(), "javascript:");
+  });
+
+  it("renders common safe raw HTML blocks without leaking tags", function () {
+    const html = renderMarkdown(
+      [
+        "<h3>Summary</h3>",
+        "<p><strong>Core Method:</strong> The paper introduces <em>Gamma-VAE</em>.</p>",
+        "<ul><li><strong>Geometric Advantage:</strong> smoother manifold</li></ul>",
+        "<blockquote><p>Quoted evidence</p></blockquote>",
+        '<ol start="3"><li>Third item</li></ol>',
+        '<a href="https://example.com">safe link</a>',
+      ].join(""),
+    );
+
+    assert.include(html, "<h3>Summary</h3>");
+    assert.include(html, "<p><strong>Core Method:</strong>");
+    assert.include(html, "<ul><li><strong>Geometric Advantage:</strong>");
+    assert.include(html, "<blockquote><p>Quoted evidence</p></blockquote>");
+    assert.include(html, '<ol start="3"><li>Third item</li></ol>');
+    assert.include(html, 'href="https://example.com"');
+    assert.notInclude(html, "&lt;p&gt;");
+    assert.notInclude(html, "&lt;ul&gt;");
+    assert.notInclude(html, "&lt;li&gt;");
+    assert.notInclude(html, "&lt;a");
+  });
+
+  it("strips unsafe raw HTML attributes and keeps unsafe tags escaped", function () {
+    const html = renderMarkdown(
+      '<p onclick="alert(1)">Safe text</p><script>alert("x")</script><a href="javascript:alert(1)" onclick="alert(2)">link</a>',
+    );
+
+    assert.include(html, "<p>Safe text</p>");
+    assert.include(html, "&lt;script&gt;");
+    assert.include(html, "alert(&quot;x&quot;)");
+    assert.include(html, "<a target=\"_blank\" rel=\"noopener\">link</a>");
+    assert.notInclude(html, "onclick");
+    assert.notInclude(html.toLowerCase(), "javascript:");
+    assert.notInclude(html, "<script>");
+  });
+
   it("falls back to the Zotero renderer instead of escaped raw Markdown", function () {
     __setMarkdownParserDisabledForTest(true);
     try {

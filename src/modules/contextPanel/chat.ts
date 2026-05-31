@@ -267,7 +267,7 @@ import { getConversationKey } from "./conversationIdentity";
 import { recordContextCacheTelemetry } from "../../contextCache/manager";
 import { resolveContextAttachmentSupportFromMetadata } from "./contextAttachmentSupport";
 import {
-  validateConversationScope,
+  getConversationScopeValidationDetails,
   type ConversationRegistryScope,
 } from "../../shared/conversationRegistry";
 import {
@@ -351,13 +351,16 @@ async function validateConversationScopeForItem(params: {
     params.conversationSystem,
   );
   if (!scope) return true;
-  const valid = await validateConversationScope(scope);
-  if (!valid) {
+  const validation = await getConversationScopeValidationDetails(scope);
+  if (!validation.valid) {
+    const registered = validation.registered
+      ? `; registered as ${validation.registered.system}/${validation.registered.kind} library ${validation.registered.libraryID} paper ${validation.registered.paperItemID || ""} id ${validation.registered.conversationID}`
+      : "";
     ztoolkit.log(
-      `LLM: Refused to use mismatched ${scope.system}/${scope.kind} conversation ${scope.conversationKey} for library ${scope.libraryID} paper ${scope.paperItemID || ""}`,
+      `LLM: Refused to use mismatched ${scope.system}/${scope.kind} conversation ${scope.conversationKey} for library ${scope.libraryID} paper ${scope.paperItemID || ""} (${validation.reason})${registered}`,
     );
   }
-  return valid;
+  return validation.valid;
 }
 
 function collectMessagePaperContextIds(
@@ -2306,14 +2309,7 @@ function createPanelUpdateHelpers(
     text: string,
     kind: Parameters<typeof setStatus>[2],
   ) => {
-    setStatusForConversationPanels(
-      conversationKey,
-      body,
-      item,
-      ui,
-      text,
-      kind,
-    );
+    setStatusForConversationPanels(conversationKey, body, item, ui, text, kind);
   };
   return {
     refreshChatSafely,
@@ -3620,7 +3616,9 @@ function createCodexNativeActivityTraceController(
     const normalized = normalizeGeneratedChatImages(image ? [image] : []);
     const next = normalized[0];
     if (!next) return false;
-    const existing = normalizeGeneratedChatImages(assistantMessage.generatedImages);
+    const existing = normalizeGeneratedChatImages(
+      assistantMessage.generatedImages,
+    );
     const index = existing.findIndex((entry) => entry.id === next.id);
     if (index >= 0) {
       existing[index] = { ...existing[index], ...next };
@@ -3637,7 +3635,8 @@ function createCodexNativeActivityTraceController(
   ): boolean => {
     const itemType = normalizeCodexNativeItemTypeKey(event.type);
     const itemId =
-      sanitizeText(event.id || "").trim() || `codex-${itemType || "item"}-${phase}-${seq + 1}`;
+      sanitizeText(event.id || "").trim() ||
+      `codex-${itemType || "item"}-${phase}-${seq + 1}`;
     const status = getCodexNativeStatus(event);
     const failed =
       Boolean(event.error) ||
@@ -3646,11 +3645,11 @@ function createCodexNativeActivityTraceController(
       ) ||
       event.success === false;
 
-    const readWebSearchArgs = ():
-      | { args?: Record<string, string>; actionType: string }
-      | null => {
-      const action =
-        event.action || readCodexNativeRawField(event, ["action"]);
+    const readWebSearchArgs = (): {
+      args?: Record<string, string>;
+      actionType: string;
+    } | null => {
+      const action = event.action || readCodexNativeRawField(event, ["action"]);
       const record =
         action && typeof action === "object" && !Array.isArray(action)
           ? (action as Record<string, unknown>)
@@ -3680,9 +3679,7 @@ function createCodexNativeActivityTraceController(
 
     if (isCodexNativeItemType(event, ["websearch", "websearchcall"])) {
       const webSearch = readWebSearchArgs();
-      const actionType = normalizeCodexNativeItemTypeKey(
-        webSearch?.actionType,
-      );
+      const actionType = normalizeCodexNativeItemTypeKey(webSearch?.actionType);
       const verb =
         actionType === "openpage"
           ? phase === "completed"
@@ -3725,7 +3722,9 @@ function createCodexNativeActivityTraceController(
         toolLabel: "Generated image",
         args: {
           ...(status ? { status } : {}),
-          ...(savedPath ? { saved: compactCodexNativePathBasename(savedPath) } : {}),
+          ...(savedPath
+            ? { saved: compactCodexNativePathBasename(savedPath) }
+            : {}),
         },
         ok: phase === "completed" ? !failed : undefined,
         text:
@@ -3772,7 +3771,9 @@ function createCodexNativeActivityTraceController(
         toolLabel: "Command",
         args: {
           ...(cwd ? { cwd } : {}),
-          ...(typeof exitCode === "number" ? { status: `exit ${exitCode}` } : {}),
+          ...(typeof exitCode === "number"
+            ? { status: `exit ${exitCode}` }
+            : {}),
         },
         ok: phase === "completed" ? !failed : undefined,
         text:
@@ -5152,10 +5153,10 @@ export async function retryLatestAssistantResponse(
         reasoningDetails: assistantMessage.reasoningDetails,
         compactMarker: assistantMessage.compactMarker,
         contextTokens: latestContextSnapshot?.contextTokens,
-      contextWindow: latestContextSnapshot?.contextWindow,
-      quoteCitations: assistantMessage.quoteCitations,
-      generatedImages: assistantMessage.generatedImages,
-    },
+        contextWindow: latestContextSnapshot?.contextWindow,
+        quoteCitations: assistantMessage.quoteCitations,
+        generatedImages: assistantMessage.generatedImages,
+      },
       effectiveStorageSystem,
     );
     setStatusSafely("Cancelled", "ready");

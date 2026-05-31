@@ -34,10 +34,10 @@ import {
   touchCodexConversationTitle,
   upsertCodexConversationSummary,
 } from "../../codexAppServer/store";
+import { isConversationKeyForKind } from "../../shared/conversationKeySpace";
 import {
-  isConversationKeyForKind,
-} from "../../shared/conversationKeySpace";
-import { repairRegisteredConversationScope } from "../../shared/conversationRegistry";
+  repairRegisteredConversationScope,
+} from "../../shared/conversationRegistry";
 import type {
   ClaudeConversationSummary,
   CodexConversationSummary,
@@ -173,7 +173,14 @@ function fromUpstreamGlobalSummary(
   const conversationKey = normalizePositiveInt(summary.conversationKey);
   const libraryID = normalizePositiveInt(summary.libraryID);
   const createdAt = normalizeTimestamp(summary.createdAt);
-  if (!conversationKey || !libraryID || !createdAt) return null;
+  if (
+    !conversationKey ||
+    !isUpstreamGlobalConversationKey(conversationKey) ||
+    !libraryID ||
+    !createdAt
+  ) {
+    return null;
+  }
   const lastActivityAt = normalizeTimestamp(summary.lastActivityAt, createdAt);
   return {
     conversationID: summary.conversationID,
@@ -197,7 +204,14 @@ function fromUpstreamPaperSummary(
   const paperItemID = normalizePositiveInt(summary.paperItemID);
   const sessionVersion = normalizePositiveInt(summary.sessionVersion);
   const createdAt = normalizeTimestamp(summary.createdAt);
-  if (!conversationKey || !libraryID || !paperItemID || !sessionVersion || !createdAt) {
+  if (
+    !conversationKey ||
+    !isUpstreamPaperConversationKey(conversationKey) ||
+    !libraryID ||
+    !paperItemID ||
+    !sessionVersion ||
+    !createdAt
+  ) {
     return null;
   }
   const lastActivityAt = normalizeTimestamp(summary.lastActivityAt, createdAt);
@@ -297,6 +311,26 @@ async function repairRuntimeRegistryFromSummary(
   });
 }
 
+async function repairUpstreamRuntimeRegistryFromEntry(
+  entry: ConversationCatalogEntry,
+): Promise<boolean> {
+  if (entry.system !== "upstream") return true;
+  if (!isConversationKeyForKind("upstream", entry.kind, entry.conversationKey)) {
+    return false;
+  }
+  return await repairRegisteredConversationScope({
+    conversationID: entry.conversationID,
+    conversationKey: entry.conversationKey,
+    system: "upstream",
+    kind: entry.kind,
+    libraryID: entry.libraryID,
+    paperItemID: entry.paperItemID,
+    createdAt: entry.createdAt,
+    updatedAt: entry.lastActivityAt,
+    title: entry.title,
+  });
+}
+
 function sortCatalogEntries(
   entries: ConversationCatalogEntry[],
 ): ConversationCatalogEntry[] {
@@ -306,6 +340,23 @@ function sortCatalogEntries(
     }
     return b.conversationKey - a.conversationKey;
   });
+}
+
+function catalogEntryMatchesScope(
+  entry: ConversationCatalogEntry | null,
+  scope: ConversationCatalogScope,
+): entry is ConversationCatalogEntry {
+  if (!entry) return false;
+  if (entry.system !== scope.system) return false;
+  if (entry.kind !== scope.kind) return false;
+  if (entry.libraryID !== normalizePositiveInt(scope.libraryID)) return false;
+  if (scope.kind === "paper") {
+    return (
+      normalizePositiveInt(entry.paperItemID) ===
+      normalizePositiveInt(scope.paperItemID)
+    );
+  }
+  return true;
 }
 
 async function touchRuntimeEmptyCatalogActivity(
@@ -362,16 +413,30 @@ export const conversationRepository = {
     const conversationKey = normalizePositiveInt(target.conversationKey);
     if (!conversationKey) return null;
     if (target.system === "claude_code") {
-      return fromClaudeSummary(await getClaudeConversationSummary(conversationKey));
+      return fromClaudeSummary(
+        await getClaudeConversationSummary(conversationKey),
+      );
     }
     if (target.system === "codex") {
-      return fromCodexSummary(await getCodexConversationSummary(conversationKey));
+      return fromCodexSummary(
+        await getCodexConversationSummary(conversationKey),
+      );
     }
-    if (target.kind === "global" || isUpstreamGlobalConversationKey(conversationKey)) {
-      return fromUpstreamGlobalSummary(await getGlobalConversation(conversationKey));
+    if (
+      target.kind === "global" ||
+      isUpstreamGlobalConversationKey(conversationKey)
+    ) {
+      return fromUpstreamGlobalSummary(
+        await getGlobalConversation(conversationKey),
+      );
     }
-    if (target.kind === "paper" || isUpstreamPaperConversationKey(conversationKey)) {
-      return fromUpstreamPaperSummary(await getPaperConversation(conversationKey));
+    if (
+      target.kind === "paper" ||
+      isUpstreamPaperConversationKey(conversationKey)
+    ) {
+      return fromUpstreamPaperSummary(
+        await getPaperConversation(conversationKey),
+      );
     }
     return null;
   },
@@ -431,8 +496,10 @@ export const conversationRepository = {
       if (conversationKey) {
         const existing = await getClaudeConversationSummary(conversationKey);
         if (existing) {
+          const entry = fromClaudeSummary(existing);
+          if (!catalogEntryMatchesScope(entry, params)) return null;
           await repairRuntimeRegistryFromSummary("claude_code", existing);
-          return fromClaudeSummary(existing);
+          return entry;
         }
         await upsertClaudeConversationSummary({
           conversationKey,
@@ -441,7 +508,9 @@ export const conversationRepository = {
           paperItemID,
           title: params.title || "",
         });
-        return fromClaudeSummary(await getClaudeConversationSummary(conversationKey));
+        return fromClaudeSummary(
+          await getClaudeConversationSummary(conversationKey),
+        );
       }
       return fromClaudeSummary(
         params.kind === "paper"
@@ -454,8 +523,10 @@ export const conversationRepository = {
       if (conversationKey) {
         const existing = await getCodexConversationSummary(conversationKey);
         if (existing) {
+          const entry = fromCodexSummary(existing);
+          if (!catalogEntryMatchesScope(entry, params)) return null;
           await repairRuntimeRegistryFromSummary("codex", existing);
-          return fromCodexSummary(existing);
+          return entry;
         }
         await upsertCodexConversationSummary({
           conversationKey,
@@ -464,7 +535,9 @@ export const conversationRepository = {
           paperItemID,
           title: params.title || "",
         });
-        return fromCodexSummary(await getCodexConversationSummary(conversationKey));
+        return fromCodexSummary(
+          await getCodexConversationSummary(conversationKey),
+        );
       }
       return fromCodexSummary(
         params.kind === "paper"
@@ -475,15 +548,27 @@ export const conversationRepository = {
 
     if (params.kind === "global") {
       if (!conversationKey) return null;
-      await ensureGlobalConversationExists(libraryID, conversationKey);
-      return fromUpstreamGlobalSummary(await getGlobalConversation(conversationKey));
+      const ensured = await ensureGlobalConversationExists(
+        libraryID,
+        conversationKey,
+      );
+      if (!ensured) return null;
+      const entry = fromUpstreamGlobalSummary(
+        await getGlobalConversation(conversationKey),
+      );
+      if (!catalogEntryMatchesScope(entry, params)) return null;
+      return (await repairUpstreamRuntimeRegistryFromEntry(entry))
+        ? entry
+        : null;
     }
     if (!paperItemID) return null;
-    return fromUpstreamPaperSummary(
+    const entry = fromUpstreamPaperSummary(
       conversationKey && conversationKey !== paperItemID
         ? await getPaperConversation(conversationKey)
         : await ensurePaperV1Conversation(libraryID, paperItemID),
     );
+    if (!catalogEntryMatchesScope(entry, params)) return null;
+    return (await repairUpstreamRuntimeRegistryFromEntry(entry)) ? entry : null;
   },
 
   async createCatalogEntry(
@@ -508,7 +593,9 @@ export const conversationRepository = {
     }
     if (params.kind === "paper") {
       return fromUpstreamPaperSummary(
-        paperItemID ? await createPaperConversation(libraryID, paperItemID) : null,
+        paperItemID
+          ? await createPaperConversation(libraryID, paperItemID)
+          : null,
       );
     }
     const conversationKey = await createGlobalConversation(libraryID);
@@ -621,14 +708,19 @@ export const conversationRepository = {
       await setCodexConversationTitle(conversationKey, target.title);
       return;
     }
-    if (target.kind === "paper" || isUpstreamPaperConversationKey(conversationKey)) {
+    if (
+      target.kind === "paper" ||
+      isUpstreamPaperConversationKey(conversationKey)
+    ) {
       await setPaperConversationTitle(conversationKey, target.title);
       return;
     }
     await setGlobalConversationTitle(conversationKey, target.title);
   },
 
-  async clearCatalogTitle(target: ConversationCatalogMutationTarget): Promise<void> {
+  async clearCatalogTitle(
+    target: ConversationCatalogMutationTarget,
+  ): Promise<void> {
     const conversationKey = normalizePositiveInt(target.conversationKey);
     if (!conversationKey) return;
     if (target.system === "claude_code") {
@@ -661,7 +753,10 @@ export const conversationRepository = {
       }
       return;
     }
-    if (target.kind === "paper" || isUpstreamPaperConversationKey(conversationKey)) {
+    if (
+      target.kind === "paper" ||
+      isUpstreamPaperConversationKey(conversationKey)
+    ) {
       await touchPaperConversationTitle(conversationKey, target.title);
       return;
     }
@@ -679,14 +774,19 @@ export const conversationRepository = {
       if (entry) await touchRuntimeEmptyCatalogActivity(entry, timestamp);
       return;
     }
-    if (target.kind === "paper" || isUpstreamPaperConversationKey(conversationKey)) {
+    if (
+      target.kind === "paper" ||
+      isUpstreamPaperConversationKey(conversationKey)
+    ) {
       await touchEmptyPaperConversation(conversationKey, timestamp);
       return;
     }
     await touchEmptyGlobalConversation(conversationKey, timestamp);
   },
 
-  async deleteCatalogEntry(target: ConversationCatalogMutationTarget): Promise<void> {
+  async deleteCatalogEntry(
+    target: ConversationCatalogMutationTarget,
+  ): Promise<void> {
     const conversationKey = normalizePositiveInt(target.conversationKey);
     if (!conversationKey) return;
     if (target.system === "claude_code") {
@@ -697,7 +797,10 @@ export const conversationRepository = {
       await deleteCodexConversation(conversationKey);
       return;
     }
-    if (target.kind === "paper" || isUpstreamPaperConversationKey(conversationKey)) {
+    if (
+      target.kind === "paper" ||
+      isUpstreamPaperConversationKey(conversationKey)
+    ) {
       await deletePaperConversation(conversationKey);
       return;
     }

@@ -55,7 +55,10 @@ export type PaperHistoryNavigationDecision =
   | "missing-target-paper";
 
 export type HistoryPaperPaneSelector = {
-  selectItems?: (itemIDs: number[], selectInLibrary?: boolean) => unknown;
+  selectItems?: (
+    itemIDs: number[],
+    options?: boolean | { selectInLibrary?: boolean },
+  ) => unknown;
   selectItem?: (itemID: number, selectInLibrary?: boolean) => unknown;
 };
 
@@ -115,9 +118,12 @@ export function getHistoryDayGroupLabel(
   const weekStart = todayStart - 6 * 86_400_000;
   const monthStart = todayStart - 29 * 86_400_000;
   if (timestamp >= todayStart) return translateHistoryLabel("Today", options);
-  if (timestamp >= yesterdayStart) return translateHistoryLabel("Yesterday", options);
-  if (timestamp >= weekStart) return translateHistoryLabel("Last 7 days", options);
-  if (timestamp >= monthStart) return translateHistoryLabel("Last 30 days", options);
+  if (timestamp >= yesterdayStart)
+    return translateHistoryLabel("Yesterday", options);
+  if (timestamp >= weekStart)
+    return translateHistoryLabel("Last 7 days", options);
+  if (timestamp >= monthStart)
+    return translateHistoryLabel("Last 30 days", options);
   return translateHistoryLabel("Older", options);
 }
 
@@ -228,7 +234,9 @@ function isHistoryPaperItemDeleted(
   return Boolean(item?.deleted);
 }
 
-export function resolveHistoryEntryPaperBaseItem<T extends HistoryPaperItemLike>(
+export function resolveHistoryEntryPaperBaseItem<
+  T extends HistoryPaperItemLike,
+>(
   entry: Pick<ConversationHistoryEntry, "paperItemID">,
   getItem: (paperItemID: number) => T | null | undefined,
 ): T | null {
@@ -292,9 +300,7 @@ export function resolveHistoryEntryPaperDisplayMetadata<
   );
 }
 
-export function resolveHistoryEntrySourceState<
-  T extends HistoryPaperItemLike,
->(
+export function resolveHistoryEntrySourceState<T extends HistoryPaperItemLike>(
   entry: Pick<ConversationHistoryEntry, "kind" | "paperItemID">,
   getItem: (paperItemID: number) => T | null | undefined,
 ): HistoryEntrySourceState {
@@ -352,7 +358,7 @@ export async function maybeSelectPaperHistoryTarget(params: {
   const pane = params.getPane();
   if (!pane) return false;
   if (typeof pane.selectItems === "function") {
-    await pane.selectItems([paperItemID], true);
+    await pane.selectItems([paperItemID], { selectInLibrary: true });
     return true;
   }
   if (typeof pane.selectItem === "function") {

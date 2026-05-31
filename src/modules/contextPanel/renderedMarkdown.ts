@@ -465,6 +465,8 @@ const SAFE_RENDERED_MARKDOWN_TAGS = new Set([
   "semantics",
   "span",
   "strong",
+  "sub",
+  "sup",
   "table",
   "tbody",
   "td",

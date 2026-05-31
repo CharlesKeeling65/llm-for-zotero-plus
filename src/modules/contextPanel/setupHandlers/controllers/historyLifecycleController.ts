@@ -98,9 +98,7 @@ import {
   resolveShortcutMode,
 } from "../../portalScope";
 import { normalizeAttachmentContentHash } from "../../normalizers";
-import {
-  replaceOwnerAttachmentRefs,
-} from "../../../../utils/attachmentRefStore";
+import { replaceOwnerAttachmentRefs } from "../../../../utils/attachmentRefStore";
 import { extractManagedBlobHash } from "../../attachmentStorage";
 import {
   getLastUsedPaperConversationKey,
@@ -134,6 +132,7 @@ import {
   resolvePaperHistoryNavigationDecision,
   GLOBAL_HISTORY_UNDO_WINDOW_MS,
   type ConversationHistoryEntry,
+  type HistoryPaperPaneSelector,
   type HistorySwitchTarget,
   type PendingHistoryDeletion,
 } from "./conversationHistoryController";
@@ -640,8 +639,9 @@ export function createHistoryLifecycleController(
     if (isOrphanHistoryEntry(entry)) return t("Orphan");
     if (entry.kind !== "paper") return t("Library chat");
     return formatHistoryPaperScopeLabel(
-      resolveHistoryEntryPaperDisplayMetadata(entry, (id) =>
-        Zotero.Items.get(id) as Zotero.Item | null,
+      resolveHistoryEntryPaperDisplayMetadata(
+        entry,
+        (id) => Zotero.Items.get(id) as Zotero.Item | null,
       ),
       t("Paper chat"),
     );
@@ -2017,27 +2017,46 @@ export function createHistoryLifecycleController(
     notifyConversationHistoryChanged();
   };
 
-  const switchGlobalConversation = async (nextConversationKey: number) => {
-    if (!item || isNoteSession()) return;
+  const switchGlobalConversation = async (
+    nextConversationKey: number,
+  ): Promise<boolean> => {
+    if (!item || isNoteSession()) return false;
     persistDraftInputForCurrentConversation();
     const libraryID = getCurrentLibraryID();
-    if (!libraryID) return;
+    if (!libraryID) return false;
     const normalizedConversationKey = Number.isFinite(nextConversationKey)
       ? Math.floor(nextConversationKey)
       : 0;
-    if (normalizedConversationKey <= 0) return;
+    if (normalizedConversationKey <= 0) return false;
     const system = getConversationSystem();
-    await ensureConversationCatalogEntry({
+    const ensured = await ensureConversationCatalogEntry({
       system,
       conversationKey: normalizedConversationKey,
       libraryID,
       kind: "global",
     });
-    const nextItem = system === "claude_code"
-      ? createClaudeGlobalPortalItem(libraryID, normalizedConversationKey)
-      : system === "codex"
-        ? createCodexGlobalPortalItem(libraryID, normalizedConversationKey)
-        : createGlobalPortalItem(libraryID, normalizedConversationKey);
+    if (
+      !ensured ||
+      ensured.kind !== "global" ||
+      ensured.libraryID !== libraryID
+    ) {
+      ztoolkit.log("LLM: Refused to switch to mismatched global conversation", {
+        system,
+        conversationKey: normalizedConversationKey,
+        libraryID,
+        registeredLibraryID: ensured?.libraryID,
+        registeredKind: ensured?.kind,
+      });
+      if (status)
+        setStatus(status, t("Could not load this conversation"), "error");
+      return false;
+    }
+    const nextItem =
+      system === "claude_code"
+        ? createClaudeGlobalPortalItem(libraryID, normalizedConversationKey)
+        : system === "codex"
+          ? createCodexGlobalPortalItem(libraryID, normalizedConversationKey)
+          : createGlobalPortalItem(libraryID, normalizedConversationKey);
     setCurrentItem(nextItem as any);
     syncConversationIdentity();
     void renderShortcuts(body, item as Zotero.Item, resolveShortcutMode(item));
@@ -2080,6 +2099,7 @@ export function createHistoryLifecycleController(
     updateModelButton();
     updateReasoningButton();
     void refreshGlobalHistoryHeader();
+    return true;
   };
 
   const switchPaperConversation = async (
@@ -2110,11 +2130,21 @@ export function createHistoryLifecycleController(
       if (!Number.isFinite(conversationKey) || conversationKey <= 0) {
         return null;
       }
-      const entry = await conversationRepository.getCatalogEntry({
-        system,
-        kind: "paper",
-        conversationKey: Math.floor(conversationKey),
-      });
+      const normalizedConversationKey = Math.floor(conversationKey);
+      const entry =
+        system === "upstream"
+          ? await conversationRepository.ensureCatalogEntry({
+              system,
+              kind: "paper",
+              conversationKey: normalizedConversationKey,
+              libraryID,
+              paperItemID,
+            })
+          : await conversationRepository.getCatalogEntry({
+              system,
+              kind: "paper",
+              conversationKey: normalizedConversationKey,
+            });
       const entryPaperItemID = normalizeHistoryPaperItemID(entry?.paperItemID);
       if (
         !entry ||
@@ -2240,20 +2270,20 @@ export function createHistoryLifecycleController(
 
   const switchToHistoryTarget = async (
     target: HistorySwitchTarget,
-  ): Promise<void> => {
-    if (!target) return;
+  ): Promise<boolean> => {
+    if (!target) return false;
     if (target.kind === "paper") {
-      await switchPaperConversation(target.conversationKey);
-      return;
+      return switchPaperConversation(target.conversationKey);
     }
-    await switchGlobalConversation(target.conversationKey);
+    return switchGlobalConversation(target.conversationKey);
   };
 
   const resolvePaperItemFromHistoryEntry = (
     entry: ConversationHistoryEntry,
   ): Zotero.Item | null => {
-    return resolveHistoryEntryPaperBaseItem(entry, (paperItemID) =>
-      Zotero.Items.get(paperItemID) as Zotero.Item | null,
+    return resolveHistoryEntryPaperBaseItem(
+      entry,
+      (paperItemID) => Zotero.Items.get(paperItemID) as Zotero.Item | null,
     );
   };
 
@@ -2271,7 +2301,7 @@ export function createHistoryLifecycleController(
         paperItemID: paperItem.id,
         getPane: () =>
           Zotero.getActiveZoteroPane?.() as
-            | _ZoteroTypes.ZoteroPane
+            | HistoryPaperPaneSelector
             | undefined,
       });
     } catch (err) {
@@ -2342,8 +2372,7 @@ export function createHistoryLifecycleController(
       }
       return loaded;
     }
-    await switchGlobalConversation(entry.conversationKey);
-    return true;
+    return switchGlobalConversation(entry.conversationKey);
   };
 
   const historySearchPopupController = createHistorySearchPopupController({
@@ -2375,7 +2404,8 @@ export function createHistoryLifecycleController(
     },
     onSelect: async (entry) => {
       const loaded = await switchToHistoryEntry(entry);
-      if (loaded && status) setStatus(status, t("Conversation loaded"), "ready");
+      if (loaded && status)
+        setStatus(status, t("Conversation loaded"), "ready");
       return loaded;
     },
     onDelete: async (entry) => {
@@ -2641,10 +2671,7 @@ export function createHistoryLifecycleController(
       title: pending.title,
     });
     invalidateHistorySearchDocument(pending.conversationKey);
-    if (
-      pending.wasActive &&
-      shouldRestoreActiveConversationOnDeletionUndo()
-    ) {
+    if (pending.wasActive && shouldRestoreActiveConversationOnDeletionUndo()) {
       await switchToHistoryTarget({
         kind: pending.kind,
         conversationKey: pending.conversationKey,
@@ -2713,11 +2740,7 @@ export function createHistoryLifecycleController(
   ): Promise<void> => {
     if (isOrphanHistoryEntry(entry)) {
       if (status) {
-        setStatus(
-          status,
-          t("This chat's source item was deleted"),
-          "warning",
-        );
+        setStatus(status, t("This chat's source item was deleted"), "warning");
       }
       return;
     }
@@ -2769,8 +2792,7 @@ export function createHistoryLifecycleController(
         paperItemID: summary.paperItemID || entry.paperItemID,
         catalogPaperItemID: summary.paperItemID || entry.catalogPaperItemID,
         sessionVersion: summary.sessionVersion || entry.sessionVersion,
-        providerSessionId:
-          summary.providerSessionId || entry.providerSessionId,
+        providerSessionId: summary.providerSessionId || entry.providerSessionId,
         scopedConversationKey:
           summary.scopedConversationKey || entry.scopedConversationKey,
       };
@@ -2788,7 +2810,8 @@ export function createHistoryLifecycleController(
     if (!entry.deletable) return;
     const targetEntry = await hydrateHistoryEntryForDeletion(entry);
     const libraryID =
-      normalizeHistoryPaperItemID(targetEntry.libraryID) || getCurrentLibraryID();
+      normalizeHistoryPaperItemID(targetEntry.libraryID) ||
+      getCurrentLibraryID();
     if (!libraryID) {
       if (status)
         setStatus(status, t("No active library for deletion"), "error");
@@ -2996,11 +3019,14 @@ export function createHistoryLifecycleController(
       reuseReason = null;
     }
 
-    if (Math.floor(Number(targetConversationKey || 0)) === excludeConversationKey) {
+    if (
+      Math.floor(Number(targetConversationKey || 0)) === excludeConversationKey
+    ) {
       targetConversationKey = 0;
     }
     if (!targetConversationKey) {
-      if (status) setStatus(status, t("Failed to create conversation"), "error");
+      if (status)
+        setStatus(status, t("Failed to create conversation"), "error");
       return false;
     }
 
@@ -3147,13 +3173,16 @@ export function createHistoryLifecycleController(
         ztoolkit.log("LLM: Failed to create new paper conversation", err);
       }
       if (!createdSummary?.conversationKey) {
-        if (status) setStatus(status, t("Failed to create paper chat"), "error");
+        if (status)
+          setStatus(status, t("Failed to create paper chat"), "error");
         return false;
       }
       targetConversationKey = createdSummary.conversationKey;
       reuseReason = null;
     }
-    if (Math.floor(Number(targetConversationKey || 0)) === excludeConversationKey) {
+    if (
+      Math.floor(Number(targetConversationKey || 0)) === excludeConversationKey
+    ) {
       targetConversationKey = 0;
     }
     if (!targetConversationKey) {
@@ -3517,9 +3546,9 @@ export function createHistoryLifecycleController(
         if (entry) {
           loaded = await switchToHistoryEntry(entry);
         } else if (historyKind === "paper") {
-          await switchPaperConversation(parsedConversationKey);
+          loaded = await switchPaperConversation(parsedConversationKey);
         } else {
-          await switchGlobalConversation(parsedConversationKey);
+          loaded = await switchGlobalConversation(parsedConversationKey);
         }
         if (loaded && status) {
           setStatus(status, t("Conversation loaded"), "ready");

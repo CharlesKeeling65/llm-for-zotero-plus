@@ -281,10 +281,7 @@ import {
   type PaperScopedActionCollectionCandidate,
   type PaperScopedActionProfile,
 } from "./paperScopeCommand";
-import {
-  getAgentApi,
-  initAgentSubsystem,
-} from "../../agent/index";
+import { getAgentApi, initAgentSubsystem } from "../../agent/index";
 import type { ActionRequestContext } from "../../agent/actions";
 import { renderPendingActionCard } from "./agentTrace/render";
 import type {
@@ -1017,7 +1014,7 @@ export function setupHandlers(
   let refreshGlobalHistoryHeader: () => Promise<void> = async () => {};
   let switchGlobalConversation: (
     nextConversationKey: number,
-  ) => Promise<void> = async () => {};
+  ) => Promise<boolean> = async () => false;
   let switchPaperConversation: (
     nextConversationKey?: number,
   ) => Promise<boolean | void> = async () => {};
@@ -3381,7 +3378,13 @@ export function setupHandlers(
       | undefined;
     if (pane) {
       if (typeof pane.selectItems === "function") {
-        const selected = await pane.selectItems([paperContext.itemId], true);
+        const selectItems = pane.selectItems as (
+          itemIDs: number[],
+          options?: { selectInLibrary?: boolean },
+        ) => unknown;
+        const selected = await selectItems([paperContext.itemId], {
+          selectInLibrary: true,
+        });
         if (selected !== false) return true;
       }
       if (typeof pane.selectItem === "function") {
@@ -3390,10 +3393,13 @@ export function setupHandlers(
       }
       if (paperContext.contextItemId !== paperContext.itemId) {
         if (typeof pane.selectItems === "function") {
-          const selected = await pane.selectItems(
-            [paperContext.contextItemId],
-            true,
-          );
+          const selectItems = pane.selectItems as (
+            itemIDs: number[],
+            options?: { selectInLibrary?: boolean },
+          ) => unknown;
+          const selected = await selectItems([paperContext.contextItemId], {
+            selectInLibrary: true,
+          });
           if (selected !== false) return true;
         }
         if (typeof pane.selectItem === "function") {

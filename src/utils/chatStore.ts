@@ -17,6 +17,7 @@ import {
   buildDefaultUpstreamGlobalConversationKey,
   isConversationKeyFor,
   isConversationKeyForKind,
+  UPSTREAM_GLOBAL_ALLOCATED_CONVERSATION_KEY_BASE,
   UPSTREAM_RUNTIME_CONVERSATION_KEY_END,
 } from "../shared/conversationKeySpace";
 import {
@@ -27,6 +28,7 @@ import {
   buildConversationID,
   getRegisteredConversationScope,
   initConversationRegistryStore,
+  repairRegisteredConversationScope,
   registerConversationScope,
   type ConversationRegistryRow,
   type PaperContextJsonColumns,
@@ -88,7 +90,12 @@ export type StoredChatMessage = {
   modelEntryId?: string;
   modelProviderLabel?: string;
   webchatRunState?: "done" | "incomplete" | "error";
-  webchatCompletionReason?: "settled" | "forced_cancel" | "timeout" | "error" | null;
+  webchatCompletionReason?:
+    | "settled"
+    | "forced_cancel"
+    | "timeout"
+    | "error"
+    | null;
   webchatChatUrl?: string;
   webchatChatId?: string;
   reasoningSummary?: string;
@@ -348,9 +355,8 @@ function parseStoredAttachmentsJson(
 function resolveUserLibraryID(): number {
   const normalized = normalizeLibraryID(
     Number(
-      (
-        Zotero as unknown as { Libraries?: { userLibraryID?: unknown } }
-      ).Libraries?.userLibraryID,
+      (Zotero as unknown as { Libraries?: { userLibraryID?: unknown } })
+        .Libraries?.userLibraryID,
     ),
   );
   return normalized || 1;
@@ -408,16 +414,22 @@ async function resolveMessageConversationSelector(
         params: [conversationID, conversationKey],
         registered,
       }
-    : { whereSql: "conversation_key = ?", params: [conversationKey], registered };
+    : {
+        whereSql: "conversation_key = ?",
+        params: [conversationKey],
+        registered,
+      };
 }
 
 function messageJoinCondition(
   messageAlias: string,
   conversationAlias: string,
 ): string {
-  return `(${messageAlias}.conversation_id = ${conversationAlias}.conversation_id OR ((` +
+  return (
+    `(${messageAlias}.conversation_id = ${conversationAlias}.conversation_id OR ((` +
     `${messageAlias}.conversation_id IS NULL OR TRIM(${messageAlias}.conversation_id) = '') AND ` +
-    `${messageAlias}.conversation_key = ${conversationAlias}.conversation_key))`;
+    `${messageAlias}.conversation_key = ${conversationAlias}.conversation_key))`
+  );
 }
 
 function canonicalMessageConversationSelector(
@@ -456,9 +468,11 @@ async function resolveRepairingMessageConversationSelector(
 }
 
 function logChatStoreWarning(message: string): void {
-  const debug = (globalThis as typeof globalThis & {
-    Zotero?: { debug?: (message: string) => void };
-  }).Zotero?.debug;
+  const debug = (
+    globalThis as typeof globalThis & {
+      Zotero?: { debug?: (message: string) => void };
+    }
+  ).Zotero?.debug;
   debug?.(`LLM: ${message}`);
 }
 
@@ -692,7 +706,9 @@ async function reconcileGlobalConversationCatalog(): Promise<void> {
   )) as ConversationCatalogSeedRow[] | undefined;
 
   for (const row of rows || []) {
-    const conversationKey = normalizeConversationKey(Number(row.conversationKey));
+    const conversationKey = normalizeConversationKey(
+      Number(row.conversationKey),
+    );
     if (!conversationKey) continue;
     const title =
       typeof row.title === "string" && row.title.trim()
@@ -741,7 +757,9 @@ async function reconcileLegacyPaperV1ConversationCatalog(): Promise<void> {
   )) as ConversationCatalogSeedRow[] | undefined;
 
   for (const row of rows || []) {
-    const conversationKey = normalizeConversationKey(Number(row.conversationKey));
+    const conversationKey = normalizeConversationKey(
+      Number(row.conversationKey),
+    );
     if (!conversationKey) continue;
     const paperItem = Zotero.Items.get(conversationKey) || null;
     if (!paperItem?.isRegularItem?.()) continue;
@@ -809,12 +827,18 @@ async function getNextAvailableGlobalConversationKey(
      FROM ${GLOBAL_CONVERSATIONS_TABLE}
      WHERE conversation_key >= ?
        AND conversation_key < ?`,
-    [GLOBAL_CONVERSATION_KEY_BASE, UPSTREAM_RUNTIME_CONVERSATION_KEY_END],
+    [
+      UPSTREAM_GLOBAL_ALLOCATED_CONVERSATION_KEY_BASE,
+      UPSTREAM_RUNTIME_CONVERSATION_KEY_END,
+    ],
   )) as Array<{ maxConversationKey?: unknown }> | undefined;
   const maxConversationKey = Number(rows?.[0]?.maxConversationKey);
   return Number.isFinite(maxConversationKey)
-    ? Math.max(GLOBAL_CONVERSATION_KEY_BASE + 1, Math.floor(maxConversationKey) + 1)
-    : GLOBAL_CONVERSATION_KEY_BASE + 1;
+    ? Math.max(
+        UPSTREAM_GLOBAL_ALLOCATED_CONVERSATION_KEY_BASE,
+        Math.floor(maxConversationKey) + 1,
+      )
+    : UPSTREAM_GLOBAL_ALLOCATED_CONVERSATION_KEY_BASE;
 }
 
 async function migrateSharedGlobalDefaultConversationKey(): Promise<void> {
@@ -855,7 +879,9 @@ async function backfillUpstreamConversationIDs(): Promise<void> {
      FROM ${GLOBAL_CONVERSATIONS_TABLE}`,
   )) as Array<{ conversationKey?: unknown; libraryID?: unknown }> | undefined;
   for (const row of globalRows || []) {
-    const conversationKey = normalizeConversationKey(Number(row.conversationKey));
+    const conversationKey = normalizeConversationKey(
+      Number(row.conversationKey),
+    );
     const libraryID = normalizeLibraryID(Number(row.libraryID));
     if (!conversationKey || !libraryID) continue;
     const conversationID = buildUpstreamConversationID({
@@ -884,13 +910,17 @@ async function backfillUpstreamConversationIDs(): Promise<void> {
             library_id AS libraryID,
             paper_item_id AS paperItemID
      FROM ${PAPER_CONVERSATIONS_TABLE}`,
-  )) as Array<{
-    conversationKey?: unknown;
-    libraryID?: unknown;
-    paperItemID?: unknown;
-  }> | undefined;
+  )) as
+    | Array<{
+        conversationKey?: unknown;
+        libraryID?: unknown;
+        paperItemID?: unknown;
+      }>
+    | undefined;
   for (const row of paperRows || []) {
-    const conversationKey = normalizeConversationKey(Number(row.conversationKey));
+    const conversationKey = normalizeConversationKey(
+      Number(row.conversationKey),
+    );
     const libraryID = normalizeLibraryID(Number(row.libraryID));
     const paperItemID = normalizePaperItemID(Number(row.paperItemID));
     if (!conversationKey || !libraryID || !paperItemID) continue;
@@ -925,19 +955,24 @@ async function backfillUpstreamConversationRegistry(): Promise<void> {
             created_at AS createdAt,
             title AS title
      FROM ${GLOBAL_CONVERSATIONS_TABLE}`,
-  )) as Array<{
-    conversationID?: unknown;
-    conversationKey?: unknown;
-    libraryID?: unknown;
-    createdAt?: unknown;
-    title?: unknown;
-  }> | undefined;
+  )) as
+    | Array<{
+        conversationID?: unknown;
+        conversationKey?: unknown;
+        libraryID?: unknown;
+        createdAt?: unknown;
+        title?: unknown;
+      }>
+    | undefined;
   for (const row of globalRows || []) {
-    const conversationKey = normalizeConversationKey(Number(row.conversationKey));
+    const conversationKey = normalizeConversationKey(
+      Number(row.conversationKey),
+    );
     const libraryID = normalizeLibraryID(Number(row.libraryID));
     if (!conversationKey || !libraryID) continue;
     await registerConversationScope({
-      conversationID: typeof row.conversationID === "string" ? row.conversationID : undefined,
+      conversationID:
+        typeof row.conversationID === "string" ? row.conversationID : undefined,
       conversationKey,
       system: "upstream",
       kind: "global",
@@ -956,21 +991,26 @@ async function backfillUpstreamConversationRegistry(): Promise<void> {
             created_at AS createdAt,
             title AS title
      FROM ${PAPER_CONVERSATIONS_TABLE}`,
-  )) as Array<{
-    conversationID?: unknown;
-    conversationKey?: unknown;
-    libraryID?: unknown;
-    paperItemID?: unknown;
-    createdAt?: unknown;
-    title?: unknown;
-  }> | undefined;
+  )) as
+    | Array<{
+        conversationID?: unknown;
+        conversationKey?: unknown;
+        libraryID?: unknown;
+        paperItemID?: unknown;
+        createdAt?: unknown;
+        title?: unknown;
+      }>
+    | undefined;
   for (const row of paperRows || []) {
-    const conversationKey = normalizeConversationKey(Number(row.conversationKey));
+    const conversationKey = normalizeConversationKey(
+      Number(row.conversationKey),
+    );
     const libraryID = normalizeLibraryID(Number(row.libraryID));
     const paperItemID = normalizePaperItemID(Number(row.paperItemID));
     if (!conversationKey || !libraryID || !paperItemID) continue;
     await registerConversationScope({
-      conversationID: typeof row.conversationID === "string" ? row.conversationID : undefined,
+      conversationID:
+        typeof row.conversationID === "string" ? row.conversationID : undefined,
       conversationKey,
       system: "upstream",
       kind: "paper",
@@ -985,7 +1025,9 @@ async function backfillUpstreamConversationRegistry(): Promise<void> {
 
 export async function initChatStore(): Promise<void> {
   const conversationIDTransitionAlreadyApplied =
-    await hasConversationSchemaMigration(CONVERSATION_ID_TRANSITION_MIGRATION_ID);
+    await hasConversationSchemaMigration(
+      CONVERSATION_ID_TRANSITION_MIGRATION_ID,
+    );
   await Zotero.DB.executeTransaction(async () => {
     await initConversationRegistryStore();
     await migrateLegacyChatStore();
@@ -1186,7 +1228,9 @@ export async function initChatStore(): Promise<void> {
       );
     }
     const hasFullTextPaperContextsJsonColumn = Boolean(
-      columns?.some((column) => column?.name === "full_text_paper_contexts_json"),
+      columns?.some(
+        (column) => column?.name === "full_text_paper_contexts_json",
+      ),
     );
     if (!hasFullTextPaperContextsJsonColumn) {
       await Zotero.DB.queryAsync(
@@ -1195,7 +1239,9 @@ export async function initChatStore(): Promise<void> {
       );
     }
     const hasCitationPaperContextsJsonColumn = Boolean(
-      columns?.some((column) => column?.name === "citation_paper_contexts_json"),
+      columns?.some(
+        (column) => column?.name === "citation_paper_contexts_json",
+      ),
     );
     if (!hasCitationPaperContextsJsonColumn) {
       await Zotero.DB.queryAsync(
@@ -1399,10 +1445,12 @@ export async function loadConversation(
   limit: number,
 ): Promise<StoredChatMessage[]> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey || !isUpstreamStoreConversationKey(normalizedKey)) return [];
+  if (!normalizedKey || !isUpstreamStoreConversationKey(normalizedKey))
+    return [];
 
   const normalizedLimit = normalizeLimit(limit, 200);
-  const selector = await resolveRepairingMessageConversationSelector(normalizedKey);
+  const selector =
+    await resolveRepairingMessageConversationSelector(normalizedKey);
   let rows = (await Zotero.DB.queryAsync(
     buildLatestStoredMessagesQuery({
       tableName: CHAT_MESSAGES_TABLE,
@@ -1622,7 +1670,10 @@ export async function loadConversation(
       { preserveEmpty: true },
     );
     let generatedImages: GeneratedChatImage[] | undefined;
-    if (typeof row.generatedImagesJson === "string" && row.generatedImagesJson) {
+    if (
+      typeof row.generatedImagesJson === "string" &&
+      row.generatedImagesJson
+    ) {
       try {
         const normalized = normalizeGeneratedChatImages(
           JSON.parse(row.generatedImagesJson) as unknown,
@@ -1704,14 +1755,12 @@ export async function loadConversation(
         typeof row.reasoningDetails === "string"
           ? row.reasoningDetails
           : undefined,
-      contextTokens:
-        Number.isFinite(Number(row.contextTokens))
-          ? Math.floor(Number(row.contextTokens))
-          : undefined,
-      contextWindow:
-        Number.isFinite(Number(row.contextWindow))
-          ? Math.floor(Number(row.contextWindow))
-          : undefined,
+      contextTokens: Number.isFinite(Number(row.contextTokens))
+        ? Math.floor(Number(row.contextTokens))
+        : undefined,
+      contextWindow: Number.isFinite(Number(row.contextWindow))
+        ? Math.floor(Number(row.contextWindow))
+        : undefined,
     });
   }
 
@@ -1893,7 +1942,8 @@ export async function updateLatestUserMessage(
   );
   const modelAttachments = normalizeStoredAttachments(message.modelAttachments);
   const generatedImages = normalizeGeneratedChatImages(message.generatedImages);
-  const selector = await resolveRepairingMessageConversationSelector(normalizedKey);
+  const selector =
+    await resolveRepairingMessageConversationSelector(normalizedKey);
 
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
@@ -1992,7 +2042,8 @@ export async function updateLatestAssistantMessage(
   const timestamp = Number(message.timestamp);
   const quoteCitations = normalizeQuoteCitations(message.quoteCitations);
   const generatedImages = normalizeGeneratedChatImages(message.generatedImages);
-  const selector = await resolveRepairingMessageConversationSelector(normalizedKey);
+  const selector =
+    await resolveRepairingMessageConversationSelector(normalizedKey);
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
       `UPDATE ${CHAT_MESSAGES_TABLE}
@@ -2052,9 +2103,12 @@ export async function clearConversation(
   const normalizedKey = normalizeConversationKey(conversationKey);
   if (!normalizedKey || !isUpstreamStoreConversationKey(normalizedKey)) return;
 
-  const selector = await resolveRepairingMessageConversationSelector(normalizedKey, {
-    destructive: true,
-  });
+  const selector = await resolveRepairingMessageConversationSelector(
+    normalizedKey,
+    {
+      destructive: true,
+    },
+  );
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
       `DELETE FROM ${CHAT_MESSAGES_TABLE}
@@ -2081,9 +2135,12 @@ export async function deleteTurnMessages(
     : 0;
   if (normalizedUserTimestamp <= 0 || normalizedAssistantTimestamp <= 0) return;
 
-  const selector = await resolveRepairingMessageConversationSelector(normalizedKey, {
-    destructive: true,
-  });
+  const selector = await resolveRepairingMessageConversationSelector(
+    normalizedKey,
+    {
+      destructive: true,
+    },
+  );
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
       `DELETE FROM ${CHAT_MESSAGES_TABLE}
@@ -2129,9 +2186,12 @@ export async function pruneConversation(
     return;
   }
 
-  const selector = await resolveRepairingMessageConversationSelector(normalizedKey, {
-    destructive: true,
-  });
+  const selector = await resolveRepairingMessageConversationSelector(
+    normalizedKey,
+    {
+      destructive: true,
+    },
+  );
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
       `DELETE FROM ${CHAT_MESSAGES_TABLE}
@@ -2466,7 +2526,8 @@ export async function getPaperConversation(
   conversationKey: number,
 ): Promise<PaperConversationSummary | null> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey || !isUpstreamPaperConversationKey(normalizedKey)) return null;
+  if (!normalizedKey || !isUpstreamPaperConversationKey(normalizedKey))
+    return null;
   const rows = (await Zotero.DB.queryAsync(
     `SELECT pc.conversation_id AS conversationID,
             pc.conversation_key AS conversationKey,
@@ -2508,9 +2569,12 @@ export async function touchEmptyPaperConversation(
   const normalizedTimestamp = Number.isFinite(timestamp)
     ? Math.floor(timestamp)
     : Date.now();
-  const selector = await resolveRepairingMessageConversationSelector(normalizedKey, {
-    destructive: true,
-  });
+  const selector = await resolveRepairingMessageConversationSelector(
+    normalizedKey,
+    {
+      destructive: true,
+    },
+  );
   await Zotero.DB.queryAsync(
     `UPDATE ${PAPER_CONVERSATIONS_TABLE}
      SET created_at = ?,
@@ -2522,7 +2586,12 @@ export async function touchEmptyPaperConversation(
          WHERE ${selector.whereSql}
            AND role = 'user'
     )`,
-    [normalizedTimestamp, normalizedTimestamp, normalizedKey, ...selector.params],
+    [
+      normalizedTimestamp,
+      normalizedTimestamp,
+      normalizedKey,
+      ...selector.params,
+    ],
   );
   await refreshUpstreamConversationSearchIndex(normalizedKey);
 }
@@ -2534,10 +2603,35 @@ export async function touchEmptyPaperConversation(
 export async function ensureGlobalConversationExists(
   libraryID: number,
   conversationKey: number,
-): Promise<void> {
+): Promise<boolean> {
   const normalizedLibraryID = normalizeLibraryID(libraryID);
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedLibraryID || !normalizedKey || !isUpstreamGlobalConversationKey(normalizedKey)) return;
+  if (
+    !normalizedLibraryID ||
+    !normalizedKey ||
+    !isUpstreamGlobalConversationKey(normalizedKey)
+  ) {
+    return false;
+  }
+  const existing = await getGlobalConversation(normalizedKey);
+  if (existing) {
+    if (normalizeLibraryID(existing.libraryID) !== normalizedLibraryID) {
+      logChatStoreWarning(
+        `Refused to ensure global conversation ${normalizedKey} for library ${normalizedLibraryID}; catalog row belongs to library ${existing.libraryID}.`,
+      );
+      return false;
+    }
+    return await repairRegisteredConversationScope({
+      conversationID: existing.conversationID,
+      conversationKey: normalizedKey,
+      system: "upstream",
+      kind: "global",
+      libraryID: normalizedLibraryID,
+      createdAt: existing.createdAt,
+      updatedAt: existing.lastActivityAt,
+      title: existing.title,
+    });
+  }
   const conversationID = buildUpstreamConversationID({
     conversationKey: normalizedKey,
     kind: "global",
@@ -2550,7 +2644,7 @@ export async function ensureGlobalConversationExists(
      VALUES (?, ?, ?, ?, ?, 0, NULL, NULL)`,
     [conversationID, normalizedKey, normalizedLibraryID, createdAt, createdAt],
   );
-  await registerConversationScope({
+  return await registerConversationScope({
     conversationID,
     conversationKey: normalizedKey,
     system: "upstream",
@@ -2569,20 +2663,9 @@ export async function createGlobalConversation(
 
   const createdAt = Date.now();
   return await Zotero.DB.executeTransaction(async () => {
-    const rows = (await Zotero.DB.queryAsync(
-      `SELECT MAX(conversation_key) AS maxConversationKey
-       FROM ${GLOBAL_CONVERSATIONS_TABLE}
-       WHERE conversation_key >= ?
-         AND conversation_key < ?`,
-      [GLOBAL_CONVERSATION_KEY_BASE, UPSTREAM_RUNTIME_CONVERSATION_KEY_END],
-    )) as Array<{ maxConversationKey?: unknown }> | undefined;
-    const maxConversationKey = Number(rows?.[0]?.maxConversationKey);
-    const nextConversationKey = Number.isFinite(maxConversationKey)
-      ? Math.max(
-          GLOBAL_CONVERSATION_KEY_BASE + 1,
-          Math.floor(maxConversationKey) + 1,
-        )
-      : buildDefaultUpstreamGlobalConversationKey(normalizedLibraryID);
+    const nextConversationKey = await getNextAvailableGlobalConversationKey(
+      buildDefaultUpstreamGlobalConversationKey(normalizedLibraryID),
+    );
     const conversationID = buildUpstreamConversationID({
       conversationKey: nextConversationKey,
       kind: "global",
@@ -2592,7 +2675,13 @@ export async function createGlobalConversation(
       `INSERT INTO ${GLOBAL_CONVERSATIONS_TABLE}
         (conversation_id, conversation_key, library_id, created_at, last_activity_at, user_turn_count, first_user_title, title)
        VALUES (?, ?, ?, ?, ?, 0, NULL, NULL)`,
-      [conversationID, nextConversationKey, normalizedLibraryID, createdAt, createdAt],
+      [
+        conversationID,
+        nextConversationKey,
+        normalizedLibraryID,
+        createdAt,
+        createdAt,
+      ],
     );
     await registerConversationScope({
       conversationID,
@@ -2653,7 +2742,8 @@ export async function getGlobalConversationUserTurnCount(
   conversationKey: number,
 ): Promise<number> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey || !isUpstreamGlobalConversationKey(normalizedKey)) return 0;
+  if (!normalizedKey || !isUpstreamGlobalConversationKey(normalizedKey))
+    return 0;
   const rows = (await Zotero.DB.queryAsync(
     `SELECT COALESCE(user_turn_count, 0) AS userTurnCount
      FROM ${GLOBAL_CONVERSATIONS_TABLE}
@@ -2674,9 +2764,12 @@ export async function touchEmptyGlobalConversation(
   const normalizedTimestamp = Number.isFinite(timestamp)
     ? Math.floor(timestamp)
     : Date.now();
-  const selector = await resolveRepairingMessageConversationSelector(normalizedKey, {
-    destructive: true,
-  });
+  const selector = await resolveRepairingMessageConversationSelector(
+    normalizedKey,
+    {
+      destructive: true,
+    },
+  );
   await Zotero.DB.queryAsync(
     `UPDATE ${GLOBAL_CONVERSATIONS_TABLE}
      SET created_at = ?,
@@ -2688,7 +2781,12 @@ export async function touchEmptyGlobalConversation(
          WHERE ${selector.whereSql}
            AND role = 'user'
        )`,
-    [normalizedTimestamp, normalizedTimestamp, normalizedKey, ...selector.params],
+    [
+      normalizedTimestamp,
+      normalizedTimestamp,
+      normalizedKey,
+      ...selector.params,
+    ],
   );
   await refreshUpstreamConversationSearchIndex(normalizedKey);
 }
@@ -2727,7 +2825,8 @@ export async function getGlobalConversation(
   conversationKey: number,
 ): Promise<GlobalConversationSummary | null> {
   const normalizedKey = normalizeConversationKey(conversationKey);
-  if (!normalizedKey || !isUpstreamGlobalConversationKey(normalizedKey)) return null;
+  if (!normalizedKey || !isUpstreamGlobalConversationKey(normalizedKey))
+    return null;
   const rows = (await Zotero.DB.queryAsync(
     `SELECT gc.conversation_id AS conversationID,
             gc.conversation_key AS conversationKey,
@@ -2855,9 +2954,8 @@ export async function preflightDeleteUpstreamConversationLocalRows(
 ): Promise<void> {
   const normalizedKey = normalizeConversationKey(conversationKey);
   if (!normalizedKey || !isUpstreamStoreConversationKey(normalizedKey)) return;
-  const repair = await repairRecoverableUpstreamCatalogMessageConversationIDs(
-    normalizedKey,
-  );
+  const repair =
+    await repairRecoverableUpstreamCatalogMessageConversationIDs(normalizedKey);
   if (repair.refused > 0) {
     throw new Error(
       `Refused to delete upstream conversation ${normalizedKey}: ambiguous stale message ids found.`,
@@ -2883,9 +2981,12 @@ export async function deleteUpstreamConversationLocalRows(
     catalogKind === "paper"
       ? PAPER_CONVERSATIONS_TABLE
       : GLOBAL_CONVERSATIONS_TABLE;
-  const selector = await resolveRepairingMessageConversationSelector(normalizedKey, {
-    destructive: true,
-  });
+  const selector = await resolveRepairingMessageConversationSelector(
+    normalizedKey,
+    {
+      destructive: true,
+    },
+  );
   await Zotero.DB.executeTransaction(async () => {
     await Zotero.DB.queryAsync(
       `DELETE FROM ${CHAT_MESSAGES_TABLE}
