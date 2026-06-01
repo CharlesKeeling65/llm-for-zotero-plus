@@ -166,6 +166,24 @@ describe("composeContextController paper card attachment labels", function () {
     );
   });
 
+  it("does not treat a disabled MinerU parse row as a clickable source option", function () {
+    const paperContext = makePaperContext({
+      contextItemId: 102,
+      attachmentTitle: "paper.pdf",
+    });
+
+    assert.isFalse(
+      hasPaperChipSourceMenuOption([
+        {
+          mode: "mineru",
+          paperContext,
+          mineruAction: "start",
+          disabledReason: "enable MinerU to start PDF parsing",
+        },
+      ]),
+    );
+  });
+
   it("falls back to filename before stale stored attachment title", function () {
     zoteroItems.set(
       102,

@@ -2635,7 +2635,11 @@ export function setupHandlers(
   const getMineruSourceDescription = (
     attachmentTitle: string,
     state: MineruSourceUiState,
+    disabledReason?: string,
   ): string => {
+    if (disabledReason) {
+      return `${attachmentTitle} · ${disabledReason}`;
+    }
     if (state === "processing") {
       return `${attachmentTitle} · ${t("MinerU parsing…")}`;
     }
@@ -2648,11 +2652,24 @@ export function setupHandlers(
     return `${attachmentTitle} · MinerU`;
   };
 
-  const getMineruActionTitle = (state: MineruSourceUiState): string => {
+  const getMineruDisabledParsingMessage = (): string =>
+    t("⚠️ enable MinerU to start PDF parsing");
+
+  const shouldDisableMineruParsingAction = (
+    action?: MineruSourceAction,
+  ): boolean => {
+    return !isMineruEnabled() && (action === "start" || action === "retry");
+  };
+
+  const getMineruActionTitle = (
+    state: MineruSourceUiState,
+    disabledReason?: string,
+  ): string => {
+    if (disabledReason) return disabledReason;
     if (state === "processing") return t("Click to stop MinerU parsing");
     if (state === "failed") return t("MinerU parsing failed. Click to retry");
     if (state === "idle" && !isMineruEnabled()) {
-      return t("Enable MinerU PDF Parsing first.");
+      return getMineruDisabledParsingMessage();
     }
     if (state === "idle") return t("Click to do MinerU parsing");
     return "MinerU";
@@ -2717,6 +2734,11 @@ export function setupHandlers(
         );
         if (!baseContext) continue;
         const mineruOptionState = resolveMineruOptionState(baseContext);
+        const mineruDisabledReason = shouldDisableMineruParsingAction(
+          mineruOptionState.action,
+        )
+          ? getMineruDisabledParsingMessage()
+          : undefined;
         options.push({
           mode: "mineru",
           badge: "MD",
@@ -2725,10 +2747,15 @@ export function setupHandlers(
           description: getMineruSourceDescription(
             attachmentTitle,
             mineruOptionState.state,
+            mineruDisabledReason,
           ),
+          disabledReason: mineruDisabledReason,
           mineruState: mineruOptionState.state,
           mineruAction: mineruOptionState.action,
-          mineruActionTitle: getMineruActionTitle(mineruOptionState.state),
+          mineruActionTitle: getMineruActionTitle(
+            mineruOptionState.state,
+            mineruDisabledReason,
+          ),
           hideTextSource: mineruOptionState.hideTextSource,
         });
         if (!mineruOptionState.hideTextSource) {
@@ -2903,6 +2930,10 @@ export function setupHandlers(
     const displayAttachmentText =
       options?.description ||
       formatPaperContextCardAttachmentLine(paperContext, mode);
+    const disabledReasonAlreadyShown =
+      !!options?.disabledReason &&
+      (displayAttachmentText === options.disabledReason ||
+        displayAttachmentText.endsWith(`· ${options.disabledReason}`));
     if (displayAttachmentText) {
       rowMain.appendChild(
         createElement(
@@ -2916,7 +2947,7 @@ export function setupHandlers(
         ),
       );
     }
-    if (options?.disabledReason) {
+    if (options?.disabledReason && !disabledReasonAlreadyShown) {
       rowMain.appendChild(
         createElement(
           ownerDoc,
@@ -3038,7 +3069,7 @@ export function setupHandlers(
 
     if (!isMineruEnabled()) {
       if (status) {
-        setStatus(status, t("Enable MinerU PDF Parsing first."), "warning");
+        setStatus(status, getMineruDisabledParsingMessage(), "warning");
       }
       return;
     }

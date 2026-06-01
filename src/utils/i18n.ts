@@ -326,7 +326,7 @@ const zhCN: Record<string, string> = {
   "MinerU parsing…": "MinerU 解析中…",
   "Click to stop MinerU parsing": "点击停止 MinerU 解析",
   "MinerU parsing failed. Click to retry": "MinerU 解析失败。点击重试",
-  "Enable MinerU PDF Parsing first.": "请先启用 MinerU PDF 解析。",
+  "⚠️ enable MinerU to start PDF parsing": "⚠️ 请启用 MinerU 以开始 PDF 解析",
   "Enable MinerU sync before preparing packages.":
     "请先启用 MinerU 同步，再准备同步包。",
   "No API key needed to start, but a personal key is strongly recommended.":
