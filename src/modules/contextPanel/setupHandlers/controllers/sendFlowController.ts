@@ -303,6 +303,8 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         pdfPageImageDataUrls,
         pdfUploadSystemMessages,
       } = pdfInputs;
+      const hasImageInputs =
+        selectedImages.length > 0 || pdfPageImageDataUrls.length > 0;
       if (
         isWebChat &&
         (selectedCollectionContexts.length || selectedTagContexts.length)
@@ -325,36 +327,46 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         !selectedPaperContexts.length &&
         !selectedCollectionContexts.length &&
         !selectedTagContexts.length &&
-        !selectedFiles.length
+        !selectedFiles.length &&
+        !hasImageInputs
       ) {
         return;
       }
 
+      const hasNonImageAttachments =
+        selectedFiles.length > 0 ||
+        selectedPaperContexts.length > 0 ||
+        selectedCollectionContexts.length > 0 ||
+        selectedTagContexts.length > 0;
+
       const promptText = deps.resolvePromptText(
         text,
         primarySelectedText,
-        selectedFiles.length > 0 ||
-          selectedPaperContexts.length > 0 ||
-          selectedCollectionContexts.length > 0 ||
-          selectedTagContexts.length > 0,
+        hasNonImageAttachments,
       );
-      if (!promptText) return;
+      let resolvedPromptText = promptText;
+      if (!resolvedPromptText && hasImageInputs) {
+        resolvedPromptText = "Please analyze the attached images.";
+      }
+      if (!resolvedPromptText) return;
 
       const selectedScopeContextCount =
         selectedPaperContexts.length +
         selectedCollectionContexts.length +
         selectedTagContexts.length;
-      const resolvedPromptText =
+      if (
         !text &&
         !primarySelectedText &&
         selectedScopeContextCount > 0 &&
-        !selectedFiles.length
-          ? selectedPaperContexts.length
-            ? "Please analyze selected papers."
-            : selectedCollectionContexts.length
-              ? "Please analyze selected collection."
-              : "Please analyze selected tag."
-          : promptText;
+        !selectedFiles.length &&
+        !hasImageInputs
+      ) {
+        resolvedPromptText = selectedPaperContexts.length
+          ? "Please analyze selected papers."
+          : selectedCollectionContexts.length
+            ? "Please analyze selected collection."
+            : "Please analyze selected tag.";
+      }
 
       const composedQuestionBase = primarySelectedText
         ? deps.buildQuestionWithSelectedTextContexts(
