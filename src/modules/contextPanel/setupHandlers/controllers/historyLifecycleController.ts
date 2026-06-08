@@ -23,6 +23,7 @@ import type { Message } from "../../types";
 import {
   chatHistory,
   loadedConversationKeys,
+  webChatIsolatedConversationKeys,
   activeConversationModeByLibrary,
   activeGlobalConversationByLibrary,
   activePaperConversationByPaper,
@@ -2297,6 +2298,7 @@ export function createHistoryLifecycleController(
     refreshAutoLoadedPaperContextForCurrentItem();
     void renderShortcuts(body, item as Zotero.Item, resolveShortcutMode(item));
     if (isWebChatMode()) {
+      webChatIsolatedConversationKeys.add(resolvedConversationKey);
       chatHistory.set(resolvedConversationKey, []);
       loadedConversationKeys.add(resolvedConversationKey);
       markNextWebChatSendAsNewChat();
@@ -3399,6 +3401,7 @@ export function createHistoryLifecycleController(
           }
         })();
         const key = getConversationKey(item);
+        webChatIsolatedConversationKeys.add(key);
         chatHistory.set(key, []);
         loadedConversationKeys.add(key);
         refreshChatPreservingScroll();

@@ -48,6 +48,10 @@ describe("webchat isolation", function () {
       "chatHistory.set(resolvedConversationKey, []);",
       webchatBranch,
     );
+    const markIsolated = source.indexOf(
+      "webChatIsolatedConversationKeys.add(resolvedConversationKey);",
+      webchatBranch,
+    );
     const markLoaded = source.indexOf(
       "loadedConversationKeys.add(resolvedConversationKey);",
       webchatBranch,
@@ -59,9 +63,47 @@ describe("webchat isolation", function () {
 
     assert.isAtLeast(switchStart, 0);
     assert.isAtLeast(webchatBranch, switchStart);
-    assert.isAtLeast(clearHistory, webchatBranch);
+    assert.isAtLeast(markIsolated, webchatBranch);
+    assert.isAtLeast(clearHistory, markIsolated);
     assert.isAtLeast(markLoaded, clearHistory);
     assert.isAtLeast(normalLoad, markLoaded);
+  });
+
+  it("blocks persisted paper history hydration while webchat is active", function () {
+    const source = readFileSync(
+      resolve(here, "../src/modules/contextPanel/chat.ts"),
+      "utf8",
+    );
+    const ensureStart = source.indexOf(
+      "export async function ensureConversationLoaded",
+    );
+    const webchatGuard = source.indexOf(
+      "isEffectiveWebChatRequest(item)",
+      ensureStart,
+    );
+    const isolateCall = source.indexOf(
+      "isolateWebChatConversationKey(",
+      webchatGuard,
+    );
+    const loadedShortcut = source.indexOf(
+      "if (loadedConversationKeys.has(conversationKey)) return;",
+      ensureStart,
+    );
+    const storedLoad = source.indexOf(
+      "loadStoredConversationByKey",
+      ensureStart,
+    );
+    const lateIsolationCheck = source.indexOf(
+      "webChatIsolatedConversationKeys.has(conversationKey)",
+      storedLoad,
+    );
+
+    assert.isAtLeast(ensureStart, 0);
+    assert.isAtLeast(webchatGuard, ensureStart);
+    assert.isAtLeast(isolateCall, webchatGuard);
+    assert.isBelow(isolateCall, loadedShortcut);
+    assert.isBelow(loadedShortcut, storedLoad);
+    assert.isAtLeast(lateIsolationCheck, storedLoad);
   });
 
   it("keeps webchat turns out of persistent chat storage", function () {
@@ -109,5 +151,33 @@ describe("webchat isolation", function () {
     assert.isAbove(entryBlockEnd, entryStart);
     assert.include(entryBlock, "await createAndSwitchPaperConversation();");
     assert.notInclude(entryBlock, "createAndSwitchGlobalConversation");
+  });
+
+  it("does not restore normal paper history on webchat panel startup", function () {
+    const source = readFileSync(
+      resolve(here, "../src/modules/contextPanel/setupHandlers.ts"),
+      "utf8",
+    );
+    const restoreStart = source.indexOf(
+      "restoreDraftInputForCurrentConversation();",
+    );
+    const webchatBranch = source.indexOf(
+      "} else if (isWebChatMode()) {",
+      restoreStart,
+    );
+    const paperBranch = source.indexOf(
+      "} else if (isPaperMode()) {",
+      webchatBranch,
+    );
+    const webchatBlock = source.slice(webchatBranch, paperBranch);
+
+    assert.isAtLeast(restoreStart, 0);
+    assert.isAtLeast(webchatBranch, restoreStart);
+    assert.isAbove(paperBranch, webchatBranch);
+    assert.include(
+      webchatBlock,
+      "initializeWebChatConversationForCurrentItem();",
+    );
+    assert.notInclude(webchatBlock, "switchPaperConversation()");
   });
 });

@@ -7,7 +7,11 @@
  */
 
 import { createElement } from "../utils/domHelpers";
-import { relayGetExtensionLiveness, relayGetExtensionStatus, relayClearExtensionStatus } from "./relayServer";
+import {
+  relayGetExtensionLiveness,
+  relayGetExtensionStatus,
+  relayClearExtensionStatus,
+} from "./relayServer";
 import { WEBCHAT_TARGETS } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -23,7 +27,7 @@ interface PreloadStep {
   label: string;
   check: () => boolean;
   maxAttempts: number;
-  failHint: string;
+  failHint: string | (() => string);
 }
 
 const STEPS: PreloadStep[] = [
@@ -37,11 +41,62 @@ const STEPS: PreloadStep[] = [
   {
     key: "extension",
     label: "Extension connection",
-    check: () => relayGetExtensionLiveness().aliveSinceMs < EXTENSION_ALIVE_THRESHOLD_MS,
+    check: () =>
+      relayGetExtensionLiveness().aliveSinceMs < EXTENSION_ALIVE_THRESHOLD_MS,
     maxAttempts: 20, // 10 seconds
-    failHint: "Install the Sync for Zotero Chrome extension and reload the page.",
+    failHint:
+      "Install the Sync for Zotero Chrome extension and reload the page.",
   },
 ];
+
+function resolveFailHint(step: PreloadStep): string {
+  return typeof step.failHint === "function" ? step.failHint() : step.failHint;
+}
+
+function describeChatSiteFailure(
+  targetHost?: string,
+  siteLabel = targetHost || "the selected chat site",
+): string {
+  const status = relayGetExtensionStatus();
+  const siteName = siteLabel;
+  if (!status) {
+    return `Open ${siteName} in Chrome and wait for the extension heartbeat.`;
+  }
+  if (!status.chatTabAlive) {
+    return `Open ${siteName} in your Chrome browser.`;
+  }
+  if (targetHost && status.chatUrl) {
+    try {
+      const host = new URL(status.chatUrl).hostname;
+      if (!host.includes(targetHost)) {
+        return `The active extension tab is ${host}; open ${targetHost} instead.`;
+      }
+    } catch {
+      return `Open ${targetHost} in your Chrome browser.`;
+    }
+  }
+  if (status.contentScriptAlive === false) {
+    return "The Sync for Zotero content script is not responding; reload the chat tab or refresh the extension.";
+  }
+  if (
+    status.mainWorldInjected === false ||
+    status.networkHookActive === false
+  ) {
+    return "The page network bridge is inactive; reload the chat tab after refreshing the extension.";
+  }
+  if (status.composerFound === false) {
+    return "The extension cannot find the chat composer; wait for the page to finish loading or reload the chat tab.";
+  }
+  if (status.sendControlState) {
+    return `Chat site is open, but the send control is ${status.sendControlState}.`;
+  }
+  const reason =
+    status.lastDiagnostic?.reasonCode || status.lastDiagnostic?.message;
+  if (reason) {
+    return `Latest extension diagnostic: ${reason}.`;
+  }
+  return `Open ${siteName} in your Chrome browser.`;
+}
 
 /** Build the chatsite step dynamically so it can filter by the target hostname. */
 function makeChatSiteStep(targetHost?: string): PreloadStep {
@@ -51,15 +106,31 @@ function makeChatSiteStep(targetHost?: string): PreloadStep {
     check: () => {
       const status = relayGetExtensionStatus();
       if (!status?.chatTabAlive) return false;
-      if (targetHost && status.chatUrl) {
-        try { return new URL(status.chatUrl).hostname.includes(targetHost); } catch { /* fall through */ }
+      if (targetHost) {
+        if (!status.chatUrl) return false;
+        try {
+          if (!new URL(status.chatUrl).hostname.includes(targetHost)) {
+            return false;
+          }
+        } catch {
+          return false;
+        }
       }
-      return !targetHost; // pass only when no specific target is required
+      return (
+        status.contentScriptAlive !== false &&
+        status.mainWorldInjected !== false &&
+        status.networkHookActive !== false &&
+        status.composerFound !== false
+      );
     },
     maxAttempts: 30,
     failHint: targetHost
-      ? `Open ${targetHost} in your Chrome browser.`
-      : `Open the corresponding chat site (${WEBCHAT_TARGETS.map((wt) => wt.modelName).join(", ")}) in your Chrome browser.`,
+      ? () => describeChatSiteFailure(targetHost)
+      : () =>
+          describeChatSiteFailure(
+            undefined,
+            `the corresponding chat site (${WEBCHAT_TARGETS.map((wt) => wt.modelName).join(", ")})`,
+          ),
   };
 }
 
@@ -111,15 +182,20 @@ export async function showWebChatPreloadScreen(
   });
 
   const stepsContainer = el(doc, "div", "llm-webchat-preload-steps");
-  const stepEls: { row: HTMLElement; icon: HTMLElement; label: HTMLElement }[] = [];
+  const stepEls: { row: HTMLElement; icon: HTMLElement; label: HTMLElement }[] =
+    [];
 
   const allSteps = [...STEPS, makeChatSiteStep(targetHost)];
   for (const step of allSteps) {
     const row = el(doc, "div", "llm-webchat-preload-step");
     row.dataset.step = step.key;
     row.style.opacity = "0";
-    const icon = el(doc, "span", "llm-webchat-preload-icon", { textContent: "\u25CF" }); // ●
-    const label = el(doc, "span", "llm-webchat-preload-label", { textContent: step.label });
+    const icon = el(doc, "span", "llm-webchat-preload-icon", {
+      textContent: "\u25CF",
+    }); // ●
+    const label = el(doc, "span", "llm-webchat-preload-label", {
+      textContent: step.label,
+    });
     row.append(icon, label);
     stepsContainer.appendChild(row);
     stepEls.push({ row, icon, label });
@@ -190,7 +266,7 @@ export async function showWebChatPreloadScreen(
         // Mark step as failed
         ui.icon.className = "llm-webchat-preload-icon is-fail";
         ui.icon.textContent = "\u2717"; // ✗
-        errorMsg.textContent = step.failHint;
+        errorMsg.textContent = resolveFailHint(step);
         errorEl.style.display = "";
         return false;
       }
@@ -210,11 +286,17 @@ export async function showWebChatPreloadScreen(
           retryBtn.removeEventListener("click", onClick);
           if (abortPoll !== null) clearInterval(abortPoll);
         };
-        const onClick = () => { cleanup(); resolve(); };
+        const onClick = () => {
+          cleanup();
+          resolve();
+        };
         retryBtn.addEventListener("click", onClick);
         if (signal) {
           abortPoll = setInterval(() => {
-            if (signal.aborted) { cleanup(); resolve(); }
+            if (signal.aborted) {
+              cleanup();
+              resolve();
+            }
           }, 200);
         }
       });

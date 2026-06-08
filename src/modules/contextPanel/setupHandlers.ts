@@ -72,6 +72,7 @@ import {
   setPromptMenuTarget,
   chatHistory,
   loadedConversationKeys,
+  webChatIsolatedConversationKeys,
   currentRequestId,
   activeConversationModeByLibrary,
   activeGlobalConversationByLibrary,
@@ -2172,6 +2173,7 @@ export function setupHandlers(
     // Don't persist the edit-mode text as a draft; the real draft was saved in
     // inlineEditSavedDraft when edit mode was entered.
     if (!item || !inputBox || inlineEditTarget) return;
+    if (isWebChatModeActive()) return;
     setDraftInputForConversation(getConversationKey(item), inputBox.value);
   };
   const restoreDraftInputForCurrentConversation = () => {
@@ -2180,6 +2182,10 @@ export function setupHandlers(
     // in inlineEditSavedDraft when edit mode was entered and will be restored by
     // inlineEditCleanup when the edit session ends.
     if (inlineEditTarget) return;
+    if (isWebChatModeActive()) {
+      inputBox.value = "";
+      return;
+    }
     inputBox.value = draftInputCache.get(getConversationKey(item)) || "";
   };
   const clearDraftInputState = (itemId: number) => {
@@ -4535,11 +4541,7 @@ export function setupHandlers(
 
           // [webchat] Entering webchat mode → fresh session, then apply webchat UI AFTER re-render
           if (entry.authMode === "webchat" && !wasWebChat) {
-            markNextWebChatSendAsNewChat();
-            primeFreshWebChatPaperChipState();
-            const key = getConversationKey(item);
-            chatHistory.set(key, []);
-            loadedConversationKeys.add(key);
+            initializeWebChatConversationForCurrentItem();
             refreshChatPreservingScroll();
             // Clear cached images so stale screenshots don't auto-attach to ChatGPT
             if (item) {
@@ -4973,6 +4975,17 @@ export function setupHandlers(
     webchatPdfUploadedInCurrentConversation = false;
   };
 
+  const initializeWebChatConversationForCurrentItem = () => {
+    if (!item) return;
+    const key = getConversationKey(item);
+    webChatIsolatedConversationKeys.add(key);
+    chatHistory.set(key, []);
+    loadedConversationKeys.add(key);
+    markNextWebChatSendAsNewChat();
+    primeFreshWebChatPaperChipState();
+    if (inputBox && !inlineEditTarget) inputBox.value = "";
+  };
+
   // Expose webchat intent clearing via hooks so standalone can call it
   // when loading a conversation from its own sidebar/popup.
   if (hooks) {
@@ -5348,6 +5361,7 @@ export function setupHandlers(
     closeHistoryMenu,
     getConversationKey,
     setConversationHistory: (conversationKey, messages) => {
+      webChatIsolatedConversationKeys.add(conversationKey);
       chatHistory.set(conversationKey, messages);
       loadedConversationKeys.add(conversationKey);
     },
@@ -5564,9 +5578,8 @@ export function setupHandlers(
   if (isNoteSession()) {
     void refreshGlobalHistoryHeader();
   } else if (isWebChatMode()) {
-    void switchPaperConversation().catch((err) => {
-      ztoolkit.log("LLM: Failed to restore webchat paper session", err);
-    });
+    initializeWebChatConversationForCurrentItem();
+    refreshChatPreservingScroll();
   } else if (isPaperMode()) {
     // In the standalone window, mountChatPanel's own async IIFE handles
     // conversation loading.  The parameter-less auto-fire would race with it
@@ -6984,6 +6997,7 @@ export function setupHandlers(
         // key, so deleting persisted conversation rows here would erase the
         // user's regular paper chat.
         const key = getConversationKey(item);
+        webChatIsolatedConversationKeys.delete(key);
         chatHistory.delete(key);
         loadedConversationKeys.delete(key);
         void (async () => {
