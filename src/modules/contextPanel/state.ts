@@ -23,6 +23,7 @@ import { TTLMap } from "./contexts/ttlMap";
 export const chatHistory = new Map<number, Message[]>();
 export const loadedConversationKeys = new Set<number>();
 export const loadingConversationTasks = new Map<number, Promise<void>>();
+export const webChatIsolatedConversationKeys = new Set<number>();
 export const selectedModelCache = new Map<number, string>();
 export const selectedReasoningCache = new Map<
   number,

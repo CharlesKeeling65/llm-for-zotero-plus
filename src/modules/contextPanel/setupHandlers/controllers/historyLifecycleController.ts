@@ -22,6 +22,8 @@ import {
 import type { Message } from "../../types";
 import {
   chatHistory,
+  loadedConversationKeys,
+  webChatIsolatedConversationKeys,
   activeConversationModeByLibrary,
   activeGlobalConversationByLibrary,
   activePaperConversationByPaper,
@@ -2295,6 +2297,15 @@ export function createHistoryLifecycleController(
     syncConversationIdentity();
     refreshAutoLoadedPaperContextForCurrentItem();
     void renderShortcuts(body, item as Zotero.Item, resolveShortcutMode(item));
+    if (isWebChatMode()) {
+      webChatIsolatedConversationKeys.add(resolvedConversationKey);
+      chatHistory.set(resolvedConversationKey, []);
+      loadedConversationKeys.add(resolvedConversationKey);
+      markNextWebChatSendAsNewChat();
+      primeFreshWebChatPaperChipState();
+    } else {
+      await ensureConversationLoaded(item as Zotero.Item);
+    }
     if (system === "claude_code") {
       rememberClaudeConversationSelection({
         conversationKey: resolvedConversationKey,
@@ -2328,7 +2339,6 @@ export function createHistoryLifecycleController(
     closeExportMenu();
     closeHistoryNewMenu();
     closeHistoryMenu();
-    await ensureConversationLoaded(item as Zotero.Item);
     invalidateHistorySearchDocument(getConversationKey(item as Zotero.Item));
     restoreDraftInputForCurrentConversation();
     refreshChatPreservingScroll();
@@ -3391,7 +3401,9 @@ export function createHistoryLifecycleController(
           }
         })();
         const key = getConversationKey(item);
+        webChatIsolatedConversationKeys.add(key);
         chatHistory.set(key, []);
+        loadedConversationKeys.add(key);
         refreshChatPreservingScroll();
         if (status)
           setStatus(status, t("New chat — send a message to start"), "ready");
@@ -3453,7 +3465,7 @@ export function createHistoryLifecycleController(
     modeChipBtn.addEventListener("click", (e: Event) => {
       e.preventDefault();
       e.stopPropagation();
-      if (!item || isNoteSession()) return;
+      if (!item || isNoteSession() || isWebChatMode()) return;
       if (isGlobalMode()) {
         void switchPaperConversation();
         return;

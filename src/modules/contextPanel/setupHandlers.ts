@@ -72,6 +72,7 @@ import {
   setPromptMenuTarget,
   chatHistory,
   loadedConversationKeys,
+  webChatIsolatedConversationKeys,
   currentRequestId,
   activeConversationModeByLibrary,
   activeGlobalConversationByLibrary,
@@ -2172,6 +2173,7 @@ export function setupHandlers(
     // Don't persist the edit-mode text as a draft; the real draft was saved in
     // inlineEditSavedDraft when edit mode was entered.
     if (!item || !inputBox || inlineEditTarget) return;
+    if (isWebChatModeActive()) return;
     setDraftInputForConversation(getConversationKey(item), inputBox.value);
   };
   const restoreDraftInputForCurrentConversation = () => {
@@ -2180,6 +2182,10 @@ export function setupHandlers(
     // in inlineEditSavedDraft when edit mode was entered and will be restored by
     // inlineEditCleanup when the edit session ends.
     if (inlineEditTarget) return;
+    if (isWebChatModeActive()) {
+      inputBox.value = "";
+      return;
+    }
     inputBox.value = draftInputCache.get(getConversationKey(item)) || "";
   };
   const clearDraftInputState = (itemId: number) => {
@@ -4535,8 +4541,6 @@ export function setupHandlers(
 
           // [webchat] Entering webchat mode → fresh session, then apply webchat UI AFTER re-render
           if (entry.authMode === "webchat" && !wasWebChat) {
-            markNextWebChatSendAsNewChat();
-            primeFreshWebChatPaperChipState();
             // Clear cached images so stale screenshots don't auto-attach to ChatGPT
             if (item) {
               selectedImageCache.delete(item.id);
@@ -4557,11 +4561,10 @@ export function setupHandlers(
             // Apply webchat UI immediately so model button is disabled during preload
             applyWebChatModeUI();
             void (async () => {
-              if (isGlobalMode()) {
-                await createAndSwitchGlobalConversation();
-              } else {
-                await createAndSwitchPaperConversation();
-              }
+              await createAndSwitchPaperConversation();
+              if (!isWebChatMode()) return;
+              initializeWebChatConversationForCurrentItem();
+              refreshChatPreservingScroll();
 
               // Show preloading screen to verify connectivity before enabling webchat
               const chatShellEl = body.querySelector(
@@ -4973,6 +4976,17 @@ export function setupHandlers(
     webchatPdfUploadedInCurrentConversation = false;
   };
 
+  const initializeWebChatConversationForCurrentItem = () => {
+    if (!item) return;
+    const key = getConversationKey(item);
+    webChatIsolatedConversationKeys.add(key);
+    chatHistory.set(key, []);
+    loadedConversationKeys.add(key);
+    markNextWebChatSendAsNewChat();
+    primeFreshWebChatPaperChipState();
+    if (inputBox && !inlineEditTarget) inputBox.value = "";
+  };
+
   // Expose webchat intent clearing via hooks so standalone can call it
   // when loading a conversation from its own sidebar/popup.
   if (hooks) {
@@ -5348,7 +5362,9 @@ export function setupHandlers(
     closeHistoryMenu,
     getConversationKey,
     setConversationHistory: (conversationKey, messages) => {
+      webChatIsolatedConversationKeys.add(conversationKey);
       chatHistory.set(conversationKey, messages);
+      loadedConversationKeys.add(conversationKey);
     },
     refreshChatPreservingScroll,
     isWebChatMode,
@@ -5429,6 +5445,9 @@ export function setupHandlers(
           ),
         );
         modeChipBtn.title = webchatChipTitle;
+        modeChipBtn.disabled = true;
+        modeChipBtn.setAttribute("aria-disabled", "true");
+        modeChipBtn.dataset.webchatStatic = "true";
         modeChipBtn.style.cursor = "default";
         startWebChatConnectionCheck(dot);
       } else {
@@ -5443,6 +5462,9 @@ export function setupHandlers(
             : "Switch to library chat";
         }
         stopWebChatConnectionCheck();
+        modeChipBtn.disabled = false;
+        modeChipBtn.removeAttribute("aria-disabled");
+        delete modeChipBtn.dataset.webchatStatic;
         modeChipBtn.style.cursor = "";
       }
     }
@@ -5556,6 +5578,9 @@ export function setupHandlers(
   restoreDraftInputForCurrentConversation();
   if (isNoteSession()) {
     void refreshGlobalHistoryHeader();
+  } else if (isWebChatMode()) {
+    initializeWebChatConversationForCurrentItem();
+    refreshChatPreservingScroll();
   } else if (isPaperMode()) {
     // In the standalone window, mountChatPanel's own async IIFE handles
     // conversation loading.  The parameter-less auto-fire would race with it
@@ -6969,9 +6994,26 @@ export function setupHandlers(
         updateModelButton();
         updateReasoningButton();
         applyWebChatModeUI();
-        // Clear webchat conversation (DB + in-memory) so history doesn't
-        // persist into normal mode and the panel is ready for a fresh start.
-        void clearCurrentConversation();
+        // Drop only transient WebChat state. WebChat shares the normal paper
+        // key, so deleting persisted conversation rows here would erase the
+        // user's regular paper chat.
+        const key = getConversationKey(item);
+        webChatIsolatedConversationKeys.delete(key);
+        chatHistory.delete(key);
+        loadedConversationKeys.delete(key);
+        void (async () => {
+          try {
+            await ensureConversationLoaded(item as Zotero.Item);
+          } catch (err) {
+            ztoolkit.log(
+              "LLM: Failed to reload conversation after webchat exit",
+              err,
+            );
+          }
+          restoreDraftInputForCurrentConversation();
+          refreshChatPreservingScroll();
+          resetComposePreviewUI();
+        })();
         return;
       }
 

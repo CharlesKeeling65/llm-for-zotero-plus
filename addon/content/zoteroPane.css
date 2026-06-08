@@ -559,6 +559,17 @@
   outline-offset: 2px;
 }
 
+.llm-mode-chip[data-webchat-static="true"],
+.llm-mode-chip:disabled[data-webchat-static="true"] {
+  cursor: default;
+  opacity: 1;
+}
+
+[data-standalone="true"] .llm-mode-chip[data-webchat-static="true"]:hover {
+  background: var(--fill-quinary);
+  border-color: var(--stroke-secondary);
+}
+
 .llm-claude-system-toggle,
 .llm-standalone-claude-toggle {
   appearance: none;

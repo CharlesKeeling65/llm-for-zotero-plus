@@ -53,7 +53,11 @@ import {
   ATTACHMENT_GC_MIN_AGE_MS,
   collectAndDeleteUnreferencedBlobs,
 } from "../../utils/attachmentRefStore";
-import { chatHistory, loadedConversationKeys } from "./state";
+import {
+  chatHistory,
+  loadedConversationKeys,
+  webChatIsolatedConversationKeys,
+} from "./state";
 import { loadAllConversationHistory } from "./historyLoader";
 import {
   formatGlobalHistoryTimestamp,
@@ -1475,6 +1479,8 @@ export function openStandaloneChat(options?: {
                     /* default */
                   }
 
+                  webChatIsolatedConversationKeys.add(key);
+                  loadedConversationKeys.add(key);
                   chatHistory.set(key, [
                     {
                       role: "assistant" as const,
@@ -1523,6 +1529,8 @@ export function openStandaloneChat(options?: {
                   }
 
                   chatHistory.set(key, messages);
+                  loadedConversationKeys.add(key);
+                  webChatIsolatedConversationKeys.add(key);
                   refreshChat(contentArea, activeItem);
                 } catch (err) {
                   ztoolkit.log(
@@ -1539,6 +1547,8 @@ export function openStandaloneChat(options?: {
                       modelProviderLabel: "WebChat",
                     },
                   ]);
+                  loadedConversationKeys.add(key);
+                  webChatIsolatedConversationKeys.add(key);
                   refreshChat(contentArea, activeItem);
                 }
               })();

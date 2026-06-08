@@ -112,6 +112,7 @@ import {
   chatHistory,
   loadedConversationKeys,
   loadingConversationTasks,
+  webChatIsolatedConversationKeys,
   selectedModelCache,
   selectedReasoningCache,
   selectedReasoningProviderCache,
@@ -294,6 +295,32 @@ function getAbortControllerCtor(): new () => AbortController {
 }
 
 const blockedConversationLoadKeys = new Set<number>();
+
+function isEffectiveWebChatRequest(item: Zotero.Item): boolean {
+  try {
+    const requestConfig = resolveEffectiveRequestConfig({ item });
+    return (
+      requestConfig.authMode === "webchat" ||
+      requestConfig.providerProtocol === "web_sync"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isolateWebChatConversationKey(
+  conversationKey: number,
+  resetHistory: boolean,
+): void {
+  const key = Math.floor(Number(conversationKey || 0));
+  if (!Number.isFinite(key) || key <= 0) return;
+  webChatIsolatedConversationKeys.add(key);
+  if (resetHistory || !chatHistory.has(key)) {
+    chatHistory.set(key, []);
+  }
+  blockedConversationLoadKeys.delete(key);
+  loadedConversationKeys.add(key);
+}
 
 function normalizeConversationScopeInt(value: unknown): number | null {
   const parsed = Number(value);
@@ -1574,6 +1601,17 @@ export async function ensureConversationLoaded(
 ): Promise<void> {
   const conversationKey = getConversationKey(item);
   const conversationSystem = resolveConversationSystemForItem(item);
+  if (isEffectiveWebChatRequest(item)) {
+    isolateWebChatConversationKey(
+      conversationKey,
+      !webChatIsolatedConversationKeys.has(conversationKey),
+    );
+    return;
+  }
+  if (webChatIsolatedConversationKeys.delete(conversationKey)) {
+    chatHistory.delete(conversationKey);
+    loadedConversationKeys.delete(conversationKey);
+  }
 
   if (loadedConversationKeys.has(conversationKey)) return;
   if (
@@ -1612,6 +1650,14 @@ export async function ensureConversationLoaded(
         PERSISTED_HISTORY_LIMIT,
         conversationSystem,
       );
+      if (
+        webChatIsolatedConversationKeys.has(conversationKey) ||
+        isEffectiveWebChatRequest(item)
+      ) {
+        isolateWebChatConversationKey(conversationKey, false);
+        shouldMarkLoaded = true;
+        return;
+      }
       if (!storedMessagesMatchActivePaper(item, storedMessages)) {
         ztoolkit.log(
           `LLM: Refused to render conversation ${conversationKey} because stored paper contexts do not include the active paper.`,
@@ -6860,6 +6906,8 @@ export async function sendQuestion(
     reasoning,
     advanced,
   });
+  const shouldPersistTurn =
+    effectiveRequestConfig.providerProtocol !== "web_sync";
   const isCodexNativeTurn =
     effectiveConversationSystem === "codex" &&
     effectiveRequestConfig.authMode === "codex_app_server";
@@ -7128,32 +7176,34 @@ export async function sendQuestion(
   } else {
     history.push(userMessage);
   }
-  void persistConversationMessage(
-    conversationKey,
-    {
-      role: "user",
-      text: userMessage.text,
-      timestamp: userMessage.timestamp,
-      runMode: userMessage.runMode,
-      agentRunId: userMessage.agentRunId,
-      selectedText: userMessage.selectedText,
-      selectedTexts: userMessage.selectedTexts,
-      selectedTextSources: userMessage.selectedTextSources,
-      selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
-      paperContexts: userMessage.paperContexts,
-      fullTextPaperContexts: userMessage.fullTextPaperContexts,
-      citationPaperContexts: userMessage.citationPaperContexts,
-      selectedCollectionContexts: userMessage.selectedCollectionContexts,
-      selectedTagContexts: userMessage.selectedTagContexts,
-      screenshotImages: userMessage.screenshotImages,
-      attachments: userMessage.attachments,
-      modelAttachments: userMessage.modelAttachments,
-      modelName: userMessage.modelName,
-      modelEntryId: userMessage.modelEntryId,
-      modelProviderLabel: userMessage.modelProviderLabel,
-    },
-    effectiveStorageSystem,
-  );
+  if (shouldPersistTurn) {
+    void persistConversationMessage(
+      conversationKey,
+      {
+        role: "user",
+        text: userMessage.text,
+        timestamp: userMessage.timestamp,
+        runMode: userMessage.runMode,
+        agentRunId: userMessage.agentRunId,
+        selectedText: userMessage.selectedText,
+        selectedTexts: userMessage.selectedTexts,
+        selectedTextSources: userMessage.selectedTextSources,
+        selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
+        paperContexts: userMessage.paperContexts,
+        fullTextPaperContexts: userMessage.fullTextPaperContexts,
+        citationPaperContexts: userMessage.citationPaperContexts,
+        selectedCollectionContexts: userMessage.selectedCollectionContexts,
+        selectedTagContexts: userMessage.selectedTagContexts,
+        screenshotImages: userMessage.screenshotImages,
+        attachments: userMessage.attachments,
+        modelAttachments: userMessage.modelAttachments,
+        modelName: userMessage.modelName,
+        modelEntryId: userMessage.modelEntryId,
+        modelProviderLabel: userMessage.modelProviderLabel,
+      },
+      effectiveStorageSystem,
+    );
+  }
 
   const assistantMessage: Message = {
     ...optimisticAssistantMessage,
@@ -7190,6 +7240,7 @@ export async function sendQuestion(
   const persistAssistantOnce = async () => {
     if (assistantPersisted) return;
     assistantPersisted = true;
+    if (!shouldPersistTurn) return;
     await persistConversationMessage(
       conversationKey,
       {
