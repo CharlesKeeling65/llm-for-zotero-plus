@@ -433,9 +433,6 @@ export function attachFloatingMenuInteractionController(
       for (const shortcutMenuEl of shortcutMenus) {
         if (!isShortcutMenuVisible(shortcutMenuEl)) continue;
         if (target && shortcutMenuEl.contains(target)) continue;
-        const panelRoot = shortcutMenuEl.closest("#llm-main");
-        const shortcutsEl = panelRoot?.querySelector("#llm-shortcuts");
-        if (target && shortcutsEl?.contains(target)) continue;
         closeShortcutMenu(shortcutMenuEl);
       }
 

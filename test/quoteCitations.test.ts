@@ -4,7 +4,9 @@ import {
   buildQuoteCitation,
   buildSelectedTextQuoteCitations,
   extractQuoteCitationsFromToolContent,
+  findUnresolvedQuoteCitationPlaceholderIds,
   replaceQuoteCitationPlaceholdersForMarkdown,
+  sanitizeInvalidStructuredSourceMarkers,
 } from "../src/modules/contextPanel/quoteCitations";
 import { renderMarkdown } from "../src/utils/markdown";
 
@@ -87,20 +89,57 @@ describe("quoteCitations", function () {
     assert.include(html, "<p>Second source paragraph.</p>");
   });
 
-  it("can suppress unresolved placeholders on external text surfaces", function () {
+  it("omits unresolved placeholders on external text surfaces", function () {
     const preserved = replaceQuoteCitationPlaceholdersForMarkdown(
       "Evidence: [[quote:Q_missing]]",
       [],
     );
-    const suppressed = replaceQuoteCitationPlaceholdersForMarkdown(
+    const omitted = replaceQuoteCitationPlaceholdersForMarkdown(
+      "Evidence: [[quote:Q_missing]]",
+      [],
+      { unresolved: "omit" },
+    );
+    const legacyOmitted = replaceQuoteCitationPlaceholdersForMarkdown(
       "Evidence: [[quote:Q_missing]]",
       [],
       { unresolved: "unavailable" },
     );
 
     assert.include(preserved, "[[quote:Q_missing]]");
-    assert.equal(suppressed, "Evidence: [quote unavailable]");
-    assert.notInclude(suppressed, "[[quote:");
+    assert.equal(omitted, "Evidence: ");
+    assert.equal(legacyOmitted, "Evidence: ");
+    assert.notInclude(omitted, "[[quote:");
+    assert.notInclude(omitted, "[quote unavailable]");
+  });
+
+  it("detects unresolved quote placeholders before omission", function () {
+    const citation = buildQuoteCitation({
+      quoteText: "Resolved quote.",
+      citationLabel: "(Lee, 2025)",
+      contextItemId: 22,
+    });
+    assert.isDefined(citation);
+
+    const unresolved = findUnresolvedQuoteCitationPlaceholderIds(
+      `[[quote:${citation!.id}]] [[quote:Q_missing]] [[quote:Q_missing]]`,
+      [citation!],
+    );
+
+    assert.deepEqual(unresolved, ["Q_missing"]);
+  });
+
+  it("repairs leaked source metadata markers into plain quote citations", function () {
+    const leaked =
+      '    "our model predicted that memory engrams are highly dynamic, with neurons being removed from and added to the engram over the course of memory consolidation" [[source=(Tomé, 2024), section=Dynamic and selective engrams emerge with memory consolidation, chunk=8]]\n\n' +
+      "Critically, they show that dynamic engrams explain behavior.";
+
+    const sanitized = sanitizeInvalidStructuredSourceMarkers(leaked);
+
+    assert.include(sanitized, "> our model predicted");
+    assert.include(sanitized, "(Tomé, 2024)");
+    assert.notInclude(sanitized, "[[source=");
+    assert.notInclude(sanitized, "section=");
+    assert.notInclude(sanitized, "chunk=");
   });
 
   it("extracts quote citations from nested tool content and JSON text payloads", function () {

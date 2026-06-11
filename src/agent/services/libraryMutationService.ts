@@ -1,4 +1,4 @@
-import type { PaperContextRef } from "../../shared/types";
+import type { GeneratedChatImage, PaperContextRef } from "../../shared/types";
 import type { AgentToolContext } from "../types";
 import type {
   BatchMoveAssignment,
@@ -80,6 +80,7 @@ export type SaveNoteOperation = {
   targetItemId?: number;
   modelName?: string;
   appendToTrackedNote?: boolean;
+  generatedImages?: GeneratedChatImage[];
 };
 
 export type TrashItemsOperation = {
@@ -501,6 +502,7 @@ export class LibraryMutationService {
           modelName: operation.modelName || context.modelName,
           target: operation.target,
           appendToTrackedNote: operation.appendToTrackedNote,
+          generatedImages: operation.generatedImages,
         });
         return {
           result: {

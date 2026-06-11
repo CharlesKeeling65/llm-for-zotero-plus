@@ -657,13 +657,6 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   filePreview.append(filePreviewHeader, filePreviewExpanded);
   contextPreviews.appendChild(filePreview);
 
-  inputSection.appendChild(contextPreviews);
-
-  const composeArea = createElement(doc, "div", "llm-compose-area", {
-    id: "llm-compose-area",
-  });
-  inputSection.appendChild(composeArea);
-
   const paperPicker = createElement(doc, "div", "llm-paper-picker", {
     id: "llm-paper-picker",
   });
@@ -673,7 +666,14 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   });
   paperPickerList.setAttribute("role", "listbox");
   paperPicker.appendChild(paperPickerList);
-  composeArea.appendChild(paperPicker);
+  inputSection.appendChild(paperPicker);
+
+  inputSection.appendChild(contextPreviews);
+
+  const composeArea = createElement(doc, "div", "llm-compose-area", {
+    id: "llm-compose-area",
+  });
+  inputSection.appendChild(composeArea);
 
   const actionPicker = createElement(doc, "div", "llm-action-picker", {
     id: "llm-action-picker",

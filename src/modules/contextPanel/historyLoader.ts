@@ -1,9 +1,4 @@
-import {
-  ensurePaperV1Conversation,
-  listGlobalConversations,
-  listPaperConversations,
-  listAllPaperConversationsByLibrary,
-} from "../../utils/chatStore";
+import { conversationRepository } from "../../core/conversations/repository";
 import { normalizeHistoryTitle } from "./setupHandlers/controllers/conversationHistoryController";
 
 export type ConversationHistoryScopeMode = "open" | "paper";
@@ -17,6 +12,7 @@ export type ConversationHistoryScopeParams = {
 
 export type ConversationHistoryScopeEntry = {
   mode: ConversationHistoryScopeMode;
+  conversationID: string;
   conversationKey: number;
   title: string;
   createdAt: number;
@@ -36,6 +32,12 @@ function normalizeTitle(raw: unknown, isDraft: boolean): string {
   return normalizeHistoryTitle(raw) || (isDraft ? "New chat" : "Untitled chat");
 }
 
+function isDraftSummary(summary: { title?: unknown; userTurnCount?: unknown }): boolean {
+  const userTurnCount = Number(summary.userTurnCount || 0);
+  const title = normalizeHistoryTitle(summary.title);
+  return userTurnCount <= 0 && !title;
+}
+
 export async function loadConversationHistoryScope(
   params: ConversationHistoryScopeParams,
 ): Promise<ConversationHistoryScopeEntry[]> {
@@ -47,18 +49,21 @@ export async function loadConversationHistoryScope(
   const normalizedLimit = normalizeScopeLimit(params.limit);
 
   if (params.mode === "open") {
-    const summaries = await listGlobalConversations(
-      normalizedLibraryID,
-      normalizedLimit,
-      true,
-    );
+    const summaries = await conversationRepository.listCatalogEntries({
+      system: "upstream",
+      kind: "global",
+      libraryID: normalizedLibraryID,
+      limit: normalizedLimit,
+      includeEmpty: true,
+    });
     return summaries.map((summary) => {
       const lastActivityAt = Number(summary.lastActivityAt || summary.createdAt || 0);
       const createdAt = Number(summary.createdAt || lastActivityAt || 0);
       const userTurnCount = Number(summary.userTurnCount || 0);
-      const isDraft = userTurnCount <= 0;
+      const isDraft = isDraftSummary(summary);
       return {
         mode: "open" as const,
+        conversationID: summary.conversationID,
         conversationKey: summary.conversationKey,
         title: normalizeTitle(summary.title, isDraft),
         createdAt: Number.isFinite(createdAt) ? Math.floor(createdAt) : 0,
@@ -79,20 +84,30 @@ export async function loadConversationHistoryScope(
       : 0;
   if (normalizedPaperItemID <= 0) return [];
 
-  await ensurePaperV1Conversation(normalizedLibraryID, normalizedPaperItemID);
-  const summaries = await listPaperConversations(
-    normalizedLibraryID,
-    normalizedPaperItemID,
-    normalizedLimit,
-    true,
-  );
+  await conversationRepository.ensureCatalogEntry({
+    system: "upstream",
+    kind: "paper",
+    libraryID: normalizedLibraryID,
+    paperItemID: normalizedPaperItemID,
+  });
+  const summaries = await conversationRepository.listCatalogEntries({
+    system: "upstream",
+    kind: "paper",
+    libraryID: normalizedLibraryID,
+    paperItemID: normalizedPaperItemID,
+    limit: normalizedLimit,
+    includeEmpty: true,
+  });
   return summaries.map((summary) => {
     const lastActivityAt = Number(summary.lastActivityAt || summary.createdAt || 0);
     const createdAt = Number(summary.createdAt || lastActivityAt || 0);
     const userTurnCount = Number(summary.userTurnCount || 0);
-    const isDraft = userTurnCount <= 0;
+    const sessionVersion = Number(summary.sessionVersion || 0);
+    const paperItemID = Number(summary.paperItemID || 0);
+    const isDraft = isDraftSummary(summary);
     return {
       mode: "paper" as const,
+      conversationID: summary.conversationID,
       conversationKey: summary.conversationKey,
       title: normalizeTitle(summary.title, isDraft),
       createdAt: Number.isFinite(createdAt) ? Math.floor(createdAt) : 0,
@@ -104,12 +119,12 @@ export async function loadConversationHistoryScope(
         : 0,
       isDraft,
       sessionVersion:
-        Number.isFinite(summary.sessionVersion) && summary.sessionVersion > 0
-          ? Math.floor(summary.sessionVersion)
+        Number.isFinite(sessionVersion) && sessionVersion > 0
+          ? Math.floor(sessionVersion)
           : undefined,
       paperItemID:
-        Number.isFinite(summary.paperItemID) && summary.paperItemID > 0
-          ? Math.floor(summary.paperItemID)
+        Number.isFinite(paperItemID) && paperItemID > 0
+          ? Math.floor(paperItemID)
           : undefined,
     };
   });
@@ -121,29 +136,33 @@ export async function loadConversationHistoryScope(
  */
 export async function loadAllConversationHistory(params: {
   libraryID: number;
-  limit?: number;
+  limit?: number | null;
 }): Promise<ConversationHistoryScopeEntry[]> {
   const normalizedLibraryID = Number.isFinite(params.libraryID) && params.libraryID > 0
     ? Math.floor(params.libraryID)
     : 0;
   if (normalizedLibraryID <= 0) return [];
 
-  const limit = params.limit ?? 100;
+  const limit = params.limit === null ? null : params.limit ?? 100;
 
-  const [paperSummaries, globalSummaries] = await Promise.all([
-    listAllPaperConversationsByLibrary(normalizedLibraryID, limit),
-    listGlobalConversations(normalizedLibraryID, limit, false),
-  ]);
+  const summaries = await conversationRepository.listAllCatalogEntries({
+    system: "upstream",
+    libraryID: normalizedLibraryID,
+    limit,
+  });
 
   const entries: ConversationHistoryScopeEntry[] = [];
 
-  for (const summary of paperSummaries) {
+  for (const summary of summaries.filter((entry) => entry.kind === "paper")) {
     const lastActivityAt = Number(summary.lastActivityAt || summary.createdAt || 0);
     const createdAt = Number(summary.createdAt || lastActivityAt || 0);
     const userTurnCount = Number(summary.userTurnCount || 0);
-    const isDraft = userTurnCount <= 0;
+    const sessionVersion = Number(summary.sessionVersion || 0);
+    const paperItemID = Number(summary.paperItemID || 0);
+    const isDraft = isDraftSummary(summary);
     entries.push({
       mode: "paper",
+      conversationID: summary.conversationID,
       conversationKey: summary.conversationKey,
       title: normalizeTitle(summary.title, isDraft),
       createdAt: Number.isFinite(createdAt) ? Math.floor(createdAt) : 0,
@@ -151,23 +170,24 @@ export async function loadAllConversationHistory(params: {
       userTurnCount: Number.isFinite(userTurnCount) ? Math.max(0, Math.floor(userTurnCount)) : 0,
       isDraft,
       sessionVersion:
-        Number.isFinite(summary.sessionVersion) && summary.sessionVersion > 0
-          ? Math.floor(summary.sessionVersion)
+        Number.isFinite(sessionVersion) && sessionVersion > 0
+          ? Math.floor(sessionVersion)
           : undefined,
       paperItemID:
-        Number.isFinite(summary.paperItemID) && summary.paperItemID > 0
-          ? Math.floor(summary.paperItemID)
+        Number.isFinite(paperItemID) && paperItemID > 0
+          ? Math.floor(paperItemID)
           : undefined,
     });
   }
 
-  for (const summary of globalSummaries) {
+  for (const summary of summaries.filter((entry) => entry.kind === "global")) {
     const lastActivityAt = Number(summary.lastActivityAt || summary.createdAt || 0);
     const createdAt = Number(summary.createdAt || lastActivityAt || 0);
     const userTurnCount = Number(summary.userTurnCount || 0);
-    const isDraft = userTurnCount <= 0;
+    const isDraft = isDraftSummary(summary);
     entries.push({
       mode: "open",
+      conversationID: summary.conversationID,
       conversationKey: summary.conversationKey,
       title: normalizeTitle(summary.title, isDraft),
       createdAt: Number.isFinite(createdAt) ? Math.floor(createdAt) : 0,

@@ -1,4 +1,5 @@
 import { assert } from "chai";
+import { buildConversationID } from "../src/shared/conversationRegistry";
 import { reconcileConversationCatalogs } from "../src/utils/chatStore";
 
 describe("chatStore conversation catalog reconciliation", function () {
@@ -75,11 +76,35 @@ describe("chatStore conversation catalog reconciliation", function () {
     assert.lengthOf(inserts, 2);
     assert.deepInclude(inserts, {
       sql: inserts[0]!.sql,
-      params: [2_000_000_123, 1, 1000, "Recovered global title"],
+      params: [
+        buildConversationID({
+          conversationKey: 2_000_000_123,
+          system: "upstream",
+          kind: "global",
+          libraryID: 1,
+        }),
+        2_000_000_123,
+        1,
+        1000,
+        "Recovered global title",
+      ],
     });
     assert.deepInclude(inserts, {
       sql: inserts[1]!.sql,
-      params: [321, 5, 321, 2000, "Recovered paper title"],
+      params: [
+        buildConversationID({
+          conversationKey: 321,
+          system: "upstream",
+          kind: "paper",
+          libraryID: 5,
+          paperItemID: 321,
+        }),
+        321,
+        5,
+        321,
+        2000,
+        "Recovered paper title",
+      ],
     });
   });
 });

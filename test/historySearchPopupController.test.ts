@@ -1,10 +1,16 @@
 import { assert } from "chai";
-import type { ConversationHistoryEntry } from "../src/modules/contextPanel/setupHandlers/controllers/conversationHistoryController";
+import {
+  getHistoryEntryLabelType,
+  type ConversationHistoryEntry,
+} from "../src/modules/contextPanel/setupHandlers/controllers/conversationHistoryController";
 import type { HistorySearchResult } from "../src/modules/contextPanel/setupHandlers/controllers/historySearchController";
 import {
+  filterHistorySearchPopupVisibleEntries,
+  HISTORY_SEARCH_POPUP_DELETE_CLASS,
   HISTORY_SEARCH_POPUP_ITEM_TAG,
   mapHistorySearchPopupResults,
   resolveHistorySearchPopupThemeFromColors,
+  shouldCloseHistorySearchPopupAfterSelection,
   sortHistorySearchPopupEntries,
 } from "../src/modules/contextPanel/setupHandlers/controllers/historySearchPopupController";
 
@@ -15,6 +21,7 @@ function historyEntry(
 ): ConversationHistoryEntry {
   return {
     kind,
+    sourceState: "active",
     section: kind === "paper" ? "paper" : "open",
     sectionTitle: kind === "paper" ? "Paper" : "Library chat",
     conversationKey,
@@ -44,6 +51,19 @@ function searchResult(
 describe("historySearchPopupController helpers", function () {
   it("uses div rows instead of Gecko button rows", function () {
     assert.equal(HISTORY_SEARCH_POPUP_ITEM_TAG, "div");
+  });
+
+  it("exposes a stable delete control class for popup rows", function () {
+    assert.equal(
+      HISTORY_SEARCH_POPUP_DELETE_CLASS,
+      "llm-standalone-search-delete",
+    );
+  });
+
+  it("keeps the popup open only when selection returns false", function () {
+    assert.equal(shouldCloseHistorySearchPopupAfterSelection(false), false);
+    assert.equal(shouldCloseHistorySearchPopupAfterSelection(true), true);
+    assert.equal(shouldCloseHistorySearchPopupAfterSelection(undefined), true);
   });
 
   it("sorts empty-query popup entries newest first", function () {
@@ -79,6 +99,37 @@ describe("historySearchPopupController helpers", function () {
     );
     assert.equal(mapped.resultsByKey.get(202)?.matchCount, 3);
     assert.isFalse(mapped.resultsByKey.has(999));
+  });
+
+  it("filters pending and locally hidden popup entries", function () {
+    const visible = historyEntry(207, 700, "paper");
+    const pending = {
+      ...historyEntry(208, 800, "global"),
+      isPendingDelete: true,
+    };
+    const hidden = historyEntry(209, 900, "paper");
+
+    const filtered = filterHistorySearchPopupVisibleEntries(
+      [visible, pending, hidden],
+      new Set([hidden.conversationKey]),
+    );
+
+    assert.deepEqual(
+      filtered.map((entry) => entry.conversationKey),
+      [207],
+    );
+  });
+
+  it("uses the orphan label type for orphan paper entries", function () {
+    const orphan = {
+      ...historyEntry(204, 400, "paper"),
+      sourceState: "orphan" as const,
+      sectionTitle: "Orphan",
+    };
+
+    assert.equal(getHistoryEntryLabelType(orphan), "orphan");
+    assert.equal(getHistoryEntryLabelType(historyEntry(205, 500, "paper")), "paper");
+    assert.equal(getHistoryEntryLabelType(historyEntry(206, 600, "global")), "library");
   });
 
   it("resolves popup chip theme from rendered surface color", function () {

@@ -79,9 +79,11 @@ describe("search_literature_online tool", function () {
     });
     assert.isTrue(validated.ok);
     if (!validated.ok) return;
+    assert.equal(validated.value.workflow, "answer");
 
     const result = await tool.execute(validated.value, baseContext);
     assert.equal((result as { mode: string }).mode, "metadata");
+    assert.equal((result as { workflow: string }).workflow, "answer");
     assert.lengthOf((result as { results: unknown[] }).results, 2);
   });
 
@@ -141,6 +143,7 @@ describe("search_literature_online tool", function () {
     if (!validated.ok) return;
 
     const result = await tool.execute(validated.value, baseContext);
+    assert.equal((result as { workflow: string }).workflow, "answer");
     assert.equal((result as { mode: string }).mode, "metadata");
     assert.lengthOf((result as { results: unknown[] }).results, 2);
   });
@@ -188,9 +191,79 @@ describe("search_literature_online tool", function () {
 
     const result = await tool.execute(validated.value, baseContext);
     const results = (result as { results: Array<Record<string, unknown>> }).results;
+    assert.equal((result as { workflow: string }).workflow, "answer");
     assert.lengthOf(results, 1);
     assert.equal(results[0].title, "Related Paper");
     assert.equal(results[0].doi, "10.1000/related");
+    const reviewAction = await tool.createResultReviewAction?.(
+      validated.value,
+      {
+        callId: "call-search",
+        name: "search_literature_online",
+        ok: true,
+        content: result,
+      },
+      baseContext,
+    );
+    assert.isNull(reviewAction);
+  });
+
+  it("opens the literature review card only for review workflow", async function () {
+    (globalThis as typeof globalThis & { fetch?: typeof fetch }).fetch = (async (
+      url: string | URL | Request,
+    ) => {
+      const href = String(url);
+      if (href.includes("api.openalex.org/works?search=")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            results: [
+              {
+                id: "https://openalex.org/W456",
+                display_name: "Reviewable Paper",
+                authorships: [
+                  { author: { display_name: "Riley Example" } },
+                ],
+                publication_year: 2024,
+                cited_by_count: 8,
+                doi: "https://doi.org/10.1000/reviewable",
+                open_access: { oa_url: "https://example.com/reviewable.pdf" },
+              },
+            ],
+          }),
+        } as Response;
+      }
+      throw new Error(`Unexpected URL: ${href}`);
+    }) as typeof fetch;
+
+    const tool = createSearchLiteratureOnlineTool({
+      resolveMetadataItem: () => null,
+      getEditableArticleMetadata: () => null,
+    } as never);
+    const validated = tool.validate({
+      workflow: "review",
+      mode: "search",
+      source: "openalex",
+      query: "reviewable papers",
+    });
+    assert.isTrue(validated.ok);
+    if (!validated.ok) return;
+
+    const result = await tool.execute(validated.value, baseContext);
+    assert.equal((result as { workflow: string }).workflow, "review");
+    const reviewAction = await tool.createResultReviewAction?.(
+      validated.value,
+      {
+        callId: "call-search",
+        name: "search_literature_online",
+        ok: true,
+        content: result,
+      },
+      baseContext,
+    );
+    assert.equal(reviewAction?.toolName, "literature_search");
+    assert.equal(reviewAction?.title, "Review online literature results");
   });
 
   it("adds guidance for live paper discovery requests", function () {
@@ -207,7 +280,11 @@ describe("search_literature_online tool", function () {
     );
     assert.include(
       tool.guidance?.instruction || "",
-      "let the review card present the result",
+      "workflow:'answer'",
+    );
+    assert.include(
+      tool.guidance?.instruction || "",
+      "workflow:'review'",
     );
   });
 });

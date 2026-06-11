@@ -33,10 +33,17 @@ function getMineruAuthHeaders(apiKey: string): Record<string, string> {
   // When using the proxy, no Authorization header needed — the proxy injects it
   return apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
 }
-const POLL_INTERVAL_MS = 3000;
-const POLL_TIMEOUT_MS = 10 * 60 * 1000;
+const CLOUD_INITIAL_POLL_INTERVAL_MS = 3000;
+const CLOUD_MEDIUM_POLL_INTERVAL_MS = 15 * 1000;
+const CLOUD_LONG_ACTIVE_POLL_INTERVAL_MS = 60 * 1000;
+const CLOUD_MEDIUM_POLL_AFTER_MS = 5 * 60 * 1000;
+const CLOUD_LONG_ACTIVE_POLL_AFTER_MS = 30 * 60 * 1000;
+const CLOUD_NO_STATUS_TIMEOUT_MS = 10 * 60 * 1000;
+const CLOUD_PRE_PROCESSING_TIMEOUT_MS = 30 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 60000;
-const LOCAL_PARSE_TIMEOUT_MS = 15 * 60 * 1000;
+// Local /file_parse is synchronous and exposes no separate job status; rely on
+// explicit abort/pause rather than guessing whether an open request is stuck.
+const LOCAL_PARSE_TIMEOUT_MS = 0;
 const LOCAL_PROGRESS_INTERVAL_MS = 3000;
 
 export type MinerUExtractedFile = MinerUZipFile;
@@ -47,6 +54,36 @@ export type MinerUResult = {
 } | null;
 
 export type MinerUProgressCallback = (stage: string) => void;
+
+type MineruCloudPollPhase = "pre_processing" | "active_processing";
+
+type MineruCloudPollTimeoutReason = "no_status" | "pre_processing";
+
+type MineruCloudPollDecision =
+  | {
+      action: "continue";
+      phase: MineruCloudPollPhase;
+      pollIntervalMs: number;
+    }
+  | {
+      action: "terminal";
+      terminalState: "done" | "failed";
+      pollIntervalMs: number;
+    }
+  | {
+      action: "timeout";
+      reason: MineruCloudPollTimeoutReason;
+      phase: MineruCloudPollPhase;
+      pollIntervalMs: number;
+    };
+
+type MineruCloudPollDecisionInput = {
+  state?: string | null;
+  nowMs: number;
+  pollStartMs: number;
+  lastStatusAtMs: number | null;
+  activeStartedAtMs: number | null;
+};
 
 export class MineruRateLimitError extends Error {
   constructor(message: string) {
@@ -575,6 +612,108 @@ function truncateResponseText(text: string, maxLength = 240): string {
     : normalized;
 }
 
+function normalizeMineruCloudState(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function isMineruCloudActiveState(state: string): boolean {
+  return state === "running" || state === "converting";
+}
+
+function getMineruCloudPollInterval(params: {
+  nowMs: number;
+  pollStartMs: number;
+  activeStartedAtMs: number | null;
+}): number {
+  if (
+    params.activeStartedAtMs !== null &&
+    params.nowMs - params.activeStartedAtMs >= CLOUD_LONG_ACTIVE_POLL_AFTER_MS
+  ) {
+    return CLOUD_LONG_ACTIVE_POLL_INTERVAL_MS;
+  }
+  if (params.nowMs - params.pollStartMs >= CLOUD_MEDIUM_POLL_AFTER_MS) {
+    return CLOUD_MEDIUM_POLL_INTERVAL_MS;
+  }
+  return CLOUD_INITIAL_POLL_INTERVAL_MS;
+}
+
+function getMineruCloudPollDecision(
+  params: MineruCloudPollDecisionInput,
+): MineruCloudPollDecision {
+  const state = normalizeMineruCloudState(params.state);
+  const activeStartedAtMs =
+    params.activeStartedAtMs ??
+    (isMineruCloudActiveState(state) ? params.nowMs : null);
+  const phase: MineruCloudPollPhase =
+    activeStartedAtMs === null ? "pre_processing" : "active_processing";
+  const pollIntervalMs = getMineruCloudPollInterval({
+    nowMs: params.nowMs,
+    pollStartMs: params.pollStartMs,
+    activeStartedAtMs,
+  });
+
+  if (state === "done" || state === "failed") {
+    return { action: "terminal", terminalState: state, pollIntervalMs };
+  }
+
+  const lastStatusAtMs = params.lastStatusAtMs;
+  if (
+    lastStatusAtMs === null
+      ? params.nowMs - params.pollStartMs >= CLOUD_NO_STATUS_TIMEOUT_MS
+      : params.nowMs - lastStatusAtMs >= CLOUD_NO_STATUS_TIMEOUT_MS
+  ) {
+    return {
+      action: "timeout",
+      reason: "no_status",
+      phase,
+      pollIntervalMs,
+    };
+  }
+
+  if (
+    activeStartedAtMs === null &&
+    params.nowMs - params.pollStartMs >= CLOUD_PRE_PROCESSING_TIMEOUT_MS
+  ) {
+    return {
+      action: "timeout",
+      reason: "pre_processing",
+      phase,
+      pollIntervalMs,
+    };
+  }
+
+  return { action: "continue", phase, pollIntervalMs };
+}
+
+function buildMineruCloudProgressMessage(
+  state: string,
+  elapsedSeconds: number,
+): string {
+  const elapsed = `${elapsedSeconds}`;
+  if (state === "running") {
+    return t("Processing on server… (%ss)").replace("%s", elapsed);
+  }
+  if (state === "converting") {
+    return t("Converting on server… (%ss)").replace("%s", elapsed);
+  }
+  if (state === "waiting-file") {
+    return t("Waiting for MinerU upload to be accepted… (%ss)").replace(
+      "%s",
+      elapsed,
+    );
+  }
+  if (state === "pending") {
+    return t("Waiting for MinerU to start… (%ss)").replace("%s", elapsed);
+  }
+  return t("Waiting for MinerU status… (%ss)").replace("%s", elapsed);
+}
+
+export function getMineruCloudPollDecisionForTests(
+  params: MineruCloudPollDecisionInput,
+): MineruCloudPollDecision {
+  return getMineruCloudPollDecision(params);
+}
+
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
@@ -587,7 +726,7 @@ async function fetchWithTimeout(
     return await new Promise<Response>((resolve, reject) => {
       let settled = false;
       const cleanup = () => {
-        clearTimeout(timer);
+        if (timer !== null) clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
       };
       const finishResolve = (value: Response) => {
@@ -603,10 +742,10 @@ async function fetchWithTimeout(
         reject(error);
       };
       const onAbort = () => finishReject(new MineruCancelledError());
-      const timer = setTimeout(
-        () => finishReject(new Error(timeoutMessage)),
-        timeoutMs,
-      );
+      const timer =
+        timeoutMs > 0
+          ? setTimeout(() => finishReject(new Error(timeoutMessage)), timeoutMs)
+          : null;
 
       if (signal?.aborted) {
         finishReject(new MineruCancelledError());
@@ -621,10 +760,13 @@ async function fetchWithTimeout(
   const controller = new AbortCtrl();
   let timedOut = false;
   const onAbort = () => controller.abort();
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
+  const timer =
+    timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs)
+      : null;
   signal?.addEventListener("abort", onAbort, { once: true });
 
   try {
@@ -637,7 +779,7 @@ async function fetchWithTimeout(
     if (timedOut) throw new Error(timeoutMessage);
     throw error;
   } finally {
-    clearTimeout(timer);
+    if (timer !== null) clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
   }
 }
@@ -1253,12 +1395,30 @@ async function parsePdfViaUpload(
     return null;
   }
 
-  report(t("Processing on server…"));
-  const startTime = Date.now();
-  while (Date.now() - startTime < POLL_TIMEOUT_MS) {
-    await sleep(POLL_INTERVAL_MS, signal);
-    const elapsed = Math.round((Date.now() - startTime) / 1000);
-    report(t("Processing on server… (%ss)").replace("%s", `${elapsed}`));
+  report(t("Waiting for MinerU to start…"));
+  const pollStartMs = Date.now();
+  let lastStatusAtMs: number | null = null;
+  let activeStartedAtMs: number | null = null;
+  while (true) {
+    const waitDecision = getMineruCloudPollDecision({
+      state: null,
+      nowMs: Date.now(),
+      pollStartMs,
+      lastStatusAtMs,
+      activeStartedAtMs,
+    });
+    if (waitDecision.action === "timeout") {
+      report(
+        waitDecision.reason === "no_status"
+          ? t("Timed out waiting for MinerU status")
+          : t("Timed out before MinerU started processing"),
+      );
+      return null;
+    }
+
+    await sleep(waitDecision.pollIntervalMs, signal);
+    const pollTimeMs = Date.now();
+    const elapsed = Math.round((pollTimeMs - pollStartMs) / 1000);
 
     const pollResult = await httpJson(
       "GET",
@@ -1281,12 +1441,31 @@ async function parsePdfViaUpload(
       ztoolkit.log(
         `MinerU: poll response has no extract_result: ${JSON.stringify(pollResult.data).slice(0, 200)}`,
       );
+      report(t("Waiting for MinerU status… (%ss)").replace("%s", `${elapsed}`));
       continue;
     }
 
-    ztoolkit.log(`MinerU: poll state="${extractResult.state}"`);
+    const state = normalizeMineruCloudState(extractResult.state);
+    if (!state) {
+      ztoolkit.log(
+        `MinerU: poll response has empty state: ${JSON.stringify(pollResult.data).slice(0, 200)}`,
+      );
+      report(t("Waiting for MinerU status… (%ss)").replace("%s", `${elapsed}`));
+      continue;
+    }
 
-    if (extractResult.state === "done" && extractResult.full_zip_url) {
+    lastStatusAtMs = pollTimeMs;
+    if (isMineruCloudActiveState(state) && activeStartedAtMs === null) {
+      activeStartedAtMs = pollTimeMs;
+    }
+
+    ztoolkit.log(`MinerU: poll state="${state}"`);
+
+    if (state === "done") {
+      if (!extractResult.full_zip_url) {
+        report(t("Missing ZIP result from server"));
+        return null;
+      }
       const extracted = await downloadAndExtractZip(
         extractResult.full_zip_url,
         report,
@@ -1305,14 +1484,29 @@ async function parsePdfViaUpload(
       return null;
     }
 
-    if (extractResult.state === "failed") {
+    if (state === "failed") {
       report(t("Extraction failed on server"));
       return null;
     }
-  }
 
-  report(t("Timed out after 10 minutes"));
-  return null;
+    const stateDecision = getMineruCloudPollDecision({
+      state,
+      nowMs: pollTimeMs,
+      pollStartMs,
+      lastStatusAtMs,
+      activeStartedAtMs,
+    });
+    if (stateDecision.action === "timeout") {
+      report(
+        stateDecision.reason === "no_status"
+          ? t("Timed out waiting for MinerU status")
+          : t("Timed out before MinerU started processing"),
+      );
+      return null;
+    }
+
+    report(buildMineruCloudProgressMessage(state, elapsed));
+  }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────

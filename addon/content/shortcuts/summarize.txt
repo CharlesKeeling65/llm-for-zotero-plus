@@ -1,1 +1,1 @@
-Summarize the document in 3-5 bullet points.
+Give a concise narrative overview of the paper in 1-2 short paragraphs, covering the research question, approach, main findings, and significance.

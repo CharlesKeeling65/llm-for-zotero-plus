@@ -37,7 +37,7 @@ When the user wants to add one or more papers to their library — whether from 
 | **Reference number(s)** from a paper in context (e.g. "add ref 5, 12, 23")                | Read the References section from the paper (see below), extract each cited reference, then resolve DOIs |
 | **Pasted title or citation text** (e.g. a line like "Smith et al. 2020, Neural Networks") | Extract the title, then resolve the DOI                                                                 |
 | **DOI, arXiv ID, ISBN, or URL**                                                           | Pass directly to `library_import({ kind:'identifiers', identifiers:[...] })` — no resolution needed     |
-| **Vague description** (e.g. "that hippocampal replay paper by Buzsaki")                   | Use `literature_search({ mode:'search', query:'...', author:'...' })` to find it first                  |
+| **Vague description** (e.g. "that hippocampal replay paper by Buzsaki")                   | Use `literature_search({ workflow:'answer', mode:'search', query:'...', author:'...' })` to find it first |
 
 ### Reading the references section from a paper
 
@@ -52,8 +52,8 @@ If no MinerU cache, use `paper_read({ mode:'targeted', query:'reference number o
 
 For each paper that doesn't already have a DOI:
 
-- Call `literature_search({ mode:'metadata', title:'<exact title>' })` to resolve the DOI from CrossRef/Semantic Scholar.
-- If title match fails, try adding the first author: `literature_search({ mode:'metadata', title:'<title>', author:'<first author>' })`.
+- Call `literature_search({ workflow:'answer', mode:'metadata', title:'<exact title>' })` to resolve the DOI from CrossRef/Semantic Scholar.
+- If title match fails, try adding the first author: `literature_search({ workflow:'answer', mode:'metadata', title:'<title>', author:'<first author>' })`.
 
 ### Importing
 

@@ -1,4 +1,5 @@
 import {
+  buildDefaultUpstreamGlobalConversationKey,
   GLOBAL_CONVERSATION_KEY_BASE,
   PAPER_CONVERSATION_KEY_BASE,
   isUpstreamGlobalConversationKey,
@@ -102,7 +103,8 @@ export function createGlobalPortalItem(
 ): Zotero.Item {
   const normalizedLibraryID = normalizePositiveInt(libraryID) || 1;
   const normalizedConversationKey =
-    normalizePositiveInt(conversationKey) || GLOBAL_CONVERSATION_KEY_BASE;
+    normalizePositiveInt(conversationKey) ||
+    buildDefaultUpstreamGlobalConversationKey(normalizedLibraryID);
   const portalItem: GlobalPortalItem = {
     __llmGlobalPortalItem: true,
     id: normalizedConversationKey,
@@ -493,12 +495,18 @@ function resolveGlobalConversationKey(
     );
   }
   const lockedKey = getLockedGlobalConversationKey(libraryID);
-  if (lockedKey !== null) return lockedKey;
+  if (lockedKey !== null) {
+    return lockedKey === GLOBAL_CONVERSATION_KEY_BASE
+      ? buildDefaultUpstreamGlobalConversationKey(libraryID)
+      : lockedKey;
+  }
   const activeKey = Number(activeGlobalConversationByLibrary.get(libraryID) || 0);
   if (isUpstreamGlobalConversationKey(activeKey)) {
-    return Math.floor(activeKey);
+    return activeKey === GLOBAL_CONVERSATION_KEY_BASE
+      ? buildDefaultUpstreamGlobalConversationKey(libraryID)
+      : Math.floor(activeKey);
   }
-  return GLOBAL_CONVERSATION_KEY_BASE;
+  return buildDefaultUpstreamGlobalConversationKey(libraryID);
 }
 
 export function resolveInitialPanelItemState(
@@ -532,6 +540,14 @@ export function resolveInitialPanelItemState(
   const basePaperItem = resolveConversationBaseItem(item);
   if (!basePaperItem) {
     return { item, basePaperItem: null };
+  }
+
+  if (
+    item?.isAttachment?.() &&
+    item.parentID &&
+    basePaperItem.isRegularItem?.()
+  ) {
+    item = basePaperItem;
   }
 
   if (

@@ -17,6 +17,7 @@ function historyEntry(
 ): ConversationHistoryEntry {
   return {
     kind,
+    sourceState: "active",
     section: kind === "paper" ? "paper" : "open",
     sectionTitle: kind === "paper" ? "Paper" : "Open",
     conversationKey,
@@ -43,7 +44,7 @@ describe("historySearchController", function () {
     ]);
   });
 
-  it("fingerprints documents by key, kind, title, and activity", function () {
+  it("fingerprints documents by key, kind, source label, and activity", function () {
     const base = historyEntry(101, "Methods chat", 100);
     const baseFingerprint = createHistorySearchDocumentFingerprint(base);
 
@@ -62,6 +63,22 @@ describe("historySearchController", function () {
       createHistorySearchDocumentFingerprint({
         ...base,
         lastActivityAt: 101,
+      }),
+      baseFingerprint,
+    );
+    assert.notEqual(
+      createHistorySearchDocumentFingerprint({
+        ...base,
+        sectionTitle: "Updated scope",
+      }),
+      baseFingerprint,
+    );
+    assert.notEqual(
+      createHistorySearchDocumentFingerprint({
+        ...base,
+        kind: "paper",
+        section: "paper",
+        sourceState: "orphan",
       }),
       baseFingerprint,
     );
@@ -104,6 +121,41 @@ describe("historySearchController", function () {
     assert.equal(results[0].matchCount, 3);
     assert.include(results[0].previewText.toLowerCase(), "zotero");
     assert.deepEqual(results[1].titleRanges, [{ start: 0, end: 6 }]);
+  });
+
+  it("matches conversation scope labels such as Library chat", function () {
+    const global = {
+      ...historyEntry(103, "General setup", 150, "global"),
+      sectionTitle: "Library chat",
+    };
+    const documents = new Map([
+      [global.conversationKey, createHistorySearchDocument(global, [])],
+    ]);
+
+    const results = buildHistorySearchResults([global], "library", documents);
+
+    assert.deepEqual(
+      results.map((result) => result.entry.conversationKey),
+      [103],
+    );
+  });
+
+  it("matches orphan source labels from dynamically classified entries", function () {
+    const orphan = {
+      ...historyEntry(104, "Deleted source chat", 160, "paper"),
+      sourceState: "orphan" as const,
+      sectionTitle: "Orphan",
+    };
+    const documents = new Map([
+      [orphan.conversationKey, createHistorySearchDocument(orphan, [])],
+    ]);
+
+    const results = buildHistorySearchResults([orphan], "orphan", documents);
+
+    assert.deepEqual(
+      results.map((result) => result.entry.conversationKey),
+      [104],
+    );
   });
 
   it("searches mixed paper and global conversations with message previews", function () {

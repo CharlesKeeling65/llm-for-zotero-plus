@@ -9,7 +9,6 @@ import {
 } from "../src/agent/skills";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
-import { createWebSearchTool } from "../src/agent/tools/read/webSearch";
 import type { AgentToolContext } from "../src/agent/types";
 
 describe("semantic tool surface", function () {
@@ -28,6 +27,25 @@ describe("semantic tool surface", function () {
     currentAnswerText: "",
     modelName: "gpt-5.5",
   };
+
+  function createTestBuiltInRegistry() {
+    return createBuiltInToolRegistry({
+      zoteroGateway: {} as never,
+      pdfService: {} as never,
+      pdfPageService: {} as never,
+      retrievalService: {} as never,
+    });
+  }
+
+  function schemaProperties(toolName: string): Record<string, unknown> {
+    const registry = createTestBuiltInRegistry();
+    const tool = registry.getTool(toolName);
+    assert.exists(tool, `${toolName} should be registered`);
+    const schema = tool!.spec.inputSchema as {
+      properties?: Record<string, unknown>;
+    };
+    return schema.properties || {};
+  }
 
   it("keeps internal delegate tools out of model-visible listings", function () {
     const registry = new AgentToolRegistry();
@@ -70,12 +88,7 @@ describe("semantic tool surface", function () {
   });
 
   it("exposes the semantic built-in surface and hides legacy primitive names", function () {
-    const registry = createBuiltInToolRegistry({
-      zoteroGateway: {} as never,
-      pdfService: {} as never,
-      pdfPageService: {} as never,
-      retrievalService: {} as never,
-    });
+    const registry = createTestBuiltInRegistry();
     const tools = registry.listToolsForRequest(baseContext.request);
     const names = tools.map((tool) => tool.name).sort();
 
@@ -94,8 +107,19 @@ describe("semantic tool surface", function () {
       "paper_read",
       "run_command",
       "undo_last_action",
-      "web_search",
       "zotero_script",
+    ]);
+    const literatureSearch = tools.find(
+      (tool) => tool.name === "literature_search",
+    );
+    const literatureProperties = (
+      literatureSearch?.inputSchema as {
+        properties?: Record<string, { enum?: string[] }>;
+      }
+    )?.properties;
+    assert.deepEqual(literatureProperties?.workflow?.enum, [
+      "answer",
+      "review",
     ]);
     for (const legacyName of [
       "query_library",
@@ -113,6 +137,7 @@ describe("semantic tool surface", function () {
         `${legacyName} remains internally callable`,
       );
     }
+    assert.isUndefined(registry.getTool("web_search"));
     for (const name of ["file_io", "run_command", "zotero_script"]) {
       assert.equal(
         tools.find((tool) => tool.name === name)?.tier,
@@ -120,6 +145,163 @@ describe("semantic tool surface", function () {
         `${name} should be advanced`,
       );
     }
+  });
+
+  it("does not expose loose top-level schemas for model-visible built-ins", function () {
+    const registry = createTestBuiltInRegistry();
+    const looseTools = registry
+      .listToolsForRequest(baseContext.request)
+      .flatMap((tool) => {
+        const schema = tool.inputSchema as { additionalProperties?: unknown };
+        return schema.additionalProperties === true ? [tool.name] : [];
+      });
+    assert.deepEqual(looseTools, []);
+  });
+
+  it("advertises delegate fields on semantic facade schemas", function () {
+    assert.containsAllKeys(schemaProperties("library_import"), [
+      "kind",
+      "identifiers",
+      "filePaths",
+      "targetCollectionId",
+      "collectionId",
+      "libraryID",
+    ]);
+    assert.containsAllKeys(schemaProperties("library_update"), [
+      "kind",
+      "action",
+      "itemIds",
+      "tags",
+      "assignments",
+      "targetCollectionId",
+      "targetCollectionName",
+      "collectionId",
+      "metadata",
+      "operations",
+      "itemId",
+      "paperContext",
+    ]);
+    assert.containsAllKeys(schemaProperties("library_delete"), [
+      "mode",
+      "itemIds",
+      "masterItemId",
+      "otherItemIds",
+    ]);
+  });
+
+  it("exposes batch metadata operations in the update_metadata schema", function () {
+    assert.containsAllKeys(schemaProperties("update_metadata"), [
+      "metadata",
+      "operations",
+      "paperContext",
+    ]);
+  });
+
+  it("normalizes bracketed array strings for identifier imports", function () {
+    const registry = createTestBuiltInRegistry();
+    const tool = registry.getTool("library_import");
+    assert.exists(tool);
+    const validation = tool!.validate({
+      kind: "identifiers",
+      identifiers: '["doi1","doi2",]',
+    });
+    assert.equal(validation.ok, true);
+    if (!validation.ok) return;
+    assert.equal(validation.value.delegateName, "import_identifiers");
+    assert.deepEqual(validation.value.delegateInput.operation.identifiers, [
+      "doi1",
+      "doi2",
+    ]);
+  });
+
+  it("keeps real array identifier imports valid", function () {
+    const registry = createTestBuiltInRegistry();
+    const tool = registry.getTool("library_import");
+    assert.exists(tool);
+    const validation = tool!.validate({
+      kind: "identifiers",
+      identifiers: ["doi1", "doi2"],
+    });
+    assert.equal(validation.ok, true);
+    if (!validation.ok) return;
+    assert.deepEqual(validation.value.delegateInput.operation.identifiers, [
+      "doi1",
+      "doi2",
+    ]);
+  });
+
+  it("rejects non-bracketed string arrays for identifier imports", function () {
+    const registry = createTestBuiltInRegistry();
+    const tool = registry.getTool("library_import");
+    assert.exists(tool);
+    for (const identifiers of ["doi1", "doi1,doi2"]) {
+      const validation = tool!.validate({
+        kind: "identifiers",
+        identifiers,
+      });
+      assert.equal(validation.ok, false, identifiers);
+    }
+  });
+
+  it("normalizes bracketed array strings for library delete and update", function () {
+    const registry = createTestBuiltInRegistry();
+    const deleteTool = registry.getTool("library_delete");
+    const updateTool = registry.getTool("library_update");
+    assert.exists(deleteTool);
+    assert.exists(updateTool);
+
+    const deleteValidation = deleteTool!.validate({
+      mode: "trash",
+      itemIds: "[101,102,]",
+    });
+    assert.equal(deleteValidation.ok, true);
+    if (!deleteValidation.ok) return;
+    assert.deepEqual(
+      deleteValidation.value.delegateInput.operation.itemIds,
+      [101, 102],
+    );
+
+    const updateValidation = updateTool!.validate({
+      kind: "tags",
+      action: "add",
+      itemIds: "[101,102,]",
+      tags: '["ml","vision",]',
+    });
+    assert.equal(updateValidation.ok, true);
+    if (!updateValidation.ok) return;
+    assert.deepEqual(
+      updateValidation.value.delegateInput.operation.itemIds,
+      [101, 102],
+    );
+    assert.deepEqual(updateValidation.value.delegateInput.operation.tags, [
+      "ml",
+      "vision",
+    ]);
+  });
+
+  it("rejects non-bracketed string arrays for library delete and update", function () {
+    const registry = createTestBuiltInRegistry();
+    const deleteTool = registry.getTool("library_delete");
+    const updateTool = registry.getTool("library_update");
+    assert.exists(deleteTool);
+    assert.exists(updateTool);
+
+    assert.equal(
+      deleteTool!.validate({
+        mode: "trash",
+        itemIds: "101,102",
+      }).ok,
+      false,
+    );
+    assert.equal(
+      updateTool!.validate({
+        kind: "tags",
+        action: "add",
+        itemIds: [101],
+        tags: "ml,vision",
+      }).ok,
+      false,
+    );
   });
 
   it("paper_read fails loudly for invalid explicit targets", async function () {
@@ -1066,8 +1248,14 @@ describe("semantic tool surface", function () {
     const raw = BUILTIN_SKILL_FILES["compare-papers.md"];
     assert.include(raw, "contexts: paper-set,library-corpus");
     assert.include(raw, "targeted first when the dimension is known");
-    assert.include(raw, "A selected Zotero collection/folder is also a valid comparison corpus");
-    assert.include(raw, "library_retrieve({ query:'methods methodology method section'");
+    assert.include(
+      raw,
+      "A selected Zotero collection/folder is also a valid comparison corpus",
+    );
+    assert.include(
+      raw,
+      "library_retrieve({ query:'methods methodology method section'",
+    );
     assert.include(
       raw,
       "paper_read({ mode:'targeted', query:'methods methodology method section', targets:[...] })",
@@ -1140,73 +1328,25 @@ describe("semantic tool surface", function () {
   });
 
   it("explains multi-context skill eligibility requirements", function () {
-    const evidenceSkill = parseSkill(BUILTIN_SKILL_FILES["evidence-based-qa.md"]);
+    const evidenceSkill = parseSkill(
+      BUILTIN_SKILL_FILES["evidence-based-qa.md"],
+    );
     const compareSkill = parseSkill(BUILTIN_SKILL_FILES["compare-papers.md"]);
 
     assert.deepEqual(
       getSkillContextEligibility(evidenceSkill, { userText: "" }),
       {
         eligible: false,
-        reason: "Requires one paper or multiple papers or collection/library context",
+        reason:
+          "Requires one paper or multiple papers or collection/library context",
       },
     );
-    assert.deepEqual(getSkillContextEligibility(compareSkill, { userText: "" }), {
-      eligible: false,
-      reason: "Requires multiple papers or collection/library context",
-    });
-  });
-
-  it("web_search returns cited URL results without fetching result pages", async function () {
-    const globalScope = globalThis as typeof globalThis & {
-      Zotero?: { HTTP?: { request?: unknown } };
-    };
-    const originalZotero = globalScope.Zotero;
-    let requestedUrl = "";
-    globalScope.Zotero = {
-      HTTP: {
-        request: async (_method: string, url: string) => {
-          requestedUrl = url;
-          return {
-            responseText: `
-              <html><body>
-                <div class="result">
-                  <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs">Example Docs</a>
-                  <a class="result__snippet">Current documentation snippet.</a>
-                </div>
-              </body></html>
-            `,
-          };
-        },
+    assert.deepEqual(
+      getSkillContextEligibility(compareSkill, { userText: "" }),
+      {
+        eligible: false,
+        reason: "Requires multiple papers or collection/library context",
       },
-    };
-    try {
-      const tool = createWebSearchTool();
-      const validated = tool.validate({
-        query: "example docs",
-        mode: "docs",
-        limit: 3,
-      });
-      assert.equal(validated.ok, true);
-      if (!validated.ok) return;
-      const output = await tool.execute(validated.value, baseContext);
-      const content = output as {
-        query?: string;
-        mode?: string;
-        results?: Array<{ title?: string; url?: string; source?: string }>;
-      };
-      assert.include(requestedUrl, "html.duckduckgo.com");
-      assert.equal(content.query, "example docs");
-      assert.equal(content.mode, "docs");
-      assert.deepEqual(content.results, [
-        {
-          title: "Example Docs",
-          url: "https://example.com/docs",
-          snippet: "Current documentation snippet.",
-          source: "example.com",
-        },
-      ]);
-    } finally {
-      globalScope.Zotero = originalZotero;
-    }
+    );
   });
 });

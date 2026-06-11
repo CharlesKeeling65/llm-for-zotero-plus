@@ -4,6 +4,9 @@ import {
   formatPaperContextCardAttachmentLine,
   formatPaperContextChipLabel,
   formatPaperContextChipTitle,
+  hasPaperChipSourceMenuOption,
+  isPaperContextFullTextOnlySourceMode,
+  isPaperContextReaderFocusableSourceMode,
   resolvePaperContextAttachmentLabel,
 } from "../src/modules/contextPanel/setupHandlers/controllers/composeContextController";
 
@@ -111,6 +114,74 @@ describe("composeContextController paper card attachment labels", function () {
       "Liu et al., 2026 - DOCX",
     );
     assert.include(formatPaperContextChipTitle(paperContext, "docx"), "Word");
+  });
+
+  it("uses attachment labels for metadata-free text attachment chips", function () {
+    const paperContext: PaperContextRef = {
+      itemId: 1,
+      contextItemId: 101,
+      title: "Saved web page",
+      attachmentTitle: "snapshot.html",
+    };
+
+    assert.equal(
+      formatPaperContextChipLabel(paperContext, "html"),
+      "Attachment - HTML",
+    );
+    assert.equal(
+      formatPaperContextChipLabel(paperContext, "docx"),
+      "Attachment - DOCX",
+    );
+  });
+
+  it("keeps a single selected HTML attachment available as a source-menu card", function () {
+    const paperContext = makePaperContext({
+      contextItemId: 101,
+      attachmentTitle: "snapshot.html",
+    });
+
+    assert.isTrue(isPaperContextFullTextOnlySourceMode("html"));
+    assert.isFalse(isPaperContextReaderFocusableSourceMode("html"));
+    assert.isTrue(isPaperContextReaderFocusableSourceMode("text"));
+    assert.isTrue(
+      hasPaperChipSourceMenuOption([{ mode: "html", paperContext }]),
+    );
+  });
+
+  it("keeps the paper chip menu available when there is a real source switch", function () {
+    const htmlContext = makePaperContext({
+      contextItemId: 101,
+      attachmentTitle: "snapshot.html",
+    });
+    const pdfContext = makePaperContext({
+      contextItemId: 102,
+      attachmentTitle: "paper.pdf",
+    });
+
+    assert.isTrue(
+      hasPaperChipSourceMenuOption([
+        { mode: "html", paperContext: htmlContext },
+        { mode: "pdf", paperContext: pdfContext },
+      ]),
+    );
+  });
+
+  it("does not treat a disabled MinerU parse row as a clickable source option", function () {
+    const paperContext = makePaperContext({
+      contextItemId: 102,
+      attachmentTitle: "paper.pdf",
+    });
+
+    assert.isFalse(
+      hasPaperChipSourceMenuOption([
+        {
+          mode: "mineru",
+          paperContext,
+          mineruAction: "start",
+          disabledReason: "enable MinerU to start PDF parsing",
+        },
+      ]),
+    );
   });
 
   it("falls back to filename before stale stored attachment title", function () {

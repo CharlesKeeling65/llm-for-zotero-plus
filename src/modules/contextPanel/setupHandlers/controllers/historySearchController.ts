@@ -43,7 +43,9 @@ export function createHistorySearchDocumentFingerprint(
   return JSON.stringify([
     conversationKey,
     entry.kind === "paper" ? "paper" : "global",
+    entry.sourceState,
     normalizeHistorySearchText(entry.title),
+    normalizeHistorySearchText(entry.sectionTitle),
     lastActivityAt,
   ]);
 }
@@ -239,6 +241,14 @@ export function createHistorySearchDocument(
       kind: "title",
       text: titleText,
       normalizedText: titleText.toLocaleLowerCase(),
+    });
+  }
+  const sectionText = normalizeHistorySearchText(entry.sectionTitle);
+  if (sectionText && sectionText !== titleText) {
+    candidates.push({
+      kind: "title",
+      text: sectionText,
+      normalizedText: sectionText.toLocaleLowerCase(),
     });
   }
   for (const message of messages) {

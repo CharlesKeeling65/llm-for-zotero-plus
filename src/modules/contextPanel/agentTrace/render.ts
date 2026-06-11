@@ -3,6 +3,7 @@ import type {
   AgentPendingAction,
   AgentPendingField,
   AgentRunEventRecord,
+  AgentTraceDetail,
   AgentToolResultCard,
   AgentTraceChip,
   AgentTraceRequestSummary,
@@ -36,6 +37,8 @@ type AgentTraceSummaryRow = {
   codeBlock?: string;
 };
 
+const agentTraceActionExpandedCache = new Map<string, boolean>();
+
 type AgentTraceDisplayItem =
   | {
       type: "message";
@@ -47,6 +50,8 @@ type AgentTraceDisplayItem =
       type: "action";
       row: AgentTraceSummaryRow;
       chips?: AgentTraceChip[];
+      details?: AgentTraceDetail[];
+      detailKey?: string;
     }
   | {
       type: "card_list";
@@ -77,7 +82,7 @@ export function buildAgentTraceMarkdownForRender(
   return replaceQuoteCitationPlaceholdersForMarkdown(
     sanitizeText(text || ""),
     message?.quoteCitations,
-    { unresolved: "unavailable" },
+    { resolved: "preserve", unresolved: "omit" },
   );
 }
 
@@ -156,11 +161,78 @@ function getReasoningTraceKey(payload: AgentReasoningPayload): string {
   return stepId ? `step:${stepId}` : `round:${payload.round}`;
 }
 
-function truncateAgentTraceText(value: unknown, max = 88): string {
+function compactAgentTraceText(value: unknown): string {
   const raw = readAgentTraceText(value) || `${value ?? ""}`;
-  const normalized = sanitizeText(raw).replace(/\s+/g, " ").trim();
-  if (normalized.length <= max) return normalized;
-  return `${normalized.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
+  return sanitizeText(raw).replace(/\s+/g, " ").trim();
+}
+
+function normalizeAgentTraceDetail(
+  label: string,
+  value: unknown,
+  kind: AgentTraceDetail["kind"] = "text",
+): AgentTraceDetail | null {
+  const cleanLabel = compactAgentTraceText(label);
+  if (!cleanLabel) return null;
+  const cleanValue =
+    typeof value === "string"
+      ? sanitizeText(value).trim()
+      : compactAgentTraceText(value);
+  if (!cleanValue) return null;
+  return {
+    label: cleanLabel,
+    value: cleanValue,
+    ...(kind ? { kind } : {}),
+  };
+}
+
+function omitLargeTraceString(value: string): string {
+  if (/^data:(?:image|application)\//i.test(value) && value.length > 160) {
+    const marker = value.slice(0, 96);
+    return `${marker}...[omitted ${value.length - marker.length} chars]`;
+  }
+  return value;
+}
+
+function stringifyAgentTraceJson(value: unknown): string | null {
+  if (value === undefined) return null;
+  try {
+    const seen = new WeakSet<object>();
+    const json = JSON.stringify(
+      value,
+      (_key, entry) => {
+        if (typeof entry === "string") {
+          return omitLargeTraceString(entry);
+        }
+        if (entry && typeof entry === "object") {
+          if (seen.has(entry)) return "[Circular]";
+          seen.add(entry);
+        }
+        return entry;
+      },
+      2,
+    );
+    return json && json !== "{}" && json !== "[]" ? json : null;
+  } catch {
+    return compactAgentTraceText(value);
+  }
+}
+
+function buildJsonTraceDetail(
+  label: string,
+  value: unknown,
+): AgentTraceDetail | null {
+  const json = stringifyAgentTraceJson(value);
+  return json ? normalizeAgentTraceDetail(label, json, "json") : null;
+}
+
+function pushTraceDetail(
+  details: AgentTraceDetail[],
+  label: string,
+  value: unknown,
+  kind: AgentTraceDetail["kind"] = "text",
+): void {
+  const detail = normalizeAgentTraceDetail(label, value, kind);
+  if (detail) details.push(detail);
 }
 
 function renderReviewValueCell(
@@ -1601,6 +1673,34 @@ export function renderPendingActionCard(
       continue;
     }
 
+    if (field.type === "code_preview") {
+      const label = doc.createElement("label");
+      label.className = "llm-agent-hitl-label";
+      label.textContent = field.label;
+      fieldContainer.appendChild(label);
+
+      const pre = doc.createElement("pre");
+      pre.className = "llm-agent-hitl-code-preview";
+      const code = doc.createElement("code");
+      if (field.language) {
+        code.className = `language-${field.language}`;
+        code.setAttribute("data-language", field.language);
+      }
+      code.textContent = field.value;
+      pre.appendChild(code);
+      fieldContainer.appendChild(pre);
+      fieldAccessors.push({
+        field,
+        container: fieldContainer,
+        id: field.id,
+        getValue: () => null,
+        setDisabled: () => undefined,
+        isValid: () => true,
+      });
+      card.appendChild(fieldContainer);
+      continue;
+    }
+
     if (field.type === "select") {
       const label = doc.createElement("label");
       label.className = "llm-agent-hitl-label";
@@ -2026,14 +2126,19 @@ function buildAgentTraceRequestChips(
   const chips: AgentTraceChip[] = [];
   const paperContexts = normalizePaperContexts(userMessage.paperContexts);
   if (paperContexts.length) {
-    const label =
-      paperContexts.length === 1
-        ? truncateAgentTraceText(paperContexts[0]?.title || "Paper", 42)
-        : `${paperContexts.length} papers`;
+    const details = paperContexts
+      .map((entry, index) =>
+        normalizeAgentTraceDetail(
+          paperContexts.length === 1 ? "Paper" : `Paper ${index + 1}`,
+          entry.title,
+        ),
+      )
+      .filter((entry): entry is AgentTraceDetail => Boolean(entry));
     chips.push({
       iconName: "paper",
-      label,
+      label: paperContexts.length === 1 ? "Paper" : `${paperContexts.length} papers`,
       title: paperContexts.map((entry) => entry.title).join("\n"),
+      details,
     });
   }
 
@@ -2043,17 +2148,27 @@ function buildAgentTraceRequestChips(
       userMessage.selectedTextSources,
       selectedTexts.length,
     );
-    const label =
-      selectedTexts.length === 1
-        ? truncateAgentTraceText(selectedTexts[0], 42)
-        : `${selectedTexts.length} text selections`;
     const source = sources[0] || "pdf";
+    const details = selectedTexts
+      .map((entry, index) =>
+        normalizeAgentTraceDetail(
+          selectedTexts.length === 1
+            ? "Selected text"
+            : `Selected text ${index + 1}`,
+          entry,
+        ),
+      )
+      .filter((entry): entry is AgentTraceDetail => Boolean(entry));
     chips.push({
       ...(source === "note-edit"
         ? { icon: NOTE_EDIT_PENCIL_ICON }
         : { iconName: getSelectedTextSourceIconName(source) }),
-      label,
+      label:
+        selectedTexts.length === 1
+          ? "Selected text"
+          : `${selectedTexts.length} text selections`,
       title: selectedTexts.join("\n\n"),
+      details,
     });
   }
 
@@ -2077,13 +2192,22 @@ function buildAgentTraceRequestChips(
       )
     : [];
   if (fileAttachments.length) {
+    const details = fileAttachments
+      .map((entry, index) =>
+        normalizeAgentTraceDetail(
+          fileAttachments.length === 1 ? "File" : `File ${index + 1}`,
+          entry.name,
+        ),
+      )
+      .filter((entry): entry is AgentTraceDetail => Boolean(entry));
     chips.push({
       iconName: "file",
       label:
         fileAttachments.length === 1
-          ? truncateAgentTraceText(fileAttachments[0]?.name || "File", 32)
+          ? "File"
           : `${fileAttachments.length} files`,
       title: fileAttachments.map((entry) => entry.name).join("\n"),
+      details,
     });
   }
 
@@ -2177,8 +2301,9 @@ function buildAgentTraceToolChips(
       `Paper ${paperContext.itemId ?? ""}`.trim();
     chips.push({
       iconName: "paper",
-      label: truncateAgentTraceText(paperTitle, 42),
+      label: "Paper",
       title: paperTitle,
+      detail: normalizeAgentTraceDetail("Paper", paperTitle) || undefined,
     });
   }
 
@@ -2186,8 +2311,29 @@ function buildAgentTraceToolChips(
   if (query) {
     chips.push({
       icon: "⌕",
-      label: truncateAgentTraceText(query, 36),
+      label: "Query",
       title: query,
+      detail: normalizeAgentTraceDetail("Query", query) || undefined,
+    });
+  }
+
+  const url = readAgentTraceText(record?.url);
+  if (url) {
+    chips.push({
+      icon: "↗",
+      label: "URL",
+      title: url,
+      detail: normalizeAgentTraceDetail("URL", url, "url") || undefined,
+    });
+  }
+
+  const pattern = readAgentTraceText(record?.pattern);
+  if (pattern) {
+    chips.push({
+      icon: "⌕",
+      label: "Pattern",
+      title: pattern,
+      detail: normalizeAgentTraceDetail("Pattern", pattern) || undefined,
     });
   }
 
@@ -2195,8 +2341,40 @@ function buildAgentTraceToolChips(
   if (attachmentName) {
     chips.push({
       iconName: /\.pdf$/i.test(attachmentName) ? "pdf" : "file",
-      label: truncateAgentTraceText(attachmentName, 36),
+      label: "File",
       title: attachmentName,
+      detail: normalizeAgentTraceDetail("File", attachmentName) || undefined,
+    });
+  }
+
+  const status = readAgentTraceText(record?.status);
+  if (status) {
+    chips.push({
+      icon: "•",
+      label: "Status",
+      title: `status: ${status}`,
+      detail: normalizeAgentTraceDetail("Status", status) || undefined,
+    });
+  }
+
+  const saved =
+    readAgentTraceText(record?.saved) || readAgentTraceText(record?.savedPath);
+  if (saved) {
+    chips.push({
+      iconName: "image",
+      label: "Saved",
+      title: saved,
+      detail: normalizeAgentTraceDetail("Saved", saved) || undefined,
+    });
+  }
+
+  const path = !saved ? readAgentTraceText(record?.path) : null;
+  if (path) {
+    chips.push({
+      iconName: "image",
+      label: "Path",
+      title: path,
+      detail: normalizeAgentTraceDetail("Path", path) || undefined,
     });
   }
 
@@ -2211,14 +2389,15 @@ function buildAgentTraceToolChips(
       .map((entry) =>
         typeof entry === "number"
           ? `p${Math.max(1, Math.floor(entry) + 1)}`
-          : truncateAgentTraceText(entry, 16),
+          : compactAgentTraceText(entry),
       )
       .join(", ");
     if (labels) {
       chips.push({
         icon: "§",
-        label: truncateAgentTraceText(labels, 24),
+        label: "Pages",
         title: labels,
+        detail: normalizeAgentTraceDetail("Pages", labels) || undefined,
       });
     }
   }
@@ -2228,6 +2407,89 @@ function buildAgentTraceToolChips(
   }
 
   return chips;
+}
+
+function detailLabelFromChip(chip: AgentTraceChip): string {
+  const label = compactAgentTraceText(chip.label);
+  if (!label) return "Detail";
+  const colonIndex = label.indexOf(":");
+  if (colonIndex > 0 && colonIndex <= 24) {
+    return label.slice(0, colonIndex).trim() || "Detail";
+  }
+  return label.length <= 48 ? label : "Detail";
+}
+
+export function buildAgentTraceChipDetails(
+  chip: AgentTraceChip,
+): AgentTraceDetail[] {
+  const explicit = [
+    ...(chip.detail ? [chip.detail] : []),
+    ...(Array.isArray(chip.details) ? chip.details : []),
+  ]
+    .map((entry) =>
+      normalizeAgentTraceDetail(entry.label, entry.value, entry.kind || "text"),
+    )
+    .filter((entry): entry is AgentTraceDetail => Boolean(entry));
+  if (explicit.length) return explicit;
+
+  const title =
+    typeof chip.title === "string" ? sanitizeText(chip.title).trim() : "";
+  if (title) {
+    const detail = normalizeAgentTraceDetail(
+      detailLabelFromChip(chip),
+      title,
+      /^https?:\/\//i.test(title) ? "url" : "text",
+    );
+    return detail ? [detail] : [];
+  }
+
+  const label = compactAgentTraceText(chip.label);
+  if (label.length > 40) {
+    const detail = normalizeAgentTraceDetail(detailLabelFromChip(chip), label);
+    return detail ? [detail] : [];
+  }
+  return [];
+}
+
+function dedupeAgentTraceDetails(
+  details: AgentTraceDetail[],
+): AgentTraceDetail[] {
+  const seen = new Set<string>();
+  const unique: AgentTraceDetail[] = [];
+  for (const detail of details) {
+    const normalized = normalizeAgentTraceDetail(
+      detail.label,
+      detail.value,
+      detail.kind || "text",
+    );
+    if (!normalized) continue;
+    const key = `${normalized.label}\u0000${normalized.value}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(normalized);
+  }
+  return unique;
+}
+
+function buildAgentTraceActionDetails(
+  item: Extract<AgentTraceDisplayItem, { type: "action" }>,
+): AgentTraceDetail[] {
+  const details: AgentTraceDetail[] = [];
+  for (const chip of item.chips || []) {
+    details.push(...buildAgentTraceChipDetails(chip));
+  }
+  if (item.row.codeBlock) {
+    pushTraceDetail(details, "Command", item.row.codeBlock, "code");
+  }
+  if (item.details?.length) {
+    details.push(...item.details);
+  }
+  return dedupeAgentTraceDetails(details);
+}
+
+function buildAgentTraceArgsDetails(args: unknown): AgentTraceDetail[] {
+  const detail = buildJsonTraceDetail("Arguments", args);
+  return detail ? [detail] : [];
 }
 
 function summarizeAgentTraceToolCall(
@@ -2394,6 +2656,7 @@ function summarizeCodexToolActivity(input: {
   toolLabel?: string;
   serverName?: string;
   text?: string;
+  codeBlock?: string;
 }): AgentTraceSummaryRow {
   const explicitText = readAgentTraceText(input.text);
   if (explicitText) {
@@ -2401,6 +2664,7 @@ function summarizeCodexToolActivity(input: {
       kind: "tool",
       icon: "⌘",
       text: explicitText,
+      codeBlock: readAgentTraceText(input.codeBlock) || undefined,
     };
   }
   const toolName = readAgentTraceText(input.toolName);
@@ -2413,6 +2677,7 @@ function summarizeCodexToolActivity(input: {
     kind: "tool",
     icon: "⌘",
     text: `${verb} ${label}`,
+    codeBlock: readAgentTraceText(input.codeBlock) || undefined,
   };
 }
 
@@ -2508,6 +2773,7 @@ function compactAgentTraceEvents(
             entry.payload.args !== undefined
               ? entry.payload.args
               : previous.payload.args,
+          codeBlock: entry.payload.codeBlock || previous.payload.codeBlock,
         },
       };
       continue;
@@ -2754,6 +3020,8 @@ function appendLegacyAgentTraceEvent(
           entry.payload.args,
           ctx.userMessage,
         ),
+        details: buildAgentTraceArgsDetails(entry.payload.args),
+        detailKey: `tool-call:${entry.payload.callId}`,
       });
       ctx.fallbackReasoningStep += 1;
       return true;
@@ -2823,6 +3091,18 @@ function appendCodexAgentTraceEvent(
   switch (entry.payload.type) {
     case "codex_tool_activity": {
       const toolName = readAgentTraceText(entry.payload.toolName) || undefined;
+      const details = [
+        ...(entry.payload.codeBlock
+          ? [
+              normalizeAgentTraceDetail(
+                "Command",
+                entry.payload.codeBlock,
+                "code",
+              ),
+            ]
+          : []),
+        ...buildAgentTraceArgsDetails(entry.payload.args),
+      ].filter((detail): detail is AgentTraceDetail => Boolean(detail));
       ctx.items.push({
         type: "action",
         row: summarizeCodexToolActivity({
@@ -2831,6 +3111,7 @@ function appendCodexAgentTraceEvent(
           toolLabel: entry.payload.toolLabel,
           serverName: entry.payload.serverName,
           text: entry.payload.text,
+          codeBlock: entry.payload.codeBlock,
         }),
         chips: toolName
           ? buildAgentTraceToolChips(
@@ -2839,6 +3120,8 @@ function appendCodexAgentTraceEvent(
               ctx.userMessage,
             )
           : undefined,
+        details,
+        detailKey: `codex:${entry.payload.itemId}`,
       });
       return true;
     }
@@ -2974,6 +3257,7 @@ export function buildAgentTraceDisplayItems(
           : "Request received",
     },
     chips: requestChips,
+    detailKey: "request",
   });
 
   for (let index = 0; index < compactedEvents.length; index += 1) {
@@ -2994,6 +3278,75 @@ export function buildAgentTraceDisplayItems(
     isInterleaved,
     inlineTextReplacesAssistantText,
   };
+}
+
+function renderAgentTraceChips(
+  doc: Document,
+  chips: AgentTraceChip[] | undefined,
+): HTMLDivElement | null {
+  if (!chips?.length) return null;
+  const chipsEl = doc.createElement("div") as HTMLDivElement;
+  chipsEl.className = "llm-agent-process-chips";
+  for (const chip of chips) {
+    const chipEl = doc.createElement("div") as HTMLDivElement;
+    chipEl.className = "llm-agent-process-chip";
+    if (chip.title) {
+      chipEl.title = chip.title;
+    }
+    const chipLabel = doc.createElement("span") as HTMLSpanElement;
+    chipLabel.className = "llm-agent-process-chip-label";
+    chipLabel.textContent = chip.label;
+    const chipIcon = isContextIconName(chip.iconName)
+      ? createContextIcon(doc, chip.iconName, "llm-agent-process-chip-icon")
+      : null;
+    if (chipIcon) {
+      chipEl.append(chipIcon, chipLabel);
+    } else if (chip.icon) {
+      const fallbackIcon = doc.createElement("span") as HTMLSpanElement;
+      fallbackIcon.className = "llm-agent-process-chip-icon";
+      fallbackIcon.textContent = chip.icon;
+      chipEl.append(fallbackIcon, chipLabel);
+    } else {
+      chipEl.appendChild(chipLabel);
+    }
+    chipsEl.appendChild(chipEl);
+  }
+  return chipsEl;
+}
+
+function renderAgentTraceDetailsBody(
+  doc: Document,
+  details: AgentTraceDetail[],
+): HTMLDivElement {
+  const body = doc.createElement("div") as HTMLDivElement;
+  body.className = "llm-agent-process-details";
+  for (const detail of details) {
+    const item = doc.createElement("div") as HTMLDivElement;
+    item.className = "llm-agent-process-detail";
+
+    const label = doc.createElement("div") as HTMLDivElement;
+    label.className = "llm-agent-process-detail-label";
+    label.textContent = detail.label;
+
+    if (detail.kind === "code" || detail.kind === "json") {
+      const pre = doc.createElement("pre") as HTMLPreElement;
+      pre.className = `llm-agent-process-detail-value llm-agent-process-detail-value-${detail.kind}`;
+      const code = doc.createElement("code") as HTMLElement;
+      code.textContent = detail.value;
+      pre.appendChild(code);
+      item.append(label, pre);
+    } else {
+      const value = doc.createElement("div") as HTMLDivElement;
+      value.className = `llm-agent-process-detail-value${
+        detail.kind === "url" ? " llm-agent-process-detail-value-url" : ""
+      }`;
+      value.textContent = detail.value;
+      item.append(label, value);
+    }
+
+    body.appendChild(item);
+  }
+  return body;
 }
 
 export function renderAgentTrace({
@@ -3044,7 +3397,7 @@ export function renderAgentTrace({
   const hasFinalResponse = events.some(
     (entry) => entry.payload.type === "final",
   );
-  for (const itemEntry of processItems) {
+  for (const [itemIndex, itemEntry] of processItems.entries()) {
     if (itemEntry.type === "inline_text") {
       const inlineEl = doc.createElement("div");
       inlineEl.className = "llm-agent-inline-text";
@@ -3144,8 +3497,20 @@ export function renderAgentTrace({
       continue;
     }
 
-    const actionWrap = doc.createElement("div");
-    actionWrap.className = "llm-agent-process-action";
+    const actionDetails = buildAgentTraceActionDetails(itemEntry);
+    const isExpandable = actionDetails.length > 0;
+    const actionWrap = doc.createElement(
+      isExpandable ? "details" : "div",
+    ) as HTMLElement;
+    actionWrap.className = `llm-agent-process-action${
+      isExpandable ? " llm-agent-process-action-expandable" : ""
+    }`;
+    const expansionKey = `${runId}:action:${itemEntry.detailKey || itemIndex}`;
+    if (isExpandable) {
+      (actionWrap as HTMLDetailsElement).open = Boolean(
+        agentTraceActionExpandedCache.get(expansionKey),
+      );
+    }
     const row = doc.createElement("div");
     row.className = `llm-at-row llm-at-row-${itemEntry.row.kind}`;
     const icon = doc.createElement("span");
@@ -3154,47 +3519,27 @@ export function renderAgentTrace({
     const text = doc.createElement("span");
     text.className = `llm-at-text llm-at-${itemEntry.row.kind}-text`;
     text.textContent = itemEntry.row.text;
-    row.append(icon, text);
-    actionWrap.appendChild(row);
+    if (isExpandable) {
+      row.append(icon, text);
 
-    // Render code block for shell commands
-    if (itemEntry.row.codeBlock) {
-      const codeWrap = doc.createElement("pre");
-      codeWrap.className = "llm-at-code-block";
-      const code = doc.createElement("code");
-      code.textContent = itemEntry.row.codeBlock;
-      codeWrap.appendChild(code);
-      actionWrap.appendChild(codeWrap);
-    }
-
-    if (itemEntry.chips?.length) {
-      const chips = doc.createElement("div");
-      chips.className = "llm-agent-process-chips";
-      for (const chip of itemEntry.chips) {
-        const chipEl = doc.createElement("div");
-        chipEl.className = "llm-agent-process-chip";
-        if (chip.title) {
-          chipEl.title = chip.title;
-        }
-        const chipLabel = doc.createElement("span");
-        chipLabel.className = "llm-agent-process-chip-label";
-        chipLabel.textContent = chip.label;
-        const chipIcon = isContextIconName(chip.iconName)
-          ? createContextIcon(doc, chip.iconName, "llm-agent-process-chip-icon")
-          : null;
-        if (chipIcon) {
-          chipEl.append(chipIcon, chipLabel);
-        } else if (chip.icon) {
-          const fallbackIcon = doc.createElement("span");
-          fallbackIcon.className = "llm-agent-process-chip-icon";
-          fallbackIcon.textContent = chip.icon;
-          chipEl.append(fallbackIcon, chipLabel);
-        } else {
-          chipEl.appendChild(chipLabel);
-        }
-        chips.appendChild(chipEl);
+      const summary = doc.createElement("summary") as HTMLElement;
+      summary.className = "llm-agent-process-action-summary";
+      summary.appendChild(row);
+      const chips = renderAgentTraceChips(doc, itemEntry.chips);
+      if (chips) summary.appendChild(chips);
+      actionWrap.appendChild(summary);
+      actionWrap.appendChild(renderAgentTraceDetailsBody(doc, actionDetails));
+      actionWrap.addEventListener("toggle", () => {
+        const open = Boolean((actionWrap as HTMLDetailsElement).open);
+        agentTraceActionExpandedCache.set(expansionKey, open);
+      });
+    } else {
+      row.append(icon, text);
+      actionWrap.appendChild(row);
+      const chips = renderAgentTraceChips(doc, itemEntry.chips);
+      if (chips) {
+        actionWrap.appendChild(chips);
       }
-      actionWrap.appendChild(chips);
     }
 
     list.appendChild(actionWrap);

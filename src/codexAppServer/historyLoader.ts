@@ -1,11 +1,10 @@
-import type { CodexConversationSummary } from "../shared/types";
 import {
-  listAllCodexPaperConversationsByLibrary,
-  listCodexGlobalConversations,
-  listCodexPaperConversations,
-} from "./store";
+  conversationRepository,
+  type ConversationCatalogEntry,
+} from "../core/conversations/repository";
 
 export type CodexConversationHistoryEntry = {
+  conversationID: string;
   conversationKey: number;
   kind: "global" | "paper";
   title: string;
@@ -18,20 +17,31 @@ export type CodexConversationHistoryEntry = {
   scopedConversationKey?: string;
 };
 
-function normalizeTitle(summary: CodexConversationSummary): string {
+function normalizeTitle(summary: ConversationCatalogEntry): string {
   const title = (summary.title || "").trim();
   if (title) return title;
   return summary.kind === "paper" ? "New Codex paper chat" : "New Codex chat";
 }
 
-function toEntry(summary: CodexConversationSummary): CodexConversationHistoryEntry {
-  const isDraft = (summary.userTurnCount || 0) <= 0;
+function isDraftSummary(summary: ConversationCatalogEntry): boolean {
+  const userTurnCount = Number(summary.userTurnCount || 0);
+  return (
+    userTurnCount <= 0 &&
+    !summary.title?.trim() &&
+    !summary.providerSessionId?.trim() &&
+    !summary.scopedConversationKey?.trim()
+  );
+}
+
+function toEntry(summary: ConversationCatalogEntry): CodexConversationHistoryEntry {
+  const isDraft = isDraftSummary(summary);
   return {
+    conversationID: summary.conversationID,
     conversationKey: summary.conversationKey,
     kind: summary.kind,
     title: normalizeTitle(summary),
     createdAt: summary.createdAt,
-    lastActivityAt: summary.updatedAt,
+    lastActivityAt: summary.lastActivityAt,
     userTurnCount: summary.userTurnCount,
     isDraft,
     paperItemID: summary.paperItemID,
@@ -42,32 +52,35 @@ function toEntry(summary: CodexConversationSummary): CodexConversationHistoryEnt
 
 export async function loadCodexConversationHistoryScope(params: {
   libraryID: number;
-  kind: "global" | "paper";
-  paperItemID?: number;
-  limit?: number;
+    kind: "global" | "paper";
+    paperItemID?: number;
+    limit?: number;
 }): Promise<CodexConversationHistoryEntry[]> {
-  const summaries = params.kind === "paper"
-    ? await listCodexPaperConversations(
-        params.libraryID,
-        params.paperItemID || 0,
-        params.limit,
-      )
-    : await listCodexGlobalConversations(params.libraryID, params.limit);
+  const summaries = await conversationRepository.listCatalogEntries({
+    system: "codex",
+    libraryID: params.libraryID,
+    kind: params.kind,
+    paperItemID: params.paperItemID,
+    limit: params.limit,
+  });
   return summaries.map(toEntry);
 }
 
 export async function loadAllCodexConversationHistory(params: {
   libraryID: number;
-  limit?: number;
+  limit?: number | null;
 }): Promise<CodexConversationHistoryEntry[]> {
-  const normalizedLimit = Number.isFinite(params.limit)
-    ? Math.max(1, Math.floor(params.limit as number))
-    : 100;
-  const [paperSummaries, globalSummaries] = await Promise.all([
-    listAllCodexPaperConversationsByLibrary(params.libraryID, normalizedLimit),
-    listCodexGlobalConversations(params.libraryID, normalizedLimit),
-  ]);
-  return [...paperSummaries, ...globalSummaries]
-    .map(toEntry)
-    .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+  const normalizedLimit =
+    params.limit === null
+      ? null
+      : Number.isFinite(params.limit)
+        ? Math.max(1, Math.floor(params.limit as number))
+        : 100;
+  return (
+    await conversationRepository.listAllCatalogEntries({
+      system: "codex",
+      libraryID: params.libraryID,
+      limit: normalizedLimit,
+    })
+  ).map(toEntry);
 }

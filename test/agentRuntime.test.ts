@@ -1184,6 +1184,159 @@ describe("AgentRuntime", function () {
     }
   });
 
+  it("does not force file writes after a standalone Zotero note request is satisfied", async function () {
+    const restoreDb = installMockDb();
+    try {
+      (
+        globalThis as typeof globalThis & {
+          Zotero: {
+            Prefs: {
+              set: (key: string, value: unknown, global?: boolean) => void;
+            };
+          };
+        }
+      ).Zotero.Prefs.set(
+        "extensions.zotero.llmforzotero.obsidianVaultPath",
+        "/tmp/obsidian-vault",
+        true,
+      );
+      (
+        globalThis as typeof globalThis & {
+          Zotero: {
+            Prefs: {
+              set: (key: string, value: unknown, global?: boolean) => void;
+            };
+          };
+        }
+      ).Zotero.Prefs.set(
+        "extensions.zotero.llmforzotero.notesDirectoryNickname",
+        "Obsidian",
+        true,
+      );
+
+      const registry = new AgentToolRegistry();
+      const noteWrites: unknown[] = [];
+      registry.register({
+        spec: {
+          name: "note_write",
+          description: "write note",
+          inputSchema: { type: "object" },
+          mutability: "write",
+          requiresConfirmation: false,
+        },
+        validate: (args: unknown) => ({ ok: true, value: args }),
+        execute: async (input) => {
+          noteWrites.push(input);
+          return { status: "saved" };
+        },
+      });
+
+      let stepIndex = 0;
+      let sawInitialZoteroRule = false;
+      let sawInitialFileRule = false;
+      let sawCorrectivePrompt = false;
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: true,
+            toolCalls: true,
+            multimodal: false,
+            fileInputs: false,
+            reasoning: true,
+          }),
+          supportsTools: () => true,
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            stepIndex += 1;
+            const allText = params.messages
+              .map((message) =>
+                typeof message.content === "string" ? message.content : "",
+              )
+              .join("\n");
+            if (stepIndex === 1) {
+              sawInitialZoteroRule = allText.includes(
+                "The user is asking for a Zotero note workflow",
+              );
+              sawInitialFileRule = allText.includes(
+                "The user is asking for an Obsidian/file-based note",
+              );
+              return {
+                kind: "tool_calls",
+                calls: [
+                  {
+                    id: "call-note",
+                    name: "note_write",
+                    arguments: {
+                      mode: "create",
+                      target: "standalone",
+                      content: "## Summary\nZotero note body.",
+                    },
+                  },
+                ],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call-note",
+                      name: "note_write",
+                      arguments: {
+                        mode: "create",
+                        target: "standalone",
+                        content: "## Summary\nZotero note body.",
+                      },
+                    },
+                  ],
+                },
+              };
+            }
+            sawCorrectivePrompt ||= allText.includes(
+              "requires writing a Markdown note",
+            );
+            return {
+              kind: "final",
+              text: "Saved Zotero note.",
+              assistantMessage: {
+                role: "assistant",
+                content: "Saved Zotero note.",
+              },
+            };
+          },
+        }),
+      });
+
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 1,
+          mode: "agent",
+          userText:
+            "help me summarize this paper and save a standalone note into my zotero library",
+          forcedSkillIds: ["write-note"],
+          model: "gpt-5.5",
+          apiBase: "",
+          apiKey: "test",
+        },
+      });
+
+      assert.equal(outcome.kind, "completed");
+      if (outcome.kind !== "completed") return;
+      assert.equal(outcome.text, "Saved Zotero note.");
+      assert.isTrue(sawInitialZoteroRule);
+      assert.isFalse(sawInitialFileRule);
+      assert.isFalse(sawCorrectivePrompt);
+      assert.equal(stepIndex, 2);
+      assert.deepEqual(noteWrites, [
+        {
+          mode: "create",
+          target: "standalone",
+          content: "## Summary\nZotero note body.",
+        },
+      ]);
+    } finally {
+      restoreDb();
+    }
+  });
+
   it("routes default file notes into the configured folder and creates it", async function () {
     const restoreDb = installMockDb();
     const originalIOUtils = (globalThis as { IOUtils?: unknown }).IOUtils;

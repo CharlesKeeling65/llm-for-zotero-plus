@@ -1,8 +1,10 @@
 import type { ReasoningLevel as LLMReasoningLevel } from "../../utils/llmClient";
+import type { ContextAttachmentSupport } from "./contextAttachmentTypes";
 import type {
   SelectedTextSource,
   ChatAttachmentCategory,
   ChatAttachment,
+  GeneratedChatImage,
   PaperContentSourceMode,
   AdvancedModelParams,
   ActiveNoteSession,
@@ -11,6 +13,7 @@ import type {
   NoteContextRef,
   OtherContextRef,
   CollectionContextRef,
+  TagContextRef,
   GlobalConversationSummary,
   PaperConversationSummary,
 } from "../../shared/types";
@@ -19,6 +22,7 @@ export type {
   SelectedTextSource,
   ChatAttachmentCategory,
   ChatAttachment,
+  GeneratedChatImage,
   PaperContentSourceMode,
   AdvancedModelParams,
   ActiveNoteSession,
@@ -27,6 +31,7 @@ export type {
   NoteContextRef,
   OtherContextRef,
   CollectionContextRef,
+  TagContextRef,
   GlobalConversationSummary,
   PaperConversationSummary,
 } from "../../shared/types";
@@ -61,10 +66,13 @@ export interface Message {
   quoteCitations?: QuoteCitation[];
   pinnedPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
   collectionContextsExpanded?: boolean;
+  tagContextsExpanded?: boolean;
   paperContextsExpanded?: boolean;
   attachments?: ChatAttachment[];
   modelAttachments?: ChatAttachment[];
+  generatedImages?: GeneratedChatImage[];
   attachmentsExpanded?: boolean;
   attachmentActiveIndex?: number;
   screenshotExpanded?: boolean;
@@ -128,6 +136,8 @@ export type CustomShortcut = {
 };
 export type ResolvedContextSource = {
   contextItem: Zotero.Item | null;
+  paperContext?: PaperContextRef | null;
+  support?: ContextAttachmentSupport | null;
   statusText: string;
   sourceKind?:
     | "none"
@@ -137,6 +147,28 @@ export type ResolvedContextSource = {
     | "direct-attachment"
     | "first-child"
     | "best-attachment";
+  ownerItem?: Zotero.Item | null;
+  rawItem?: Zotero.Item | null;
+  ownerItemId?: number;
+  contextItemId?: number;
+  supportKind?: "pdf" | "text";
+  contentSourceMode?: PaperContentSourceMode;
+  requiresAsyncResolution?: boolean;
+  isAsyncFinal?: boolean;
+};
+
+export type ContextSourceLifecycleState = {
+  rawItem: Zotero.Item | null;
+  ownerItem: Zotero.Item | null;
+  contextItem: Zotero.Item | null;
+  rawItemId: number;
+  ownerItemId: number;
+  contextItemId: number;
+  sourceKind: NonNullable<ResolvedContextSource["sourceKind"]>;
+  supportKind?: "pdf" | "text";
+  contentSourceMode?: PaperContentSourceMode;
+  requiresAsyncResolution: boolean;
+  isAsyncFinal: boolean;
 };
 
 export type PdfContext = {
@@ -344,8 +376,8 @@ import type { ReasoningConfig as LLMReasoningConfig } from "../../utils/llmClien
 export type SendQuestionOptions = {
   body: Element;
   item: Zotero.Item;
-  /** Raw Zotero item selected in the panel; may be a child PDF under item. */
-  contextSourceItem?: Zotero.Item | null;
+  /** Resolved panel/source context selected by compose UI. */
+  contextSource?: ResolvedContextSource | null;
   question: string;
   images?: string[];
   model?: string;
@@ -370,6 +402,7 @@ export type SendQuestionOptions = {
   paperContexts?: PaperContextRef[];
   fullTextPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
   /** Attachments shown in chat history. */
   attachments?: ChatAttachment[];
   /** Provider-resolved attachments sent to the model. Defaults to `attachments`. */
@@ -392,8 +425,8 @@ export type SendQuestionOptions = {
 export type EditRetryOptions = {
   body: Element;
   item: Zotero.Item;
-  /** Raw Zotero item selected in the panel; may be a child PDF under item. */
-  contextSourceItem?: Zotero.Item | null;
+  /** Resolved panel/source context selected by compose UI. */
+  contextSource?: ResolvedContextSource | null;
   displayQuestion: string;
   selectedTexts?: string[];
   selectedTextSources?: SelectedTextSource[];
@@ -403,6 +436,7 @@ export type EditRetryOptions = {
   paperContexts?: PaperContextRef[];
   fullTextPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
   /** Attachments shown in chat history. */
   attachments?: ChatAttachment[];
   /** Provider-resolved attachments sent to the retry request. Defaults to `attachments`. */

@@ -1,6 +1,16 @@
 import { normalizePaperContextRefs } from "../../normalizers";
+import {
+  isTextLikeAttachmentSourceMode,
+  resolvePaperContextDisplayMetadata as resolvePaperContextDisplayMetadataShared,
+} from "../../paperAttribution";
+import { isPdfContextAttachment } from "../../contextAttachmentSupport";
+import {
+  getContextSourceModeBadgeLabel,
+  getContextSourceModeSourceTitle,
+  isContextSourceModeReaderNavigable,
+  isContextSourceModeTextLikeAttachment,
+} from "../../contextSourceModes";
 import { sanitizeText } from "../../textUtils";
-import { resolvePaperContextDisplayMetadata as resolvePaperContextDisplayMetadataShared } from "../../paperAttribution";
 import type { PaperContextRef, PaperContentSourceMode } from "../../types";
 
 export function normalizePaperContextEntries(
@@ -16,6 +26,44 @@ export function resolvePaperContextDisplayMetadata(
   year?: string;
 } {
   return resolvePaperContextDisplayMetadataShared(paperContext);
+}
+
+type PaperChipSourceMenuOption = {
+  mode?: PaperContentSourceMode;
+  paperContext?: Pick<PaperContextRef, "itemId" | "contextItemId"> | null;
+  disabledReason?: string;
+  mineruAction?: string;
+};
+
+export function isPaperContextFullTextOnlySourceMode(
+  mode?: PaperContentSourceMode | null,
+): boolean {
+  return isTextLikeAttachmentSourceMode(mode);
+}
+
+export function isPaperContextReaderFocusableSourceMode(
+  mode?: PaperContentSourceMode | null,
+): boolean {
+  return isContextSourceModeReaderNavigable(mode);
+}
+
+export function hasPaperChipSourceMenuOption(
+  sourceOptions: PaperChipSourceMenuOption[],
+): boolean {
+  return sourceOptions.some((option) => {
+    if (option.disabledReason) return false;
+    if (option.mineruAction && option.mineruAction !== "select") return true;
+    const optionContext = option.paperContext;
+    if (!option.mode || !optionContext) return false;
+    const itemId = Number(optionContext.itemId);
+    const contextItemId = Number(optionContext.contextItemId);
+    return (
+      Number.isFinite(itemId) &&
+      itemId > 0 &&
+      Number.isFinite(contextItemId) &&
+      contextItemId > 0
+    );
+  });
 }
 
 function extractPaperYear(paperContext: PaperContextRef): string | null {
@@ -109,10 +157,7 @@ function resolveMultiPdfAttachmentTitle(paperContext: PaperContextRef): string {
   let pdfCount = 0;
   for (const attachmentId of attachmentIds) {
     const attachment = getZoteroItemsApi()?.get?.(attachmentId);
-    if (
-      attachment?.isAttachment?.() &&
-      attachment.attachmentContentType === "application/pdf"
-    ) {
+    if (isPdfContextAttachment(attachment)) {
       pdfCount += 1;
     }
   }
@@ -127,18 +172,23 @@ function buildCreatorYearBase(paperContext: PaperContextRef): string {
   return creator ? (year ? `${creator}, ${year}` : creator) : "Paper";
 }
 
+function getPaperContextChipSourceLabel(
+  contentSourceMode?: PaperContentSourceMode,
+): string | null {
+  return getContextSourceModeBadgeLabel(contentSourceMode);
+}
+
 export function formatPaperContextChipLabel(
   paperContext: PaperContextRef,
   contentSourceMode?: PaperContentSourceMode,
 ): string {
   const base = buildCreatorYearBase(paperContext);
-  if (contentSourceMode === "text") return `${base} - Text`;
-  if (contentSourceMode === "mineru") return `${base} - MD`;
-  if (contentSourceMode === "pdf") return `${base} - PDF`;
-  if (contentSourceMode === "markdown") return `${base} - MD`;
-  if (contentSourceMode === "html") return `${base} - HTML`;
-  if (contentSourceMode === "txt") return `${base} - TXT`;
-  if (contentSourceMode === "docx") return `${base} - DOCX`;
+  const sourceLabel = getPaperContextChipSourceLabel(contentSourceMode);
+  if (sourceLabel) {
+    return base === "Paper" && isTextLikeAttachmentSourceMode(contentSourceMode)
+      ? `Attachment - ${sourceLabel}`
+      : `${base} - ${sourceLabel}`;
+  }
   // Fallback (no mode specified) — legacy behavior
   const attachmentTitle = resolveMultiPdfAttachmentTitle(paperContext);
   return attachmentTitle ? `${base} - ${attachmentTitle}` : base;
@@ -156,12 +206,7 @@ export function formatPaperContextCardAttachmentLine(
       fallback: "full.md",
     });
   }
-  if (
-    contentSourceMode === "markdown" ||
-    contentSourceMode === "html" ||
-    contentSourceMode === "txt" ||
-    contentSourceMode === "docx"
-  ) {
+  if (isContextSourceModeTextLikeAttachment(contentSourceMode)) {
     return resolvePaperContextAttachmentLabel(paperContext);
   }
   return "";
@@ -175,22 +220,7 @@ export function formatPaperContextChipTitle(
   const meta = [metadata.firstCreator || "", metadata.year || ""]
     .filter(Boolean)
     .join(" · ");
-  const modeLabel =
-    contentSourceMode === "text"
-      ? "Source: Extracted text"
-      : contentSourceMode === "mineru"
-        ? "Source: MinerU (enhanced markdown)"
-        : contentSourceMode === "pdf"
-          ? "Source: PDF file"
-          : contentSourceMode === "markdown"
-            ? "Source: Markdown attachment"
-            : contentSourceMode === "html"
-              ? "Source: HTML attachment"
-              : contentSourceMode === "txt"
-                ? "Source: TXT attachment"
-                : contentSourceMode === "docx"
-                  ? "Source: Word attachment"
-                  : "";
+  const modeLabel = getContextSourceModeSourceTitle(contentSourceMode);
   const attachmentTitle = formatPaperContextCardAttachmentLine(
     paperContext,
     contentSourceMode,

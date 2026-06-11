@@ -138,6 +138,55 @@ describe("portalScope resolveInitialPanelItemState", function () {
     assert.equal(resolved.item?.libraryID, 7);
   });
 
+  it("uses the parent paper as the conversation item for a selected child attachment", function () {
+    const paperItem = {
+      id: 42,
+      libraryID: 7,
+      parentID: undefined,
+      isAttachment: () => false,
+      isRegularItem: () => true,
+    } as unknown as Zotero.Item;
+    const attachmentItem = {
+      id: 43,
+      libraryID: 7,
+      parentID: 42,
+      isAttachment: () => true,
+      isRegularItem: () => false,
+    } as unknown as Zotero.Item;
+    itemsById.set(42, paperItem);
+
+    const resolved = resolveInitialPanelItemState(attachmentItem);
+
+    assert.equal(resolved.basePaperItem, paperItem);
+    assert.equal(resolved.item, paperItem);
+  });
+
+  it("restores the remembered paper chat session for a selected child attachment", function () {
+    const paperItem = {
+      id: 42,
+      libraryID: 7,
+      parentID: undefined,
+      isAttachment: () => false,
+      isRegularItem: () => true,
+    } as unknown as Zotero.Item;
+    const attachmentItem = {
+      id: 43,
+      libraryID: 7,
+      parentID: 42,
+      isAttachment: () => true,
+      isRegularItem: () => false,
+    } as unknown as Zotero.Item;
+    itemsById.set(42, paperItem);
+    activePaperConversationByPaper.set("7:42", 4207);
+
+    const resolved = resolveInitialPanelItemState(attachmentItem);
+
+    assert.equal(resolved.basePaperItem, paperItem);
+    assert.isTrue(isPaperPortalItem(resolved.item));
+    assert.equal(resolved.item?.id, 4207);
+    assert.equal(resolved.item?.libraryID, 7);
+  });
+
   it("keeps explicit upstream paper mode ahead of a stale global lock", function () {
     const paperItem = {
       id: 42,

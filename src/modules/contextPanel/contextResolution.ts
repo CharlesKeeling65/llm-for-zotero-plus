@@ -23,6 +23,7 @@ import type {
   NoteContextRef,
   ZoteroTabsState,
   ResolvedContextSource,
+  ContextSourceLifecycleState,
   SelectedTextContext,
   SelectedTextSource,
   PaperContextRef,
@@ -32,8 +33,15 @@ import {
   resolveActiveNoteSession,
   resolveDisplayConversationKind,
 } from "./portalScope";
-import { formatPaperCitationLabel } from "./paperAttribution";
-import { resolveTextAttachmentSourceModeFromMetadata } from "./textAttachmentExtraction";
+import {
+  formatPaperCitationLabel,
+  resolvePaperContextRefFromAttachment,
+} from "./paperAttribution";
+import {
+  isPdfContextAttachment,
+  resolveContextAttachmentSupport,
+  isSupportedContextAttachment,
+} from "./contextAttachmentSupport";
 import { createContextIcon } from "./contextIcons";
 import {
   getFirstSelectionFromReader,
@@ -306,61 +314,83 @@ export function getActiveContextAttachmentFromTabs(): Zotero.Item | null {
   return null;
 }
 
-function getAttachmentFilename(item: Zotero.Item | null | undefined): string {
-  if (!item?.isAttachment?.()) return "";
-  return sanitizeText(
-    String(
-      (item as unknown as { attachmentFilename?: unknown })
-        .attachmentFilename || "",
-    ),
-  )
-    .trim()
-    .toLowerCase();
-}
-
-function getAttachmentContentType(
-  item: Zotero.Item | null | undefined,
-): string {
-  if (!item?.isAttachment?.()) return "";
-  return sanitizeText(String(item.attachmentContentType || ""))
-    .trim()
-    .toLowerCase();
-}
-
-function isSupportedPdfContextAttachment(
-  item: Zotero.Item | null | undefined,
-): item is Zotero.Item {
-  if (!item?.isAttachment?.()) return false;
-  const contentType = getAttachmentContentType(item);
-  const filename = getAttachmentFilename(item);
-  return contentType === "application/pdf" || filename.endsWith(".pdf");
-}
-
-function isSupportedTextContextAttachment(
-  item: Zotero.Item | null | undefined,
-): item is Zotero.Item {
-  if (!item?.isAttachment?.()) return false;
-  return Boolean(
-    resolveTextAttachmentSourceModeFromMetadata({
-      contentType: getAttachmentContentType(item),
-      filename: getAttachmentFilename(item),
-    }),
-  );
-}
-
-function isSupportedContextAttachment(
-  item: Zotero.Item | null | undefined,
-): item is Zotero.Item {
-  return (
-    isSupportedPdfContextAttachment(item) ||
-    isSupportedTextContextAttachment(item)
-  );
-}
-
 function getContextItemLabel(item: Zotero.Item): string {
   const title = sanitizeText(item.getField("title") || "").trim();
   if (title) return title;
   return `Attachment ${item.id}`;
+}
+
+function normalizeItemId(item: Zotero.Item | null | undefined): number {
+  const parsed = Math.floor(Number(item?.id || 0));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function resolveRegularOwnerItem(
+  item: Zotero.Item | null | undefined,
+): Zotero.Item | null {
+  if (!item) return null;
+  if (item.isAttachment?.() && item.parentID) {
+    const parent = Zotero.Items.get(item.parentID) || null;
+    return parent?.isRegularItem?.() ? parent : null;
+  }
+  return item.isRegularItem?.() ? item : null;
+}
+
+function resolveContextOwnerItem(
+  rawItem: Zotero.Item | null | undefined,
+  contextItem: Zotero.Item | null | undefined,
+): Zotero.Item | null {
+  return (
+    resolveRegularOwnerItem(contextItem) || resolveRegularOwnerItem(rawItem)
+  );
+}
+
+function sourceNeedsAsyncBestAttachmentResolution(
+  rawItem: Zotero.Item | null | undefined,
+  source: ResolvedContextSource,
+): boolean {
+  if (!rawItem) return false;
+  if (
+    source.sourceKind === "active-reader" ||
+    source.sourceKind === "selected-child" ||
+    source.sourceKind === "direct-attachment" ||
+    source.sourceKind === "best-attachment" ||
+    source.sourceKind === "note"
+  ) {
+    return false;
+  }
+  if (
+    isGlobalPortalItem(rawItem) ||
+    resolveDisplayConversationKind(rawItem) === "global" ||
+    isSupportedContextAttachment(rawItem)
+  ) {
+    return false;
+  }
+  return Boolean(resolveRegularOwnerItem(rawItem));
+}
+
+export function resolvePanelContextLifecycleState(
+  rawItem: Zotero.Item | null | undefined,
+): ContextSourceLifecycleState | null {
+  if (!rawItem) return null;
+  const source = resolveContextSourceItem(rawItem);
+  const contextItem = source.contextItem || null;
+  const support = source.support || null;
+  const ownerItem = source.ownerItem || null;
+  const requiresAsyncResolution = source.requiresAsyncResolution === true;
+  return {
+    rawItem: source.rawItem || rawItem,
+    ownerItem,
+    contextItem,
+    rawItemId: normalizeItemId(rawItem),
+    ownerItemId: normalizeItemId(ownerItem),
+    contextItemId: normalizeItemId(contextItem),
+    sourceKind: source.sourceKind || "none",
+    supportKind: support?.kind,
+    contentSourceMode: source.contentSourceMode,
+    requiresAsyncResolution,
+    isAsyncFinal: source.isAsyncFinal !== false,
+  };
 }
 
 function getFirstPdfChildAttachment(
@@ -370,20 +400,20 @@ function getFirstPdfChildAttachment(
   const attachments = item.getAttachments();
   for (const attachmentId of attachments) {
     const attachment = Zotero.Items.get(attachmentId);
-    if (isSupportedPdfContextAttachment(attachment)) {
+    if (isPdfContextAttachment(attachment)) {
       return attachment;
     }
   }
   return null;
 }
 
-async function getBestPdfAttachment(
+async function getBestSupportedContextAttachment(
   item: Zotero.Item | null | undefined,
 ): Promise<Zotero.Item | null> {
   if (!item || item.isAttachment?.() || !item.isRegularItem?.()) return null;
   try {
     const attachment = await item.getBestAttachment();
-    return attachment && isSupportedPdfContextAttachment(attachment)
+    return attachment && isSupportedContextAttachment(attachment)
       ? attachment
       : null;
   } catch (_error) {
@@ -421,7 +451,52 @@ function getSelectedSupportedAttachmentFromLibraryPane(): Zotero.Item | null {
   return null;
 }
 
-export function resolveContextSourceItem(
+function enrichResolvedContextSource(
+  rawItem: Zotero.Item | null | undefined,
+  source: ResolvedContextSource,
+): ResolvedContextSource {
+  const contextItem = source.contextItem || null;
+  const support =
+    source.support === undefined
+      ? resolveContextAttachmentSupport(contextItem)
+      : source.support;
+  const paperContext =
+    source.paperContext === undefined
+      ? resolvePaperContextRefFromAttachment(contextItem)
+      : source.paperContext;
+  const ownerItem =
+    source.ownerItem === undefined
+      ? resolveContextOwnerItem(rawItem, contextItem)
+      : source.ownerItem;
+  const requiresAsyncResolution =
+    source.requiresAsyncResolution ??
+    sourceNeedsAsyncBestAttachmentResolution(rawItem || null, source);
+  return {
+    ...source,
+    rawItem: source.rawItem === undefined ? rawItem || null : source.rawItem,
+    ownerItem,
+    ownerItemId:
+      source.ownerItemId === undefined
+        ? normalizeItemId(ownerItem)
+        : source.ownerItemId,
+    contextItem,
+    contextItemId:
+      source.contextItemId === undefined
+        ? normalizeItemId(contextItem)
+        : source.contextItemId,
+    support,
+    paperContext,
+    supportKind: source.supportKind || support?.kind,
+    contentSourceMode:
+      source.contentSourceMode ||
+      paperContext?.contentSourceMode ||
+      (support?.kind === "text" ? support.contentSourceMode : undefined),
+    requiresAsyncResolution,
+    isAsyncFinal: source.isAsyncFinal ?? !requiresAsyncResolution,
+  };
+}
+
+function resolveContextSourceItemBase(
   panelItem: Zotero.Item,
 ): ResolvedContextSource {
   const activeNoteSession = resolveActiveNoteSession(panelItem);
@@ -457,7 +532,7 @@ export function resolveContextSourceItem(
     }
     return {
       contextItem: null,
-      statusText: `Using note: ${activeNoteSession.title}; parent item has no PDF context`,
+      statusText: `Using note: ${activeNoteSession.title}; parent item has no supported attachment context`,
       sourceKind: "none",
     };
   }
@@ -473,6 +548,35 @@ export function resolveContextSourceItem(
     };
   }
 
+  const selectedAttachment = getSelectedSupportedAttachmentFromLibraryPane();
+  const panelParentItem =
+    panelItem.isAttachment() && panelItem.parentID
+      ? Zotero.Items.get(panelItem.parentID) || null
+      : panelItem;
+  if (resolveContextAttachmentSupport(panelItem)) {
+    const label = getContextItemLabel(panelItem);
+    return {
+      contextItem: panelItem,
+      statusText: `using the selected ${label} as context`,
+      sourceKind: "direct-attachment",
+    };
+  }
+
+  const selectedPanelAttachment = selectedAttachment as Zotero.Item | null;
+  if (
+    selectedPanelAttachment &&
+    (selectedPanelAttachment.id === panelItem.id ||
+      (panelParentItem &&
+        selectedPanelAttachment.parentID === panelParentItem.id))
+  ) {
+    const label = getContextItemLabel(selectedPanelAttachment);
+    return {
+      contextItem: selectedPanelAttachment,
+      statusText: `using the selected ${label} as context`,
+      sourceKind: "selected-child",
+    };
+  }
+
   const activeItem = getActiveContextAttachmentFromTabs();
   if (activeItem) {
     const label = getContextItemLabel(activeItem);
@@ -480,33 +584,6 @@ export function resolveContextSourceItem(
       contextItem: activeItem,
       statusText: `Using context: ${label} (active tab)`,
       sourceKind: "active-reader",
-    };
-  }
-
-  const selectedAttachment = getSelectedSupportedAttachmentFromLibraryPane();
-  const panelParentItem =
-    panelItem.isAttachment() && panelItem.parentID
-      ? Zotero.Items.get(panelItem.parentID) || null
-      : panelItem;
-  if (
-    selectedAttachment &&
-    (selectedAttachment.id === panelItem.id ||
-      (panelParentItem && selectedAttachment.parentID === panelParentItem.id))
-  ) {
-    const label = getContextItemLabel(selectedAttachment);
-    return {
-      contextItem: selectedAttachment,
-      statusText: `using the selected ${label} as context`,
-      sourceKind: "selected-child",
-    };
-  }
-
-  if (isSupportedContextAttachment(panelItem)) {
-    const label = getContextItemLabel(panelItem);
-    return {
-      contextItem: panelItem,
-      statusText: `using the selected ${label} as context`,
-      sourceKind: "direct-attachment",
     };
   }
 
@@ -536,12 +613,12 @@ export function resolveContextSourceItem(
     : [];
   return {
     contextItem: null,
-    statusText: `No active tab PDF context (tab=${selectedTab?.selectedID ?? "?"}, type=${selectedTab?.selectedType ?? "?"}, tabType=${activeTab?.type ?? "?"}, dataKeys=${dataKeys.join("|") || "-"})`,
+    statusText: `No active tab attachment context (tab=${selectedTab?.selectedID ?? "?"}, type=${selectedTab?.selectedType ?? "?"}, tabType=${activeTab?.type ?? "?"}, dataKeys=${dataKeys.join("|") || "-"})`,
     sourceKind: "none",
   };
 }
 
-export async function resolveContextSourceItemAsync(
+async function resolveContextSourceItemAsyncBase(
   panelItem: Zotero.Item,
 ): Promise<ResolvedContextSource> {
   const activeNoteSession = resolveActiveNoteSession(panelItem);
@@ -566,7 +643,7 @@ export async function resolveContextSourceItemAsync(
       };
     }
     const parentItem = Zotero.Items.get(activeNoteSession.parentItemId) || null;
-    const bestAttachment = await getBestPdfAttachment(parentItem);
+    const bestAttachment = await getBestSupportedContextAttachment(parentItem);
     if (bestAttachment) {
       const label = getContextItemLabel(bestAttachment);
       return {
@@ -577,7 +654,7 @@ export async function resolveContextSourceItemAsync(
     }
     return {
       contextItem: null,
-      statusText: `Using note: ${activeNoteSession.title}; parent item has no PDF context`,
+      statusText: `Using note: ${activeNoteSession.title}; parent item has no supported attachment context`,
       sourceKind: "none",
     };
   }
@@ -593,6 +670,35 @@ export async function resolveContextSourceItemAsync(
     };
   }
 
+  const selectedAttachment = getSelectedSupportedAttachmentFromLibraryPane();
+  const panelParentItem =
+    panelItem.isAttachment() && panelItem.parentID
+      ? Zotero.Items.get(panelItem.parentID) || null
+      : panelItem;
+  if (resolveContextAttachmentSupport(panelItem)) {
+    const label = getContextItemLabel(panelItem);
+    return {
+      contextItem: panelItem,
+      statusText: `using the selected ${label} as context`,
+      sourceKind: "direct-attachment",
+    };
+  }
+
+  const selectedPanelAttachment = selectedAttachment as Zotero.Item | null;
+  if (
+    selectedPanelAttachment &&
+    (selectedPanelAttachment.id === panelItem.id ||
+      (panelParentItem &&
+        selectedPanelAttachment.parentID === panelParentItem.id))
+  ) {
+    const label = getContextItemLabel(selectedPanelAttachment);
+    return {
+      contextItem: selectedPanelAttachment,
+      statusText: `using the selected ${label} as context`,
+      sourceKind: "selected-child",
+    };
+  }
+
   const activeItem = getActiveContextAttachmentFromTabs();
   if (activeItem) {
     const label = getContextItemLabel(activeItem);
@@ -603,34 +709,8 @@ export async function resolveContextSourceItemAsync(
     };
   }
 
-  const selectedAttachment = getSelectedSupportedAttachmentFromLibraryPane();
-  const panelParentItem =
-    panelItem.isAttachment() && panelItem.parentID
-      ? Zotero.Items.get(panelItem.parentID) || null
-      : panelItem;
-  if (
-    selectedAttachment &&
-    (selectedAttachment.id === panelItem.id ||
-      (panelParentItem && selectedAttachment.parentID === panelParentItem.id))
-  ) {
-    const label = getContextItemLabel(selectedAttachment);
-    return {
-      contextItem: selectedAttachment,
-      statusText: `using the selected ${label} as context`,
-      sourceKind: "selected-child",
-    };
-  }
-
-  if (isSupportedContextAttachment(panelItem)) {
-    const label = getContextItemLabel(panelItem);
-    return {
-      contextItem: panelItem,
-      statusText: `using the selected ${label} as context`,
-      sourceKind: "direct-attachment",
-    };
-  }
-
-  const bestAttachment = await getBestPdfAttachment(panelParentItem);
+  const bestAttachment =
+    await getBestSupportedContextAttachment(panelParentItem);
   if (bestAttachment && panelParentItem) {
     const parentTitle =
       sanitizeText(panelParentItem.getField("title") || "").trim() ||
@@ -645,9 +725,27 @@ export async function resolveContextSourceItemAsync(
 
   return {
     contextItem: null,
-    statusText: "Parent item has no PDF best attachment",
+    statusText: "Parent item has no supported best attachment",
     sourceKind: "none",
   };
+}
+
+export function resolveContextSourceItem(
+  panelItem: Zotero.Item,
+): ResolvedContextSource {
+  return enrichResolvedContextSource(
+    panelItem,
+    resolveContextSourceItemBase(panelItem),
+  );
+}
+
+export async function resolveContextSourceItemAsync(
+  panelItem: Zotero.Item,
+): Promise<ResolvedContextSource> {
+  return enrichResolvedContextSource(
+    panelItem,
+    await resolveContextSourceItemAsyncBase(panelItem),
+  );
 }
 
 export function resolveContextSourceItemId(
@@ -1311,11 +1409,7 @@ export function createNoteContextChip(
     noteMeta.dataset.contextIndex = `${options.removableIndex}`;
     noteChip.dataset.contextIndex = `${options.removableIndex}`;
   }
-  const noteIcon = createContextIcon(
-    ownerDoc,
-    "note",
-    "llm-note-context-icon",
-  );
+  const noteIcon = createContextIcon(ownerDoc, "note", "llm-note-context-icon");
   const noteLabel = ownerDoc.createElement("span");
   noteLabel.className = "llm-note-context-label";
   noteLabel.textContent = noteLabelText;

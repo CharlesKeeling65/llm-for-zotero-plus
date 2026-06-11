@@ -501,10 +501,11 @@ export function createRunCommandTool(): AgentToolDefinition<
         cancelLabel: "Cancel",
         fields: [
           {
-            type: "text" as const,
+            type: "code_preview" as const,
             id: "command",
             label: "Command",
             value: input.command,
+            language: "sh",
           },
           ...(input.cwd
             ? [

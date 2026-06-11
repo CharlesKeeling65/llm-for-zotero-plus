@@ -1,14 +1,33 @@
 import {
   config,
   ASSISTANT_NOTE_MAP_PREF_KEY,
+  BUILTIN_SHORTCUT_FILES,
+  buildDefaultUpstreamGlobalConversationKey,
   CUSTOM_SHORTCUT_ID_PREFIX,
   FONT_SCALE_DEFAULT_PERCENT,
   FONT_SCALE_MIN_PERCENT,
   FONT_SCALE_MAX_PERCENT,
+  GLOBAL_CONVERSATION_KEY_BASE,
+  MESSAGE_LINE_SPACING_DEFAULT_PERCENT,
+  MESSAGE_LINE_SPACING_MIN_PERCENT,
+  MESSAGE_LINE_SPACING_MAX_PERCENT,
+  MESSAGE_PARAGRAPH_SPACING_DEFAULT_PX,
+  MESSAGE_PARAGRAPH_SPACING_MIN_PX,
+  MESSAGE_PARAGRAPH_SPACING_MAX_PX,
+  MESSAGE_WORD_SPACING_DEFAULT_PX,
+  MESSAGE_WORD_SPACING_MIN_PX,
+  MESSAGE_WORD_SPACING_MAX_PX,
   isUpstreamGlobalConversationKey,
 } from "./constants";
 import type { CustomShortcut, ReasoningLevelSelection } from "./types";
-import { selectedModelCache, panelFontScalePercent } from "./state";
+import {
+  selectedModelCache,
+  panelFontScalePercent,
+  messageLineSpacingPercent,
+  messageParagraphSpacingPx,
+  messageWordSpacingPx,
+  messageFontFamily,
+} from "./state";
 import {
   deriveProviderLabel,
   getDefaultModelEntry,
@@ -24,6 +43,7 @@ import {
 type ZoteroPrefsAPI = {
   get?: (key: string, global?: boolean) => unknown;
   set?: (key: string, value: unknown, global?: boolean) => void;
+  clear?: (key: string, global?: boolean) => void;
 };
 
 function getZoteroPrefs(): ZoteroPrefsAPI | null {
@@ -62,6 +82,26 @@ const LAST_REASONING_LEVEL_BY_PROVIDER_PREF_KEY =
 const LAST_REASONING_EXPANDED_PREF_KEY = "lastReasoningExpanded";
 const LAST_PAPER_CONVERSATION_MAP_PREF_KEY = "lastUsedPaperConversationMap";
 const PANEL_FONT_SCALE_PREF_KEY = "panelFontScale";
+const SHORTCUT_DEFAULTS_MIGRATION_PREF_KEY = "shortcutDefaultsMigrationVersion";
+const SHORTCUT_DEFAULTS_MIGRATION_VERSION = 2;
+const MESSAGE_LINE_SPACING_PREF_KEY = "messageLineSpacing";
+const MESSAGE_PARAGRAPH_SPACING_PREF_KEY = "messageParagraphSpacing";
+const MESSAGE_WORD_SPACING_PREF_KEY = "messageWordSpacing";
+const MESSAGE_FONT_FAMILY_PREF_KEY = "messageFontFamily";
+const GENERIC_FONT_FAMILIES = new Set([
+  "serif",
+  "sans-serif",
+  "monospace",
+  "cursive",
+  "fantasy",
+  "system-ui",
+  "ui-serif",
+  "ui-sans-serif",
+  "ui-monospace",
+  "emoji",
+  "math",
+  "fangsong",
+]);
 const REASONING_LEVEL_SELECTIONS = new Set<ReasoningLevelSelection>([
   "none",
   "default",
@@ -80,6 +120,14 @@ const REASONING_PROVIDER_SELECTION_KEYS = new Set([
   "grok",
   "anthropic",
 ]);
+
+const BUILTIN_SHORTCUT_IDS = new Set<string>(
+  BUILTIN_SHORTCUT_FILES.map((shortcut) => shortcut.id),
+);
+const BUILTIN_IDS_RESTORED_ON_MIGRATION = new Set<string>(["mermaid-diagram"]);
+const KNOWN_OLD_BUILTIN_PROMPTS: Record<string, string[]> = {
+  summarize: ["Summarize the document in 3-5 bullet points."],
+};
 
 export function buildPaperStateKey(
   libraryID: number,
@@ -311,6 +359,22 @@ export function getProviderLabelForSettings(
 export function applyPanelFontScale(panel: HTMLElement | null): void {
   if (!panel) return;
   panel.style.setProperty("--llm-font-scale", `${panelFontScalePercent / 100}`);
+  panel.style.setProperty(
+    "--llm-message-line-height",
+    `${messageLineSpacingPercent / 100}`,
+  );
+  panel.style.setProperty(
+    "--llm-message-paragraph-spacing",
+    `${messageParagraphSpacingPx}px`,
+  );
+  panel.style.setProperty(
+    "--llm-message-word-spacing",
+    `${messageWordSpacingPx}px`,
+  );
+  panel.style.setProperty(
+    "--llm-message-font-family",
+    formatMessageFontFamilyCssValue(messageFontFamily),
+  );
 }
 
 export function getFontScalePref(): number {
@@ -333,6 +397,135 @@ export function setFontScalePref(value: number): void {
     clamped,
     true,
   );
+}
+
+export function getMessageLineSpacingPref(): number {
+  const raw = getZoteroPrefs()?.get?.(
+    `${config.prefsPrefix}.${MESSAGE_LINE_SPACING_PREF_KEY}`,
+    true,
+  );
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return MESSAGE_LINE_SPACING_DEFAULT_PERCENT;
+  return Math.max(
+    MESSAGE_LINE_SPACING_MIN_PERCENT,
+    Math.min(n, MESSAGE_LINE_SPACING_MAX_PERCENT),
+  );
+}
+
+export function setMessageLineSpacingPref(value: number): void {
+  const clamped = Math.max(
+    MESSAGE_LINE_SPACING_MIN_PERCENT,
+    Math.min(value, MESSAGE_LINE_SPACING_MAX_PERCENT),
+  );
+  getZoteroPrefs()?.set?.(
+    `${config.prefsPrefix}.${MESSAGE_LINE_SPACING_PREF_KEY}`,
+    clamped,
+    true,
+  );
+}
+
+export function getMessageParagraphSpacingPref(): number {
+  const raw = getZoteroPrefs()?.get?.(
+    `${config.prefsPrefix}.${MESSAGE_PARAGRAPH_SPACING_PREF_KEY}`,
+    true,
+  );
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return MESSAGE_PARAGRAPH_SPACING_DEFAULT_PX;
+  return Math.max(
+    MESSAGE_PARAGRAPH_SPACING_MIN_PX,
+    Math.min(n, MESSAGE_PARAGRAPH_SPACING_MAX_PX),
+  );
+}
+
+export function setMessageParagraphSpacingPref(value: number): void {
+  const clamped = Math.max(
+    MESSAGE_PARAGRAPH_SPACING_MIN_PX,
+    Math.min(value, MESSAGE_PARAGRAPH_SPACING_MAX_PX),
+  );
+  getZoteroPrefs()?.set?.(
+    `${config.prefsPrefix}.${MESSAGE_PARAGRAPH_SPACING_PREF_KEY}`,
+    clamped,
+    true,
+  );
+}
+
+export function getMessageWordSpacingPref(): number {
+  const raw = getZoteroPrefs()?.get?.(
+    `${config.prefsPrefix}.${MESSAGE_WORD_SPACING_PREF_KEY}`,
+    true,
+  );
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return MESSAGE_WORD_SPACING_DEFAULT_PX;
+  return Math.max(
+    MESSAGE_WORD_SPACING_MIN_PX,
+    Math.min(n, MESSAGE_WORD_SPACING_MAX_PX),
+  );
+}
+
+export function setMessageWordSpacingPref(value: number): void {
+  const clamped = Math.max(
+    MESSAGE_WORD_SPACING_MIN_PX,
+    Math.min(value, MESSAGE_WORD_SPACING_MAX_PX),
+  );
+  getZoteroPrefs()?.set?.(
+    `${config.prefsPrefix}.${MESSAGE_WORD_SPACING_PREF_KEY}`,
+    clamped,
+    true,
+  );
+}
+
+export function getMessageFontFamilyPref(): string {
+  const raw = getZoteroPrefs()?.get?.(
+    `${config.prefsPrefix}.${MESSAGE_FONT_FAMILY_PREF_KEY}`,
+    true,
+  );
+  return typeof raw === "string" ? raw : "";
+}
+
+export function setMessageFontFamilyPref(value: string): void {
+  getZoteroPrefs()?.set?.(
+    `${config.prefsPrefix}.${MESSAGE_FONT_FAMILY_PREF_KEY}`,
+    value,
+    true,
+  );
+}
+
+function stripFontFamilyQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length < 2) return trimmed;
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if ((first === `"` && last === `"`) || (first === "'" && last === "'")) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+function formatFontFamilyToken(raw: string): string | null {
+  const token = stripFontFamilyQuotes(
+    raw
+      .replace(/[\n\r;]/g, " ")
+      .replace(/[{}]/g, "")
+      .trim(),
+  );
+  if (!token) return null;
+  const lower = token.toLowerCase();
+  if (GENERIC_FONT_FAMILIES.has(lower)) return lower;
+  if (/^-?[A-Za-z_][A-Za-z0-9_-]*$/.test(token)) return token;
+  return `"${token.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+export function formatMessageFontFamilyCssValue(value: string): string {
+  const tokens = value
+    .split(",")
+    .map(formatFontFamilyToken)
+    .filter((token): token is string => Boolean(token));
+  if (!tokens.length) return "inherit";
+  const hasGenericFallback = tokens.some((token) =>
+    GENERIC_FONT_FAMILIES.has(token.toLowerCase()),
+  );
+  if (!hasGenericFallback) tokens.push("sans-serif");
+  return tokens.join(", ");
 }
 
 /** Get/set JSON preferences with error handling */
@@ -389,6 +582,81 @@ function setStringArrayPref(key: string, value: string[]): void {
   Zotero.Prefs.set(`${config.prefsPrefix}.${key}`, JSON.stringify(value), true);
 }
 
+function normalizeShortcutText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function dedupeStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of values) {
+    const value = raw.trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+function normalizeShortcutOverridesForMigration(
+  overrides: Record<string, string>,
+): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const [id, prompt] of Object.entries(overrides)) {
+    if (!BUILTIN_SHORTCUT_IDS.has(id) || typeof prompt !== "string") continue;
+    const trimmedPrompt = prompt.trim();
+    if (!trimmedPrompt) continue;
+    const knownOldPrompts = KNOWN_OLD_BUILTIN_PROMPTS[id] || [];
+    const normalizedPrompt = normalizeShortcutText(trimmedPrompt);
+    if (
+      knownOldPrompts.some(
+        (oldPrompt) => normalizeShortcutText(oldPrompt) === normalizedPrompt,
+      )
+    ) {
+      continue;
+    }
+    next[id] = trimmedPrompt;
+  }
+  return next;
+}
+
+function normalizeShortcutLabelOverridesForMigration(
+  labels: Record<string, string>,
+): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const [id, label] of Object.entries(labels)) {
+    if (!BUILTIN_SHORTCUT_IDS.has(id) || typeof label !== "string") continue;
+    const trimmedLabel = label.trim();
+    if (!trimmedLabel) continue;
+    next[id] = trimmedLabel;
+  }
+  return next;
+}
+
+function normalizeCustomShortcutList(
+  customShortcuts: CustomShortcut[],
+): CustomShortcut[] {
+  const seenIds = new Set<string>();
+  const seenContent = new Set<string>();
+  const normalized: CustomShortcut[] = [];
+
+  for (const shortcut of customShortcuts) {
+    const id = shortcut.id.trim();
+    const prompt = shortcut.prompt.trim();
+    const label = shortcut.label.trim() || "Custom Shortcut";
+    if (!id || !prompt) continue;
+    if (BUILTIN_SHORTCUT_IDS.has(id) || seenIds.has(id)) continue;
+
+    const contentKey = `${label}\u0000${prompt}`;
+    if (seenContent.has(contentKey)) continue;
+    seenIds.add(id);
+    seenContent.add(contentKey);
+    normalized.push({ id, label, prompt });
+  }
+
+  return normalized;
+}
+
 function getCustomShortcutsPref(key: string): CustomShortcut[] {
   const raw =
     (Zotero.Prefs.get(`${config.prefsPrefix}.${key}`, true) as string) || "";
@@ -416,7 +684,7 @@ function getCustomShortcutsPref(key: string): CustomShortcut[] {
         prompt,
       });
     }
-    return shortcuts;
+    return normalizeCustomShortcutList(shortcuts);
   } catch {
     return [];
   }
@@ -431,12 +699,105 @@ export function createCustomShortcutId(): string {
   return `${CUSTOM_SHORTCUT_ID_PREFIX}-${Date.now()}-${token}`;
 }
 
+function clearShortcutPref(key: string, fallback: () => void): void {
+  const prefName = `${config.prefsPrefix}.${key}`;
+  const prefs = getZoteroPrefs();
+  if (typeof prefs?.clear === "function") {
+    try {
+      prefs.clear(prefName, true);
+      return;
+    } catch {
+      // Fall through to the old empty-value behavior for test stubs or older APIs.
+    }
+  }
+  fallback();
+}
+
+function logShortcutPrefMaintenance(message: string): void {
+  const globalZtoolkit = globalThis as typeof globalThis & {
+    ztoolkit?: { log?: (...args: unknown[]) => void };
+  };
+  try {
+    globalZtoolkit.ztoolkit?.log?.(message);
+  } catch {
+    // Logging must never block pref repair.
+  }
+}
+
+export function normalizeShortcutOrderForVisibleIds(
+  savedOrder: string[],
+  currentVisibleIds: string[],
+): string[] {
+  const visibleSet = new Set(currentVisibleIds);
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+
+  for (const id of savedOrder) {
+    if (!visibleSet.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    normalized.push(id);
+  }
+
+  for (const id of currentVisibleIds) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    normalized.push(id);
+  }
+
+  return normalized;
+}
+
+export function migrateShortcutDefaultsIfNeeded(): void {
+  const prefs = getZoteroPrefs();
+  const migrationPref = `${config.prefsPrefix}.${SHORTCUT_DEFAULTS_MIGRATION_PREF_KEY}`;
+  const currentVersion = Number(prefs?.get?.(migrationPref, true) || 0);
+  if (
+    Number.isFinite(currentVersion) &&
+    currentVersion >= SHORTCUT_DEFAULTS_MIGRATION_VERSION
+  ) {
+    return;
+  }
+
+  const overrides = normalizeShortcutOverridesForMigration(
+    getShortcutOverrides(),
+  );
+  const labelOverrides = normalizeShortcutLabelOverridesForMigration(
+    getShortcutLabelOverrides(),
+  );
+  const deletedIds = dedupeStrings(getDeletedShortcutIds())
+    .filter((id) => BUILTIN_SHORTCUT_IDS.has(id))
+    .filter((id) => !BUILTIN_IDS_RESTORED_ON_MIGRATION.has(id));
+  const customShortcuts = normalizeCustomShortcutList(getCustomShortcuts());
+  const customIds = customShortcuts.map((shortcut) => shortcut.id);
+  const visibleBuiltinIds = BUILTIN_SHORTCUT_FILES.map(
+    (shortcut) => shortcut.id,
+  ).filter((id) => !deletedIds.includes(id));
+  const visibleIds = [...visibleBuiltinIds, ...customIds];
+  const shortcutOrder = normalizeShortcutOrderForVisibleIds(
+    getShortcutOrder(),
+    visibleIds,
+  );
+
+  setShortcutOverrides(overrides);
+  setShortcutLabelOverrides(labelOverrides);
+  setDeletedShortcutIds(deletedIds);
+  setCustomShortcuts(customShortcuts);
+  setShortcutOrder(shortcutOrder);
+  prefs?.set?.(migrationPref, SHORTCUT_DEFAULTS_MIGRATION_VERSION, true);
+  logShortcutPrefMaintenance(
+    `LLM: Migrated shortcut defaults to v${SHORTCUT_DEFAULTS_MIGRATION_VERSION} (previous=${currentVersion || 0}, builtins=${BUILTIN_SHORTCUT_FILES.map((shortcut) => shortcut.id).join(",")})`,
+  );
+}
+
 export function resetShortcutsToDefault(): void {
-  setShortcutOverrides({});
-  setShortcutLabelOverrides({});
-  setDeletedShortcutIds([]);
-  setCustomShortcuts([]);
-  setShortcutOrder([]);
+  clearShortcutPref("shortcuts", () => setShortcutOverrides({}));
+  clearShortcutPref("shortcutLabels", () => setShortcutLabelOverrides({}));
+  clearShortcutPref("shortcutDeleted", () => setDeletedShortcutIds([]));
+  clearShortcutPref("customShortcuts", () => setCustomShortcuts([]));
+  clearShortcutPref("shortcutOrder", () => setShortcutOrder([]));
+  logShortcutPrefMaintenance(
+    `LLM: Reset shortcuts to defaults (builtins=${BUILTIN_SHORTCUT_FILES.map((shortcut) => shortcut.id).join(",")})`,
+  );
 }
 
 function getAssistantNoteMap(): Record<string, string> {
@@ -525,6 +886,9 @@ export function getLockedGlobalConversationKey(
   const normalized = Number(raw);
   if (!Number.isFinite(normalized) || normalized <= 0) return null;
   const conversationKey = Math.floor(normalized);
+  if (conversationKey === GLOBAL_CONVERSATION_KEY_BASE) {
+    return buildDefaultUpstreamGlobalConversationKey(libraryID);
+  }
   return isUpstreamGlobalConversationKey(conversationKey)
     ? conversationKey
     : null;

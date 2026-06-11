@@ -7,7 +7,9 @@ import type {
   ChatRuntimeMode,
   CollectionContextRef,
   PaperContextRef,
+  ResolvedContextSource,
   SelectedTextContext,
+  TagContextRef,
 } from "../../types";
 import type { SelectedTextSource } from "../../types";
 import type { EditLatestTurnMarker, EditLatestTurnResult } from "../../chat";
@@ -53,12 +55,13 @@ type SendFlowControllerDeps = {
   body: Element;
   inputBox: HTMLTextAreaElement;
   getItem: () => Zotero.Item | null;
-  resolveContextSourceItem: () => Promise<Zotero.Item | null>;
+  resolveContextSource: () => Promise<ResolvedContextSource | null>;
   closeSlashMenu: () => void;
   closePaperPicker: () => void;
   getSelectedTextContextEntries: (itemId: number) => SelectedTextContext[];
   getSelectedPaperContexts: (itemId: number) => PaperContextRef[];
   getSelectedCollectionContexts: (itemId: number) => CollectionContextRef[];
+  getSelectedTagContexts: (itemId: number) => TagContextRef[];
   getFullTextPaperContexts: (
     item: Zotero.Item,
     paperContexts: PaperContextRef[],
@@ -209,11 +212,12 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         (entry) => entry.noteContext,
       );
       const primarySelectedText = selectedTexts[0] || "";
-      const contextSourceItem = await deps.resolveContextSourceItem();
+      const contextSource = await deps.resolveContextSource();
       const allSelectedPaperContexts = deps.getSelectedPaperContexts(item.id);
       const selectedCollectionContexts = deps.getSelectedCollectionContexts(
         item.id,
       );
+      const selectedTagContexts = deps.getSelectedTagContexts(item.id);
       const usesPluginAgentMode =
         deps.isAgentMode() && !deps.isCodexConversationSystem();
       // Plugin Agent mode uses text/MinerU pipeline by default, but if the user
@@ -300,9 +304,14 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         pdfPageImageDataUrls,
         pdfUploadSystemMessages,
       } = pdfInputs;
-      if (isWebChat && selectedCollectionContexts.length) {
+      const hasImageInputs =
+        selectedImages.length > 0 || pdfPageImageDataUrls.length > 0;
+      if (
+        isWebChat &&
+        (selectedCollectionContexts.length || selectedTagContexts.length)
+      ) {
         deps.setStatusMessage?.(
-          "Web chat does not support Zotero collection context. Remove the collection and try again.",
+          "Web chat does not support Zotero collection or tag context. Remove the scope chip and try again.",
           "error",
         );
         return;
@@ -310,6 +319,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       const hasPaperComposeState =
         allSelectedPaperContexts.length > 0 ||
         selectedCollectionContexts.length > 0 ||
+        selectedTagContexts.length > 0 ||
         !deps.isGlobalMode();
 
       if (
@@ -317,29 +327,47 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         !primarySelectedText &&
         !selectedPaperContexts.length &&
         !selectedCollectionContexts.length &&
-        !selectedFiles.length
+        !selectedTagContexts.length &&
+        !selectedFiles.length &&
+        !hasImageInputs
       ) {
         return;
       }
 
+      const hasNonImageAttachments =
+        selectedFiles.length > 0 ||
+        selectedPaperContexts.length > 0 ||
+        selectedCollectionContexts.length > 0 ||
+        selectedTagContexts.length > 0;
+
       const promptText = deps.resolvePromptText(
         text,
         primarySelectedText,
-        selectedFiles.length > 0 ||
-          selectedPaperContexts.length > 0 ||
-          selectedCollectionContexts.length > 0,
+        hasNonImageAttachments,
       );
-      if (!promptText) return;
+      let resolvedPromptText = promptText;
+      if (!resolvedPromptText && hasImageInputs) {
+        resolvedPromptText = "Please analyze the attached images.";
+      }
+      if (!resolvedPromptText) return;
 
-      const resolvedPromptText =
+      const selectedScopeContextCount =
+        selectedPaperContexts.length +
+        selectedCollectionContexts.length +
+        selectedTagContexts.length;
+      if (
         !text &&
         !primarySelectedText &&
-        selectedPaperContexts.length + selectedCollectionContexts.length > 0 &&
-        !selectedFiles.length
-          ? selectedPaperContexts.length
-            ? "Please analyze selected papers."
-            : "Please analyze selected collection."
-          : promptText;
+        selectedScopeContextCount > 0 &&
+        !selectedFiles.length &&
+        !hasImageInputs
+      ) {
+        resolvedPromptText = selectedPaperContexts.length
+          ? "Please analyze selected papers."
+          : selectedCollectionContexts.length
+            ? "Please analyze selected collection."
+            : "Please analyze selected tag.";
+      }
 
       const composedQuestionBase = primarySelectedText
         ? deps.buildQuestionWithSelectedTextContexts(
@@ -438,7 +466,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         const editResult = await deps.editLatestUserMessageAndRetry({
           body: deps.body,
           item,
-          contextSourceItem,
+          contextSource,
           displayQuestion,
           selectedTexts: selectedTexts.length ? selectedTexts : undefined,
           selectedTextSources: selectedTexts.length
@@ -454,6 +482,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
           paperContexts: selectedPaperContexts,
           fullTextPaperContexts,
           selectedCollectionContexts,
+          selectedTagContexts,
           attachments: selectedFiles.length ? selectedFiles : undefined,
           modelAttachments: selectedFiles.length ? modelFiles : undefined,
           pdfUploadSystemMessages: pdfUploadSystemMessages.length
@@ -545,7 +574,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       const sendTask = deps.sendQuestion({
         body: deps.body,
         item,
-        contextSourceItem,
+        contextSource,
         question: composedQuestion,
         images,
         model: selectedProfile?.model,
@@ -571,6 +600,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         paperContexts: selectedPaperContexts,
         fullTextPaperContexts,
         selectedCollectionContexts,
+        selectedTagContexts,
         attachments: selectedFiles.length ? selectedFiles : undefined,
         modelAttachments: selectedFiles.length ? modelFiles : undefined,
         runtimeMode,

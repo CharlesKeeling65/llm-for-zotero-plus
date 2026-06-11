@@ -8,7 +8,7 @@ import {
 describe("paper-scoped command resolution", function () {
   const profile: PaperScopedActionProfile = {
     targetMode: "single_or_multi",
-    allowedScopes: ["current", "selection", "collection", "all"],
+    allowedScopes: ["current", "selection", "collection", "tag", "all"],
     defaultEmptyInput: "selection_or_prompt",
     paperRequirement: "bibliographic",
     supportsLimit: true,
@@ -30,6 +30,12 @@ describe("paper-scoped command resolution", function () {
       name: "Methods",
       path: "Projects / Methods",
     },
+  ];
+  const tagCandidates = [
+    { name: "Stable", type: 0 },
+    { name: "new", type: 0 },
+    { name: "Data", type: 0 },
+    { name: "Automatic", type: 1 },
   ];
 
   it("defaults to the current paper in paper chat", function () {
@@ -104,6 +110,7 @@ describe("paper-scoped command resolution", function () {
       },
       profile,
       collectionCandidates,
+      tagCandidates,
     );
 
     assert.deepEqual(result, {
@@ -115,6 +122,114 @@ describe("paper-scoped command resolution", function () {
     });
   });
 
+  it("resolves selection to selected tag contexts without expanding papers", function () {
+    const result = resolvePaperScopedCommandInput(
+      "selection",
+      {
+        mode: "library",
+        selectedTagContexts: [
+          {
+            name: "Stable",
+            normalizedName: "stable",
+            libraryID: 1,
+          },
+          {
+            name: "All Tagged",
+            libraryID: 1,
+            scope: "allTagged",
+          },
+        ],
+      },
+      profile,
+      collectionCandidates,
+      tagCandidates,
+    );
+
+    assert.deepEqual(result, {
+      kind: "input",
+      input: {
+        tagNames: ["Stable"],
+        tagScopes: ["allTagged"],
+      },
+    });
+  });
+
+  it("does not use selected tags for profiles that do not allow tag scope", function () {
+    const noTagProfile: PaperScopedActionProfile = {
+      ...profile,
+      allowedScopes: ["current", "selection", "collection", "all"],
+    };
+
+    assert.deepEqual(
+      resolvePaperScopedCommandInput(
+        "",
+        {
+          mode: "library",
+          selectedTagContexts: [
+            {
+              name: "Stable",
+              normalizedName: "stable",
+              libraryID: 1,
+            },
+          ],
+        },
+        noTagProfile,
+        collectionCandidates,
+        tagCandidates,
+      ),
+      { kind: "scope_required" },
+    );
+
+    assert.deepEqual(
+      resolvePaperScopedCommandInput(
+        "selection",
+        {
+          mode: "library",
+          selectedTagContexts: [
+            {
+              name: "Stable",
+              normalizedName: "stable",
+              libraryID: 1,
+            },
+          ],
+        },
+        noTagProfile,
+        collectionCandidates,
+        tagCandidates,
+      ),
+      {
+        kind: "error",
+        error: "No supported paper or collection context is selected in this chat.",
+      },
+    );
+
+    assert.deepEqual(
+      resolvePaperScopedCommandInput(
+        "selection",
+        {
+          mode: "library",
+          selectedPaperContexts: [
+            { itemId: 501, contextItemId: 9501, title: "Paper One" },
+          ],
+          selectedTagContexts: [
+            {
+              name: "Stable",
+              normalizedName: "stable",
+              libraryID: 1,
+            },
+          ],
+        },
+        noTagProfile,
+        collectionCandidates,
+        tagCandidates,
+      ),
+      {
+        kind: "input",
+        input: { itemIds: [501] },
+      },
+    );
+  });
+
   it("resolves first-N, all-library, and collection phrases", function () {
     assert.deepEqual(
       resolvePaperScopedCommandInput(
@@ -122,6 +237,7 @@ describe("paper-scoped command resolution", function () {
         { mode: "library" },
         profile,
         collectionCandidates,
+        tagCandidates,
       ),
       {
         kind: "input",
@@ -138,6 +254,7 @@ describe("paper-scoped command resolution", function () {
         { mode: "library" },
         profile,
         collectionCandidates,
+        tagCandidates,
       ),
       {
         kind: "input",
@@ -151,10 +268,57 @@ describe("paper-scoped command resolution", function () {
         { mode: "library" },
         profile,
         collectionCandidates,
+        tagCandidates,
       ),
       {
         kind: "input",
         input: { collectionIds: [13] },
+      },
+    );
+
+    assert.deepEqual(
+      resolvePaperScopedCommandInput(
+        "tag stable",
+        { mode: "library" },
+        profile,
+        collectionCandidates,
+        tagCandidates,
+      ),
+      {
+        kind: "input",
+        input: { tagNames: ["Stable"], scope: "tag" },
+      },
+    );
+
+    assert.deepEqual(
+      resolvePaperScopedCommandInput(
+        "tag automatic",
+        { mode: "library" },
+        profile,
+        collectionCandidates,
+        tagCandidates,
+      ),
+      {
+        kind: "input",
+        input: {
+          tagNames: ["Automatic"],
+          scope: "tag",
+          includeAutomaticTags: true,
+        },
+      },
+    );
+
+    assert.deepEqual(
+      resolvePaperScopedCommandInput(
+        "tag untagged",
+        { mode: "library" },
+        profile,
+        collectionCandidates,
+        tagCandidates,
+      ),
+      {
+        kind: "input",
+        input: { tagScopes: ["untagged"], scope: "tag" },
       },
     );
   });

@@ -9,8 +9,9 @@ import type {
   PdfContext,
 } from "../../modules/contextPanel/types";
 import type { AgentRuntimeRequest } from "../types";
-import type { PaperContextRef } from "../../shared/types";
+import type { PaperContextRef, TagContextRef } from "../../shared/types";
 import type {
+  AgentLibraryFilters,
   EditableArticleMetadataSnapshot,
   LibraryItemTarget,
   ZoteroGateway,
@@ -32,6 +33,9 @@ export type LibraryRetrieveMethod =
 export type LibraryRetrieveScopeInput = {
   libraryID?: number;
   collectionIds?: number[];
+  tagNames?: string[];
+  tagScopes?: Array<"allTagged" | "untagged">;
+  includeAutomaticTags?: boolean;
   itemIds?: number[];
 };
 
@@ -167,11 +171,13 @@ export type LibraryRetrieveSnippet = {
 export type LibraryRetrieveResult = {
   queryPlan: RetrievalQueryPlan;
   resourcePool: {
-    type: "library" | "collection" | "items";
+    type: "library" | "collection" | "tag" | "mixed" | "items";
     name?: string;
     scope: {
       libraryID?: number;
       collectionIds?: number[];
+      tagNames?: string[];
+      tagScopes?: Array<"allTagged" | "untagged">;
       itemIds?: number[];
     };
     totalItems: number;
@@ -248,10 +254,12 @@ type NormalizedLibraryRetrieveInput = Required<
 };
 
 type ScopeResolution = {
-  type: "library" | "collection" | "items";
+  type: "library" | "collection" | "tag" | "mixed" | "items";
   name?: string;
   libraryID: number;
   collectionIds: number[];
+  tagContexts: TagContextRef[];
+  tagItemIds: number[];
   explicitItemIds: number[];
   items: LibraryItemTarget[];
   totalItems: number;
@@ -351,10 +359,18 @@ function hasCollectionLikeScope(
   input: LibraryRetrieveInput,
   request?: AgentRuntimeRequest,
 ): boolean {
-  if (input.scope?.collectionIds?.length || input.scope?.itemIds?.length) {
+  if (
+    input.scope?.collectionIds?.length ||
+    input.scope?.tagNames?.length ||
+    input.scope?.tagScopes?.length ||
+    input.scope?.itemIds?.length
+  ) {
     return true;
   }
-  return Boolean(request?.selectedCollectionContexts?.length);
+  return Boolean(
+    request?.selectedCollectionContexts?.length ||
+      request?.selectedTagContexts?.length,
+  );
 }
 
 function normalizeInput(
@@ -1182,6 +1198,14 @@ export class LibraryRetrieveService {
           collectionIds: scope.collectionIds.length
             ? scope.collectionIds
             : undefined,
+          tagNames: scope.tagContexts
+            .filter((tag) => !tag.scope)
+            .map((tag) => tag.name),
+          tagScopes: scope.tagContexts
+            .map((tag) => tag.scope)
+            .filter((scope): scope is "allTagged" | "untagged" =>
+              Boolean(scope),
+            ),
           itemIds: scope.explicitItemIds.length
             ? scope.explicitItemIds
             : undefined,
@@ -1241,10 +1265,20 @@ export class LibraryRetrieveService {
   ): Promise<ScopeResolution> {
     const warnings: string[] = [];
     const explicitScope = input.scope || {};
+    const hasExplicitScope = Boolean(
+      explicitScope.libraryID ||
+        explicitScope.collectionIds?.length ||
+        explicitScope.itemIds?.length ||
+        explicitScope.tagNames?.length ||
+        explicitScope.tagScopes?.length,
+    );
     const selectedCollections =
-      !explicitScope.collectionIds?.length && !explicitScope.itemIds?.length
+      !hasExplicitScope
         ? request?.selectedCollectionContexts || []
         : [];
+    const selectedTags = !hasExplicitScope
+      ? request?.selectedTagContexts || []
+      : [];
     const collectionIds = dedupeNumbers(
       explicitScope.collectionIds ||
         selectedCollections.map((collection) => collection.collectionId),
@@ -1255,13 +1289,43 @@ export class LibraryRetrieveService {
       (collectionIds[0]
         ? this.zoteroGateway.getCollectionSummary(collectionIds[0])?.libraryID
         : undefined);
+    const inferredTagLibraryID = selectedTags[0]?.libraryID;
     const libraryID = this.zoteroGateway.resolveLibraryID({
       request,
       item,
-      libraryID: explicitScope.libraryID || inferredCollectionLibraryID,
+      libraryID:
+        explicitScope.libraryID || inferredCollectionLibraryID || inferredTagLibraryID,
     });
     if (!libraryID)
       throw new Error("No active library available for library_retrieve");
+    const explicitTagContexts: TagContextRef[] = [];
+    const includeAutomatic = explicitScope.includeAutomaticTags === true;
+    const seenExplicitTags = new Set<string>();
+    for (const name of explicitScope.tagNames || []) {
+      const normalizedName = normalizeText(name).toLowerCase();
+      if (!normalizedName || seenExplicitTags.has(`tag:${normalizedName}`)) {
+        continue;
+      }
+      seenExplicitTags.add(`tag:${normalizedName}`);
+      explicitTagContexts.push({
+        name: normalizeText(name),
+        normalizedName,
+        libraryID,
+        includeAutomatic,
+      });
+    }
+    for (const scope of explicitScope.tagScopes || []) {
+      if (scope !== "allTagged" && scope !== "untagged") continue;
+      if (seenExplicitTags.has(`scope:${scope}`)) continue;
+      seenExplicitTags.add(`scope:${scope}`);
+      explicitTagContexts.push({
+        name: scope === "allTagged" ? "All Tagged" : "Untagged",
+        libraryID,
+        scope,
+        includeAutomatic,
+      });
+    }
+    const tagContexts = selectedTags.length ? selectedTags : explicitTagContexts;
 
     if (explicitItemIds.length) {
       const items =
@@ -1273,6 +1337,8 @@ export class LibraryRetrieveService {
         name: `${items.length} selected items`,
         libraryID,
         collectionIds: [],
+        tagContexts: [],
+        tagItemIds: [],
         explicitItemIds,
         items,
         totalItems: items.length,
@@ -1280,8 +1346,9 @@ export class LibraryRetrieveService {
       };
     }
 
-    if (collectionIds.length) {
+    if (collectionIds.length || tagContexts.length) {
       const byItemId = new Map<number, LibraryItemTarget>();
+      const tagItemIds = new Set<number>();
       let totalItems = 0;
       const names: string[] = [];
       for (const collectionId of collectionIds) {
@@ -1307,14 +1374,52 @@ export class LibraryRetrieveService {
           "Multiple collection totals may include overlapping items; retrieval uses unique item IDs.",
         );
       }
+      for (const tagContext of tagContexts) {
+        const result = await this.zoteroGateway.listTagItemTargets({
+          libraryID,
+          tagContext,
+          limit: input.maxMetadataItems,
+        });
+        totalItems += result.totalCount;
+        names.push(result.tagName);
+        for (const target of result.items) {
+          if (
+            byItemId.size >= input.maxMetadataItems &&
+            !byItemId.has(target.itemId)
+          ) {
+            continue;
+          }
+          byItemId.set(target.itemId, target);
+          tagItemIds.add(target.itemId);
+        }
+      }
+      if (tagContexts.length > 1 && byItemId.size < totalItems) {
+        warnings.push(
+          "Multiple tag totals may include overlapping items; retrieval uses unique item IDs.",
+        );
+      }
+      if (collectionIds.length && tagContexts.length && byItemId.size < totalItems) {
+        warnings.push(
+          "Selected collection and tag totals may include overlapping items; retrieval uses unique item IDs.",
+        );
+      }
+      const isMetadataCapped =
+        byItemId.size >= input.maxMetadataItems && totalItems > byItemId.size;
       return {
-        type: "collection",
+        type:
+          collectionIds.length && tagContexts.length
+            ? "mixed"
+            : collectionIds.length
+              ? "collection"
+              : "tag",
         name: names.join(" + "),
         libraryID,
         collectionIds,
+        tagContexts,
+        tagItemIds: Array.from(tagItemIds),
         explicitItemIds: [],
         items: Array.from(byItemId.values()),
-        totalItems: Math.max(byItemId.size, totalItems),
+        totalItems: isMetadataCapped ? totalItems : byItemId.size,
         warnings,
       };
     }
@@ -1328,6 +1433,8 @@ export class LibraryRetrieveService {
       name: `Library ${libraryID}`,
       libraryID,
       collectionIds: [],
+      tagContexts: [],
+      tagItemIds: [],
       explicitItemIds: [],
       items: result.items,
       totalItems: result.totalCount,
@@ -1429,34 +1536,53 @@ export class LibraryRetrieveService {
         ? records.length
         : input.maxCandidatePapers;
     try {
+      const allRecordItemIds = Array.from(byItemId.keys());
+      const runQuicksearch = async (
+        query: string,
+        options: {
+          filters?: AgentLibraryFilters;
+          allowedItemIds?: number[];
+        } = {},
+      ): Promise<void> => {
+        const result = await this.zoteroGateway.searchAllLibraryItems({
+          libraryID: scope.libraryID,
+          query,
+          filters: options.filters,
+          allowedItemIds: options.allowedItemIds,
+          limit: scanLimit,
+        });
+        if (result.totalCount > result.items.length) scan.truncated = true;
+        result.items.forEach((target) => mark(target.itemId, query));
+      };
+
       if (scope.collectionIds.length) {
         for (const query of input.queryPlan.effectiveQueries) {
           for (const collectionId of scope.collectionIds) {
-            const result = await this.zoteroGateway.searchAllLibraryItems({
-              libraryID: scope.libraryID,
-              query,
+            await runQuicksearch(query, {
               filters: { collectionId },
-              limit: scanLimit,
             });
-            if (result.totalCount > result.items.length) scan.truncated = true;
-            result.items.forEach((target) => mark(target.itemId, query));
           }
         }
+      }
+      if (scope.tagContexts.length) {
+        for (const query of input.queryPlan.effectiveQueries) {
+          if (scope.tagItemIds.length) {
+            await runQuicksearch(query, {
+              allowedItemIds: scope.tagItemIds,
+            });
+          }
+        }
+      }
+      if (scope.collectionIds.length || scope.tagContexts.length) {
         scan.matched = matchedIds.size;
         return scan;
       }
       const explicit = new Set(scope.explicitItemIds);
       for (const query of input.queryPlan.effectiveQueries) {
-        const result = await this.zoteroGateway.searchAllLibraryItems({
-          libraryID: scope.libraryID,
+        await runQuicksearch(
           query,
-          limit: scanLimit,
-        });
-        if (result.totalCount > result.items.length) scan.truncated = true;
-        result.items.forEach((target) => {
-          if (explicit.size && !explicit.has(target.itemId)) return;
-          mark(target.itemId, query);
-        });
+          explicit.size ? { allowedItemIds: allRecordItemIds } : {},
+        );
       }
       scan.matched = matchedIds.size;
       return scan;

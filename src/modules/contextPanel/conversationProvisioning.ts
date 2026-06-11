@@ -5,33 +5,15 @@ import {
   buildDefaultClaudePaperConversationKey,
 } from "../../claudeCode/constants";
 import {
-  ensureClaudeGlobalConversation,
-  ensureClaudePaperConversation,
-  getClaudeConversationSummary,
-  upsertClaudeConversationSummary,
-} from "../../claudeCode/store";
-import {
   buildDefaultCodexGlobalConversationKey,
   buildDefaultCodexPaperConversationKey,
 } from "../../codexAppServer/constants";
 import {
-  ensureCodexGlobalConversation,
-  ensureCodexPaperConversation,
-  getCodexConversationSummary,
-  upsertCodexConversationSummary,
-} from "../../codexAppServer/store";
+  conversationRepository,
+  type ConversationCatalogEntry,
+} from "../../core/conversations/repository";
 import { resolveConversationStorageSystem } from "../../shared/conversationStorageRouting";
-import type {
-  ClaudeConversationSummary,
-  CodexConversationSummary,
-  ConversationSystem,
-} from "../../shared/types";
-import {
-  ensureGlobalConversationExists,
-  ensurePaperV1Conversation,
-  getGlobalConversation,
-  getPaperConversation,
-} from "../../utils/chatStore";
+import type { ConversationSystem } from "../../shared/types";
 import { getConversationKey } from "./conversationIdentity";
 import {
   resolveActiveNoteSession,
@@ -49,13 +31,13 @@ function normalizePositiveInt(value: unknown): number | null {
 }
 
 function sameRuntimeScope(
-  summary: ClaudeConversationSummary | CodexConversationSummary | null,
+  summary: ConversationCatalogEntry | null,
   params: {
     kind: ConversationKind;
     libraryID: number;
     paperItemID?: number | null;
   },
-): summary is ClaudeConversationSummary | CodexConversationSummary {
+): summary is ConversationCatalogEntry {
   if (!summary) return false;
   if (summary.kind !== params.kind) return false;
   if (summary.libraryID !== params.libraryID) return false;
@@ -120,19 +102,68 @@ async function provisionUpstreamConversation(scope: {
   libraryID: number;
   paperItemID?: number;
 }): Promise<boolean> {
-  if (scope.kind === "global") {
-    await ensureGlobalConversationExists(
-      scope.libraryID,
-      scope.conversationKey,
-    );
-    return Boolean(await getGlobalConversation(scope.conversationKey));
-  }
-  if (scope.conversationKey === scope.paperItemID) {
+  return Boolean(
+    await conversationRepository.ensureCatalogEntry({
+      system: "upstream",
+      conversationKey: scope.conversationKey,
+      kind: scope.kind,
+      libraryID: scope.libraryID,
+      paperItemID: scope.paperItemID,
+    }),
+  );
+}
+
+async function provisionRuntimeConversation(
+  system: "claude_code" | "codex",
+  scope: {
+    conversationKey: number;
+    kind: ConversationKind;
+    libraryID: number;
+    paperItemID?: number;
+  },
+): Promise<boolean> {
+  const existing = await conversationRepository.getCatalogEntry({
+    system,
+    kind: scope.kind,
+    conversationKey: scope.conversationKey,
+  });
+  if (sameRuntimeScope(existing, scope)) {
     return Boolean(
-      await ensurePaperV1Conversation(scope.libraryID, scope.paperItemID || 0),
+      await conversationRepository.ensureCatalogEntry({
+        system,
+        conversationKey: scope.conversationKey,
+        kind: scope.kind,
+        libraryID: scope.libraryID,
+        paperItemID: scope.paperItemID,
+      }),
     );
   }
-  return Boolean(await getPaperConversation(scope.conversationKey));
+  if (scope.kind === "global") {
+    const expectedKey =
+      system === "claude_code"
+        ? buildDefaultClaudeGlobalConversationKey(scope.libraryID)
+        : buildDefaultCodexGlobalConversationKey(scope.libraryID);
+    if (scope.conversationKey !== expectedKey) return false;
+    const ensured = await conversationRepository.ensureCatalogEntry({
+      system,
+      kind: "global",
+      libraryID: scope.libraryID,
+    });
+    return ensured?.conversationKey === scope.conversationKey;
+  }
+  if (!scope.paperItemID) return false;
+  const expectedPaperKey =
+    system === "claude_code"
+      ? buildDefaultClaudePaperConversationKey(scope.paperItemID)
+      : buildDefaultCodexPaperConversationKey(scope.paperItemID);
+  if (scope.conversationKey !== expectedPaperKey) return false;
+  const ensured = await conversationRepository.ensureCatalogEntry({
+    system,
+    kind: "paper",
+    libraryID: scope.libraryID,
+    paperItemID: scope.paperItemID,
+  });
+  return ensured?.conversationKey === scope.conversationKey;
 }
 
 async function provisionClaudeConversation(scope: {
@@ -141,48 +172,7 @@ async function provisionClaudeConversation(scope: {
   libraryID: number;
   paperItemID?: number;
 }): Promise<boolean> {
-  const existing = await getClaudeConversationSummary(scope.conversationKey);
-  if (sameRuntimeScope(existing, scope)) {
-    return upsertClaudeConversationSummary({
-      conversationKey: existing.conversationKey,
-      libraryID: existing.libraryID,
-      kind: existing.kind,
-      paperItemID: existing.paperItemID,
-      createdAt: existing.createdAt,
-      updatedAt: existing.updatedAt,
-      title: existing.title,
-      providerSessionId: existing.providerSessionId,
-      scopedConversationKey: existing.scopedConversationKey,
-      scopeType: existing.scopeType,
-      scopeId: existing.scopeId,
-      scopeLabel: existing.scopeLabel,
-      cwd: existing.cwd,
-      model: existing.model,
-      effort: existing.effort,
-    });
-  }
-  if (scope.kind === "global") {
-    if (
-      scope.conversationKey !==
-      buildDefaultClaudeGlobalConversationKey(scope.libraryID)
-    ) {
-      return false;
-    }
-    const ensured = await ensureClaudeGlobalConversation(scope.libraryID);
-    return ensured?.conversationKey === scope.conversationKey;
-  }
-  if (
-    !scope.paperItemID ||
-    scope.conversationKey !==
-      buildDefaultClaudePaperConversationKey(scope.paperItemID)
-  ) {
-    return false;
-  }
-  const ensured = await ensureClaudePaperConversation(
-    scope.libraryID,
-    scope.paperItemID,
-  );
-  return ensured?.conversationKey === scope.conversationKey;
+  return provisionRuntimeConversation("claude_code", scope);
 }
 
 async function provisionCodexConversation(scope: {
@@ -191,48 +181,7 @@ async function provisionCodexConversation(scope: {
   libraryID: number;
   paperItemID?: number;
 }): Promise<boolean> {
-  const existing = await getCodexConversationSummary(scope.conversationKey);
-  if (sameRuntimeScope(existing, scope)) {
-    return upsertCodexConversationSummary({
-      conversationKey: existing.conversationKey,
-      libraryID: existing.libraryID,
-      kind: existing.kind,
-      paperItemID: existing.paperItemID,
-      createdAt: existing.createdAt,
-      updatedAt: existing.updatedAt,
-      title: existing.title,
-      providerSessionId: existing.providerSessionId,
-      scopedConversationKey: existing.scopedConversationKey,
-      scopeType: existing.scopeType,
-      scopeId: existing.scopeId,
-      scopeLabel: existing.scopeLabel,
-      cwd: existing.cwd,
-      model: existing.model,
-      effort: existing.effort,
-    });
-  }
-  if (scope.kind === "global") {
-    if (
-      scope.conversationKey !==
-      buildDefaultCodexGlobalConversationKey(scope.libraryID)
-    ) {
-      return false;
-    }
-    const ensured = await ensureCodexGlobalConversation(scope.libraryID);
-    return ensured?.conversationKey === scope.conversationKey;
-  }
-  if (
-    !scope.paperItemID ||
-    scope.conversationKey !==
-      buildDefaultCodexPaperConversationKey(scope.paperItemID)
-  ) {
-    return false;
-  }
-  const ensured = await ensureCodexPaperConversation(
-    scope.libraryID,
-    scope.paperItemID,
-  );
-  return ensured?.conversationKey === scope.conversationKey;
+  return provisionRuntimeConversation("codex", scope);
 }
 
 export async function provisionConversationScopeForItem(params: {

@@ -200,6 +200,13 @@ export async function readAttachmentBytes(path: string): Promise<Uint8Array> {
   return readBytes(path);
 }
 
+export async function writeAttachmentBytes(
+  path: string,
+  bytes: Uint8Array,
+): Promise<void> {
+  return writeBytes(path, bytes);
+}
+
 async function writeBytes(path: string, bytes: Uint8Array): Promise<void> {
   const io = getIOUtils();
   if (io?.write) {
@@ -248,6 +255,13 @@ async function copyFile(sourcePath: string, destPath: string): Promise<void> {
     return;
   }
   throw new Error("No file copy API available");
+}
+
+export async function copyAttachmentFile(
+  sourcePath: string,
+  destPath: string,
+): Promise<void> {
+  return copyFile(sourcePath, destPath);
 }
 
 async function removePath(path: string, recursive: boolean): Promise<void> {

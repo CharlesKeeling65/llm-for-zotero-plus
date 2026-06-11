@@ -7,8 +7,10 @@ export const HISTORY_ROW_TITLE_MAX_LENGTH = 42;
 
 export type ConversationHistoryEntry = {
   kind: "paper" | "global";
+  sourceState: HistoryEntrySourceState;
   section: "paper" | "open";
   sectionTitle: string;
+  conversationID?: string;
   conversationKey: number;
   libraryID?: number;
   title: string;
@@ -19,10 +21,14 @@ export type ConversationHistoryEntry = {
   lastActivityAt: number;
   userTurnCount?: number;
   paperItemID?: number;
+  catalogPaperItemID?: number;
   sessionVersion?: number;
   providerSessionId?: string;
   scopedConversationKey?: string;
 };
+
+export type HistoryEntrySourceState = "active" | "orphan";
+export type HistoryEntryLabelType = "paper" | "library" | "orphan";
 
 export type HistorySwitchTarget =
   | { kind: "paper"; conversationKey: number }
@@ -31,6 +37,7 @@ export type HistorySwitchTarget =
 
 export type PendingHistoryDeletion = {
   kind: "paper" | "global";
+  conversationID?: string;
   conversationKey: number;
   libraryID: number;
   conversationSystem: ConversationSystem;
@@ -48,8 +55,30 @@ export type PaperHistoryNavigationDecision =
   | "missing-target-paper";
 
 export type HistoryPaperPaneSelector = {
-  selectItems?: (itemIDs: number[], selectInLibrary?: boolean) => unknown;
+  selectItems?: (
+    itemIDs: number[],
+    options?: boolean | { selectInLibrary?: boolean },
+  ) => unknown;
   selectItem?: (itemID: number, selectInLibrary?: boolean) => unknown;
+};
+
+export type HistoryPaperItemLike = {
+  id?: unknown;
+  parentID?: unknown;
+  deleted?: unknown;
+  firstCreator?: unknown;
+  isAttachment?: () => boolean;
+  isRegularItem?: () => boolean;
+  isNote?: () => boolean;
+  getField?: (field: string) => unknown;
+  getDisplayTitle?: () => unknown;
+};
+
+export type HistoryPaperDisplayMetadata = {
+  itemID: number;
+  title: string;
+  firstCreator: string;
+  year: string;
 };
 
 export type HistoryDayGroup<T> = {
@@ -89,9 +118,12 @@ export function getHistoryDayGroupLabel(
   const weekStart = todayStart - 6 * 86_400_000;
   const monthStart = todayStart - 29 * 86_400_000;
   if (timestamp >= todayStart) return translateHistoryLabel("Today", options);
-  if (timestamp >= yesterdayStart) return translateHistoryLabel("Yesterday", options);
-  if (timestamp >= weekStart) return translateHistoryLabel("Last 7 days", options);
-  if (timestamp >= monthStart) return translateHistoryLabel("Last 30 days", options);
+  if (timestamp >= yesterdayStart)
+    return translateHistoryLabel("Yesterday", options);
+  if (timestamp >= weekStart)
+    return translateHistoryLabel("Last 7 days", options);
+  if (timestamp >= monthStart)
+    return translateHistoryLabel("Last 30 days", options);
   return translateHistoryLabel("Older", options);
 }
 
@@ -174,6 +206,132 @@ export function resolveHistoryEntryPaperItem<T>(
   }
 }
 
+function normalizeHistoryMetadataText(raw: unknown): string {
+  return typeof raw === "string" ? raw.replace(/\s+/g, " ").trim() : "";
+}
+
+function readHistoryPaperField(
+  item: HistoryPaperItemLike | null | undefined,
+  field: string,
+): string {
+  try {
+    return normalizeHistoryMetadataText(item?.getField?.(field));
+  } catch (_err) {
+    return "";
+  }
+}
+
+function extractHistoryPaperYear(raw: string): string {
+  const direct = raw.trim();
+  if (/^\d{4}$/.test(direct)) return direct;
+  const match = direct.match(/\b([12][0-9]{3})\b/);
+  return match?.[1] || "";
+}
+
+function isHistoryPaperItemDeleted(
+  item: HistoryPaperItemLike | null | undefined,
+): boolean {
+  return Boolean(item?.deleted);
+}
+
+export function resolveHistoryEntryPaperBaseItem<
+  T extends HistoryPaperItemLike,
+>(
+  entry: Pick<ConversationHistoryEntry, "paperItemID">,
+  getItem: (paperItemID: number) => T | null | undefined,
+): T | null {
+  const item = resolveHistoryEntryPaperItem(entry, getItem);
+  if (!item) return null;
+
+  const isRegular = Boolean(item.isRegularItem?.());
+  const isAttachment = Boolean(item.isAttachment?.());
+  const isNote = Boolean(item.isNote?.());
+  if (isRegular && !isAttachment && !isNote) {
+    return isHistoryPaperItemDeleted(item) ? null : item;
+  }
+
+  if (isAttachment || isNote) {
+    const parentID = normalizeHistoryPaperItemID(item.parentID);
+    if (parentID) {
+      try {
+        const parentItem = getItem(parentID) || null;
+        if (
+          parentItem?.isRegularItem?.() &&
+          !isHistoryPaperItemDeleted(parentItem)
+        ) {
+          return parentItem;
+        }
+      } catch (_err) {
+        return null;
+      }
+    }
+  }
+
+  return isRegular && !isHistoryPaperItemDeleted(item) ? item : null;
+}
+
+export function readHistoryPaperDisplayMetadata(
+  item: HistoryPaperItemLike | null | undefined,
+): HistoryPaperDisplayMetadata | null {
+  if (!item) return null;
+  const itemID = normalizeHistoryPaperItemID(item.id);
+  if (!itemID) return null;
+  const title =
+    readHistoryPaperField(item, "title") ||
+    normalizeHistoryMetadataText(item.getDisplayTitle?.());
+  const firstCreator =
+    readHistoryPaperField(item, "firstCreator") ||
+    normalizeHistoryMetadataText(item.firstCreator);
+  const year =
+    extractHistoryPaperYear(readHistoryPaperField(item, "year")) ||
+    extractHistoryPaperYear(readHistoryPaperField(item, "date")) ||
+    extractHistoryPaperYear(readHistoryPaperField(item, "issued"));
+  return { itemID, title, firstCreator, year };
+}
+
+export function resolveHistoryEntryPaperDisplayMetadata<
+  T extends HistoryPaperItemLike,
+>(
+  entry: Pick<ConversationHistoryEntry, "paperItemID">,
+  getItem: (paperItemID: number) => T | null | undefined,
+): HistoryPaperDisplayMetadata | null {
+  return readHistoryPaperDisplayMetadata(
+    resolveHistoryEntryPaperBaseItem(entry, getItem),
+  );
+}
+
+export function resolveHistoryEntrySourceState<T extends HistoryPaperItemLike>(
+  entry: Pick<ConversationHistoryEntry, "kind" | "paperItemID">,
+  getItem: (paperItemID: number) => T | null | undefined,
+): HistoryEntrySourceState {
+  if (entry.kind !== "paper") return "active";
+  return resolveHistoryEntryPaperBaseItem(entry, getItem) ? "active" : "orphan";
+}
+
+export function isOrphanHistoryEntry(
+  entry: Pick<ConversationHistoryEntry, "kind" | "sourceState">,
+): boolean {
+  return entry.kind === "paper" && entry.sourceState === "orphan";
+}
+
+export function getHistoryEntryLabelType(
+  entry: Pick<ConversationHistoryEntry, "kind" | "sourceState">,
+): HistoryEntryLabelType {
+  if (isOrphanHistoryEntry(entry)) return "orphan";
+  return entry.kind === "paper" ? "paper" : "library";
+}
+
+export function formatHistoryPaperScopeLabel(
+  metadata: HistoryPaperDisplayMetadata | null | undefined,
+  fallback = "Paper chat",
+): string {
+  if (!metadata) return fallback;
+  if (metadata.firstCreator && metadata.year) {
+    return `${metadata.firstCreator}, ${metadata.year}`;
+  }
+  return metadata.firstCreator || metadata.year || fallback;
+}
+
 export function resolvePaperHistoryNavigationDecision(params: {
   entryPaperItemID?: unknown;
   currentPaperItemID?: unknown;
@@ -200,7 +358,7 @@ export async function maybeSelectPaperHistoryTarget(params: {
   const pane = params.getPane();
   if (!pane) return false;
   if (typeof pane.selectItems === "function") {
-    await pane.selectItems([paperItemID], true);
+    await pane.selectItems([paperItemID], { selectInLibrary: true });
     return true;
   }
   if (typeof pane.selectItem === "function") {

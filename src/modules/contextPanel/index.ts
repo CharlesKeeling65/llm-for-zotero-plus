@@ -55,8 +55,7 @@ import {
   getActiveReaderForSelectedTab,
   refreshLastKnownSelectedTabId,
   getItemSelectionCacheKeys,
-  resolveContextSourceItem,
-  resolveContextSourceItemId,
+  resolvePanelContextLifecycleState,
   appendSelectedTextContextForItem,
   applySelectedTextPreview,
   syncSelectedTextContextForSource,
@@ -83,6 +82,10 @@ import {
   markCompletedPanelLifecycleSignature,
   type PanelLifecycleSignature,
 } from "./panelLifecycleSignature";
+import {
+  hasPanelContextOwnerChanged,
+  shouldRefreshContextSourceWithoutPanelRebuild,
+} from "./panelContextLifecycle";
 import {
   activeClaudeConversationModeByLibrary,
   activeClaudeGlobalConversationByLibrary,
@@ -138,8 +141,49 @@ function getPanelItemIdKey(item: Zotero.Item | null | undefined): string {
 function getPanelContextItemIdKey(
   item: Zotero.Item | null | undefined,
 ): string {
-  const id = resolveContextSourceItemId(item);
+  const state = resolvePanelContextLifecycleState(item);
+  const id = state?.requiresAsyncResolution ? 0 : state?.contextItemId || 0;
   return id > 0 ? `${id}` : "";
+}
+
+function getPanelContextOwnerItemIdKey(
+  item: Zotero.Item | null | undefined,
+): string {
+  const id = resolvePanelContextLifecycleState(item)?.ownerItemId || 0;
+  return id > 0 ? `${id}` : "";
+}
+
+function getPanelContextSourceStateKey(
+  item: Zotero.Item | null | undefined,
+): string {
+  const state = resolvePanelContextLifecycleState(item);
+  if (!state) return "";
+  const contextItemId = state.requiresAsyncResolution
+    ? 0
+    : state.contextItemId;
+  return [
+    state.sourceKind,
+    contextItemId > 0 ? `${contextItemId}` : "",
+    state.supportKind || "",
+    state.contentSourceMode || "",
+    state.requiresAsyncResolution ? "async" : "sync",
+  ].join(":");
+}
+
+function writePanelContextDataset(
+  panelRoot: HTMLElement | null | undefined,
+  rawItem: Zotero.Item | null | undefined,
+) {
+  if (!panelRoot) return;
+  const rawContextItemKey = rawItem
+    ? String(Number(rawItem.id || 0) || "")
+    : "";
+  panelRoot.dataset.contextItemId = getPanelContextItemIdKey(rawItem);
+  panelRoot.dataset.contextOwnerItemId =
+    getPanelContextOwnerItemIdKey(rawItem);
+  panelRoot.dataset.contextSourceStateKey =
+    getPanelContextSourceStateKey(rawItem);
+  panelRoot.dataset.rawContextItemId = rawContextItemKey;
 }
 
 function buildPanelLifecycleSignature(
@@ -149,13 +193,25 @@ function buildPanelLifecycleSignature(
   const rawContextItem = rawItem || resolvedItem;
   return {
     conversationKey: resolvedItem ? `${getConversationKey(resolvedItem)}` : "0",
-    rawContextItemId: getPanelItemIdKey(rawContextItem),
-    contextItemId: getPanelContextItemIdKey(rawContextItem),
+    rawContextItemId: getPanelContextOwnerItemIdKey(rawContextItem),
+    contextItemId: "",
     conversationSystem:
       resolveConversationSystemForItem(resolvedItem) || "upstream",
     conversationKind: resolveDisplayConversationKind(resolvedItem) || "",
     shortcutMode: resolveShortcutMode(resolvedItem),
   };
+}
+
+function isPanelRootInitialized(
+  panelRoot: HTMLElement | null | undefined,
+): boolean {
+  return Boolean(panelRoot?.dataset?.handlersInitialized);
+}
+
+function isPanelBodyInitialized(body: Element): boolean {
+  return isPanelRootInitialized(
+    body.querySelector("#llm-main") as HTMLElement | null,
+  );
 }
 
 function isPanelConversationLoaded(
@@ -223,7 +279,13 @@ export function registerReaderContextPanel() {
         const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
         // Treat missing panel root as needing a full render — the body may
         // belong to a tab that onAsyncRender never fired for.
-        const needsFullRender = !activeContextPanels.has(body) || !panelRoot;
+        // Also treat an uninitialized shell as incomplete.  Zotero can fire a
+        // superseded async render after buildUI() but before setupHandlers();
+        // that leaves a blank chat box and default "Model: ..." controls.
+        const needsFullRender =
+          !activeContextPanels.has(body) ||
+          !panelRoot ||
+          !isPanelRootInitialized(panelRoot);
 
         const resolvedState = resolveInitialPanelItemState(item);
         const expectedSystem =
@@ -248,6 +310,10 @@ export function registerReaderContextPanel() {
         const currentContextItemKey = panelRoot?.dataset?.contextItemId || "";
         const currentRawContextItemKey =
           panelRoot?.dataset?.rawContextItemId || "";
+        const currentContextOwnerItemKey =
+          panelRoot?.dataset?.contextOwnerItemId || "";
+        const currentContextSourceStateKey =
+          panelRoot?.dataset?.contextSourceStateKey || "";
         // Lock is stale if:
         // - lock active + panel in paper mode (need to switch to global)
         // - lock active + panel shows different global conversation
@@ -269,31 +335,31 @@ export function registerReaderContextPanel() {
         const rawContextItemKey = rawContextItem
           ? String(Number(rawContextItem.id || 0) || "")
           : "";
-        const newContextSource = rawContextItem
-          ? resolveContextSourceItem(rawContextItem)
-          : null;
-        const newContextItemId = Math.floor(
-          Number(newContextSource?.contextItem?.id || 0),
-        );
-        const newContextItemKey =
-          Number.isFinite(newContextItemId) && newContextItemId > 0
-            ? `${newContextItemId}`
-            : "";
-        const newContextSourceIsSynchronous =
-          newContextSource?.sourceKind !== "first-child";
+        const newContextOwnerItemKey =
+          getPanelContextOwnerItemIdKey(rawContextItem);
+        const newContextSourceStateKey =
+          getPanelContextSourceStateKey(rawContextItem);
         const itemChanged =
           !needsFullRender &&
           storedItemKey !== undefined &&
           storedItemKey !== newItemKey;
-        // Same parent-item conversation, different child PDF: rebuild so
-        // auto-loaded context and send-time closures follow the selected PDF.
-        const contextSourceChanged =
-          !needsFullRender &&
-          storedItemKey === newItemKey &&
-          currentKind === "paper" &&
-          (currentRawContextItemKey !== rawContextItemKey ||
-            (newContextSourceIsSynchronous &&
-              currentContextItemKey !== newContextItemKey));
+        const contextDecision = {
+          needsFullRender,
+          storedItemKey,
+          newItemKey,
+          currentKind,
+          currentRawContextItemKey,
+          rawContextItemKey,
+          currentContextOwnerItemKey,
+          newContextOwnerItemKey,
+          currentContextSourceStateKey:
+            currentContextSourceStateKey || currentContextItemKey,
+          newContextSourceStateKey,
+        };
+        const contextOwnerChanged =
+          hasPanelContextOwnerChanged(contextDecision);
+        const sameOwnerContextSourceChanged =
+          shouldRefreshContextSourceWithoutPanelRebuild(contextDecision);
         const systemChanged =
           !needsFullRender && currentSystem !== expectedSystem;
 
@@ -301,7 +367,7 @@ export function registerReaderContextPanel() {
           needsFullRender ||
           lockStale ||
           itemChanged ||
-          contextSourceChanged ||
+          contextOwnerChanged ||
           systemChanged
         ) {
           clearCompletedPanelLifecycleSignature(body);
@@ -313,10 +379,7 @@ export function registerReaderContextPanel() {
           const nextPanelRoot = body.querySelector(
             "#llm-main",
           ) as HTMLElement | null;
-          if (nextPanelRoot) {
-            nextPanelRoot.dataset.contextItemId = newContextItemKey;
-            nextPanelRoot.dataset.rawContextItemId = rawContextItemKey;
-          }
+          writePanelContextDataset(nextPanelRoot, rawContextItem);
           activeContextPanels.set(body, () => resolvedState.item);
           activeContextPanelRawItems.set(body, item || null);
           void retainClaudeRuntimeForBody(body, resolvedState.item);
@@ -341,9 +404,18 @@ export function registerReaderContextPanel() {
           // (e.g. Add Text) always resolve the active item.
           activeContextPanels.set(body, () => resolvedState.item);
           activeContextPanelRawItems.set(body, item || null);
-          panelRoot.dataset.contextItemId = newContextItemKey;
-          panelRoot.dataset.rawContextItemId = rawContextItemKey;
+          writePanelContextDataset(panelRoot, rawContextItem);
           void retainClaudeRuntimeForBody(body, resolvedState.item);
+          if (sameOwnerContextSourceChanged) {
+            (body as any).__llmContextRefreshOnly = true;
+            const refreshContextSource = (body as any)
+              .__llmRefreshContextSourceForCurrentItem;
+            if (typeof refreshContextSource === "function") {
+              refreshContextSource();
+            } else {
+              activeContextPanelStateSync.get(body)?.();
+            }
+          }
         }
       } catch {
         /* ignore */
@@ -361,6 +433,7 @@ export function registerReaderContextPanel() {
         resolvedItem,
       );
       if (
+        isPanelBodyInitialized(body) &&
         hasCompletedPanelLifecycleSignature(body, lifecycleSignature, {
           conversationLoaded: isPanelConversationLoaded(resolvedItem),
         })
@@ -377,19 +450,18 @@ export function registerReaderContextPanel() {
       const syncAlreadyRendered = (body as any).__llmSyncRendered === true;
       if (syncAlreadyRendered) {
         delete (body as any).__llmSyncRendered;
-      } else {
+      }
+      const contextRefreshOnly =
+        (body as any).__llmContextRefreshOnly === true &&
+        Boolean(body.querySelector("#llm-main"));
+      if (contextRefreshOnly) {
+        delete (body as any).__llmContextRefreshOnly;
+        activeContextPanels.set(body, () => resolvedItem);
+        activeContextPanelRawItems.set(body, item || null);
+      } else if (!syncAlreadyRendered) {
         buildUI(body, resolvedItem);
         const panelRoot = body.querySelector("#llm-main") as HTMLElement | null;
-        if (panelRoot) {
-          const contextItemId = resolveContextSourceItemId(
-            item || resolvedItem,
-          );
-          panelRoot.dataset.contextItemId =
-            contextItemId > 0 ? `${contextItemId}` : "";
-          panelRoot.dataset.rawContextItemId = item
-            ? `${Number(item.id || 0) || ""}`
-            : "";
-        }
+        writePanelContextDataset(panelRoot, item || resolvedItem);
         activeContextPanelRawItems.set(body, item || null);
       }
 
@@ -407,8 +479,17 @@ export function registerReaderContextPanel() {
       );
       if (renderGeneration !== thisGeneration) return;
       if (isStandaloneWindowActive()) return;
-      if (!syncAlreadyRendered) {
+      if (!syncAlreadyRendered && !contextRefreshOnly) {
         setupHandlers(body, item);
+      }
+      if (contextRefreshOnly) {
+        const refreshContextSource = (body as any)
+          .__llmRefreshContextSourceForCurrentItem;
+        if (typeof refreshContextSource === "function") {
+          refreshContextSource();
+        } else {
+          activeContextPanelStateSync.get(body)?.();
+        }
       }
       refreshChat(body, resolvedItem);
       markCompletedPanelLifecycleSignature(body, lifecycleSignature);

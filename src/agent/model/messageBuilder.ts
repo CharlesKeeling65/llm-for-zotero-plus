@@ -6,10 +6,14 @@ import type {
 import { AGENT_PERSONA_INSTRUCTIONS } from "./agentPersona";
 import { buildAgentMemoryBlock } from "../store/conversationMemory";
 import { getAllSkills } from "../skills";
+import { classifyWriteNoteDestination } from "../writeNoteDestination";
 
 import { resolveProviderCapabilities } from "../../providers";
 import type { ProviderCapabilities } from "../../providers";
-import { buildNotesDirectoryConfigSection } from "../../utils/notesDirectoryConfig";
+import {
+  buildNotesDirectoryConfigSection,
+  getNotesDirectoryNickname,
+} from "../../utils/notesDirectoryConfig";
 import { buildRuntimePlatformGuidanceText } from "../../utils/runtimePlatform";
 import { formatPaperSourceLabel } from "../../modules/contextPanel/paperAttribution";
 import {
@@ -192,6 +196,7 @@ function buildFullUserMessage(
         type: "image_url" as const,
         image_url: {
           url,
+          detail: "high" as const,
         },
       })),
       ...pdfAttachments.map((a) => ({
@@ -369,21 +374,23 @@ function buildWriteNoteFileInstruction(
     ...(request.forcedSkillIds || []),
   ]);
   if (!activeSkillIds.has("write-note")) return "";
-  const text = request.userText || "";
-  if (/\b(zotero\s+note|current\s+zotero\s+note|active\s+note)\b/i.test(text)) {
-    return "TURN RULE: The user is asking for a Zotero note edit. Use `note_write` for the Zotero note workflow rather than writing an external Markdown file.";
-  }
-  if (
-    !/\b(obsidian|vault|markdown\s+file|md\s+file|file|folder|directory|disk|export|save|write\s+(?:it|this|that)?\s*(?:to|into))\b/i.test(
-      text,
-    )
-  ) {
-    return "";
-  }
-  return (
-    'TURN RULE: The user is asking for an Obsidian/file-based note. Successful completion requires calling `file_io` with `action: "write"` and Markdown content. ' +
-    "Do not finish by placing the full note body in chat. If the notes directory is not configured or the target path cannot be resolved, give a brief setup error instead of dumping the note body."
+  const destination = classifyWriteNoteDestination(
+    request.userText,
+    getNotesDirectoryNickname(),
   );
+  if (destination === "zotero") {
+    return (
+      "TURN RULE: The user is asking for a Zotero note workflow. Use `note_write` rather than writing an external Markdown file. " +
+      "After `note_write` succeeds, do not also call `file_io` or `run_command` unless the user explicitly requested a filesystem output."
+    );
+  }
+  if (destination === "file") {
+    return (
+      'TURN RULE: The user is asking for an Obsidian/file-based note. Successful completion requires calling `file_io` with `action: "write"` and Markdown content. ' +
+      "Do not finish by placing the full note body in chat. If the notes directory is not configured or the target path cannot be resolved, give a brief setup error instead of dumping the note body."
+    );
+  }
+  return "";
 }
 
 function buildRuntimePlatformSection(): string {

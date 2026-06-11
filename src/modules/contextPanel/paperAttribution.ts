@@ -1,7 +1,9 @@
 import {
-  resolveTextAttachmentSourceModeFromMetadata,
-  type TextAttachmentSourceMode,
-} from "./textAttachmentExtraction";
+  isPdfContextAttachment,
+  resolveContextAttachmentSupport,
+} from "./contextAttachmentSupport";
+import { formatContextAttachmentSourceType } from "./contextSourceModes";
+import type { TextAttachmentSourceMode } from "./contextAttachmentTypes";
 import type { PaperContentSourceMode, PaperContextRef } from "./types";
 
 function normalizeText(value: unknown): string {
@@ -33,35 +35,122 @@ function getAttachmentFilename(
   );
 }
 
-function getAttachmentContentType(
-  contextItem: Zotero.Item | null | undefined,
+function getZoteroItemsApi(): {
+  get?: (itemId: number) => Zotero.Item | null | undefined;
+} | null {
+  if (typeof Zotero === "undefined") return null;
+  return (
+    (
+      Zotero as unknown as {
+        Items?: { get?: (itemId: number) => Zotero.Item | null | undefined };
+      }
+    ).Items || null
+  );
+}
+
+function getItemFieldText(
+  item: Zotero.Item | null | undefined,
+  field: string,
 ): string {
-  if (!contextItem?.isAttachment?.()) return "";
+  if (!item) return "";
+  try {
+    return normalizeText(String(item.getField(field) || ""));
+  } catch (_err) {
+    return "";
+  }
+}
+
+function getFirstCreatorText(item: Zotero.Item | null | undefined): string {
+  if (!item) return "";
   return normalizeText(
     String(
-      (contextItem as unknown as { attachmentContentType?: string })
-        .attachmentContentType || "",
+      getItemFieldText(item, "firstCreator") ||
+        (item as Zotero.Item).firstCreator ||
+        "",
     ),
-  ).toLowerCase();
+  );
 }
 
-function isPdfAttachment(
-  contextItem: Zotero.Item | null | undefined,
-): contextItem is Zotero.Item {
-  if (!contextItem?.isAttachment?.()) return false;
-  const contentType = getAttachmentContentType(contextItem);
-  const filename = getAttachmentFilename(contextItem).toLowerCase();
-  return contentType === "application/pdf" || filename.endsWith(".pdf");
+function getYearText(item: Zotero.Item | null | undefined): string {
+  if (!item) return "";
+  const rawYear = normalizeText(
+    String(
+      getItemFieldText(item, "year") ||
+        getItemFieldText(item, "date") ||
+        getItemFieldText(item, "issued") ||
+        "",
+    ),
+  );
+  return extractYearValue(rawYear) || rawYear;
 }
 
-function resolveTextAttachmentSourceMode(
-  contextItem: Zotero.Item | null | undefined,
-): TextAttachmentSourceMode | null {
-  if (!contextItem?.isAttachment?.()) return null;
-  return resolveTextAttachmentSourceModeFromMetadata({
-    contentType: getAttachmentContentType(contextItem),
-    filename: getAttachmentFilename(contextItem),
-  });
+type PaperContextDisplayFields = {
+  title: string;
+  attachmentTitle?: string;
+  citationKey?: string;
+  firstCreator?: string;
+  year?: string;
+};
+
+export type PaperContextDisplayCache = Map<
+  string,
+  PaperContextDisplayFields | null
+>;
+
+function getPaperContextDisplayCacheKey(
+  paperContext: Pick<PaperContextRef, "itemId" | "contextItemId">,
+): string | null {
+  const itemId = Math.floor(Number(paperContext.itemId));
+  const contextItemId = Math.floor(Number(paperContext.contextItemId));
+  if (
+    !Number.isFinite(itemId) ||
+    itemId <= 0 ||
+    !Number.isFinite(contextItemId) ||
+    contextItemId <= 0
+  ) {
+    return null;
+  }
+  return `${itemId}:${contextItemId}`;
+}
+
+function resolveLivePaperContextDisplayFields(
+  paperContext: PaperContextRef,
+): PaperContextDisplayFields | null {
+  const itemId = Math.floor(Number(paperContext.itemId));
+  const contextItemId = Math.floor(Number(paperContext.contextItemId));
+  if (
+    !Number.isFinite(itemId) ||
+    itemId <= 0 ||
+    !Number.isFinite(contextItemId) ||
+    contextItemId <= 0
+  ) {
+    return null;
+  }
+
+  const items = getZoteroItemsApi();
+  const item = items?.get?.(itemId) || null;
+  const contextItem = items?.get?.(contextItemId) || null;
+  const contextIsSameItem = itemId === contextItemId;
+  if (!item?.isRegularItem?.()) return null;
+  if (!contextIsSameItem && !contextItem?.isAttachment?.()) return null;
+  if (
+    contextItem?.isAttachment?.() &&
+    Math.floor(Number(contextItem.parentID || 0)) !== itemId
+  ) {
+    return null;
+  }
+
+  const title = getItemFieldText(item, "title") || `Paper ${itemId}`;
+  const attachmentTitle = contextItem?.isAttachment?.()
+    ? getAttachmentDisplayTitle(contextItem)
+    : "";
+  return {
+    title,
+    attachmentTitle: attachmentTitle || undefined,
+    citationKey: getItemFieldText(item, "citationKey") || undefined,
+    firstCreator: getFirstCreatorText(item) || undefined,
+    year: getYearText(item) || undefined,
+  };
 }
 
 export function isTextLikeAttachmentSourceMode(
@@ -75,11 +164,29 @@ export function isTextLikeAttachmentSourceMode(
 export function formatAttachmentSourceType(
   mode: PaperContentSourceMode | undefined | null,
 ): string {
-  if (mode === "markdown") return "Markdown attachment";
-  if (mode === "html") return "HTML attachment";
-  if (mode === "txt") return "TXT attachment";
-  if (mode === "docx") return "DOCX attachment";
-  return "Attachment";
+  return formatContextAttachmentSourceType(mode);
+}
+
+export function resolvePaperContextDisplayRef(
+  paperContext: PaperContextRef,
+  cache?: PaperContextDisplayCache,
+): PaperContextRef {
+  const displayRef: PaperContextRef = { ...paperContext };
+  const cacheKey = getPaperContextDisplayCacheKey(paperContext);
+  let displayFields: PaperContextDisplayFields | null | undefined;
+  if (cacheKey && cache?.has(cacheKey)) {
+    displayFields = cache.get(cacheKey) || null;
+  } else {
+    displayFields = resolveLivePaperContextDisplayFields(paperContext);
+    if (cacheKey && cache) {
+      cache.set(cacheKey, displayFields);
+    }
+  }
+  if (!displayFields) return displayRef;
+  return {
+    ...displayRef,
+    ...displayFields,
+  };
 }
 
 export function formatPaperAttachmentTitle(
@@ -194,6 +301,7 @@ export function buildPaperQuoteCitationGuidance(
         "- Put the source label on the next non-empty line after the blockquote, before any commentary.",
         "- Never put headings, bullets, interpretation, or other prose between a quoted passage and its source label; clickable quote citations depend on this adjacency.",
         "- Use the EXACT source label above. Do NOT translate or romanize author names.",
+        "- Do not write [[source=...]], section=..., or chunk=... metadata in the final answer.",
       ];
     }
     return [
@@ -207,6 +315,7 @@ export function buildPaperQuoteCitationGuidance(
       "- Put the source label on the next non-empty line after the blockquote, before any commentary.",
       "- Never put headings, bullets, interpretation, or other prose between a quoted passage and its source label; clickable quote citations depend on this adjacency.",
       "- Use the EXACT source label above. Do NOT translate or romanize author names.",
+      "- Do not write [[source=...]], section=..., or chunk=... metadata in the final answer.",
     ];
   }
   return [
@@ -221,6 +330,7 @@ export function buildPaperQuoteCitationGuidance(
     "- Never put headings, bullets, interpretation, or other prose between a quoted passage and its source label; clickable quote citations depend on this adjacency.",
     "- Use the EXACT source label provided for each paper. Do NOT translate or romanize author names.",
     "- Do not cite raw chunk ids, citation keys, or invented page numbers.",
+    "- Do not write [[source=...]], section=..., or chunk=... metadata in the final answer.",
   ];
 }
 
@@ -237,6 +347,7 @@ export function buildGenericSourceQuoteCitationGuidance(): string[] {
     "- Never put headings, bullets, interpretation, or other prose between a quoted passage and its source label; clickable quote citations depend on this adjacency.",
     "- Use the EXACT source label provided for each source. Do NOT translate or romanize author names.",
     "- Do not cite raw chunk ids, citation keys, or invented page numbers.",
+    "- Do not write [[source=...]], section=..., or chunk=... metadata in the final answer.",
   ];
 }
 
@@ -285,8 +396,12 @@ export function resolvePaperContextRefFromAttachment(
   if (!contextItem?.isAttachment?.()) {
     return null;
   }
-  const textSourceMode = resolveTextAttachmentSourceMode(contextItem);
-  if (!isPdfAttachment(contextItem) && !textSourceMode) return null;
+  const attachmentSupport = resolveContextAttachmentSupport(contextItem);
+  if (!attachmentSupport) return null;
+  const textSourceMode =
+    attachmentSupport.kind === "text"
+      ? attachmentSupport.contentSourceMode
+      : null;
 
   const parentItem = contextItem.parentID
     ? Zotero.Items.get(contextItem.parentID) || null
@@ -362,10 +477,7 @@ export function resolvePaperContextRefFromItem(
   const childAttachmentIds = item.getAttachments?.() || [];
   for (const attachmentId of childAttachmentIds) {
     const attachment = Zotero.Items.get(attachmentId);
-    if (
-      attachment?.isAttachment?.() &&
-      attachment.attachmentContentType === "application/pdf"
-    ) {
+    if (isPdfContextAttachment(attachment)) {
       contextItemId = Math.floor(attachment.id);
       break;
     }

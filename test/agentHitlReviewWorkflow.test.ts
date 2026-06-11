@@ -143,9 +143,14 @@ function createStubSearchTool(
           ? (args as Record<string, unknown>)
           : {},
     }),
-    execute: async (input) => execute(input),
+    execute: async (input) => ({
+      workflow: input.workflow || "answer",
+      ...(await execute(input)),
+    }),
     createResultReviewAction: (input, result, context) =>
-      createSearchLiteratureReviewAction(result, context, input),
+      input.workflow === "review"
+        ? createSearchLiteratureReviewAction(result, context, input)
+        : null,
     resolveResultReview: (input, result, resolution, context) =>
       resolveSearchLiteratureReview(input, result, resolution, context),
   };
@@ -246,7 +251,7 @@ describe("AgentRuntime HITL review workflow", function () {
             {
               id: "call-search",
               name: "literature_search",
-              arguments: { mode: "metadata", query: "paper metadata" },
+              arguments: { workflow: "review", mode: "metadata", query: "paper metadata" },
             },
           ],
           assistantMessage: {
@@ -256,7 +261,7 @@ describe("AgentRuntime HITL review workflow", function () {
               {
                 id: "call-search",
                 name: "literature_search",
-                arguments: { mode: "metadata", query: "paper metadata" },
+                arguments: { workflow: "review", mode: "metadata", query: "paper metadata" },
               },
             ],
           },
@@ -364,7 +369,7 @@ describe("AgentRuntime HITL review workflow", function () {
             {
               id: "call-search",
               name: "literature_search",
-              arguments: { mode: "search", query: "plasticity" },
+              arguments: { workflow: "review", mode: "search", query: "plasticity" },
             },
           ],
           assistantMessage: {
@@ -374,7 +379,7 @@ describe("AgentRuntime HITL review workflow", function () {
               {
                 id: "call-search",
                 name: "literature_search",
-                arguments: { mode: "search", query: "plasticity" },
+                arguments: { workflow: "review", mode: "search", query: "plasticity" },
               },
             ],
           },
@@ -459,7 +464,7 @@ describe("AgentRuntime HITL review workflow", function () {
             {
               id: "call-search",
               name: "literature_search",
-              arguments: { mode: "recommendations" },
+              arguments: { workflow: "review", mode: "recommendations" },
             },
           ],
           assistantMessage: {
@@ -469,7 +474,7 @@ describe("AgentRuntime HITL review workflow", function () {
               {
                 id: "call-search",
                 name: "literature_search",
-                arguments: { mode: "recommendations" },
+                arguments: { workflow: "review", mode: "recommendations" },
               },
             ],
           },
@@ -518,11 +523,13 @@ describe("AgentRuntime HITL review workflow", function () {
     const restoreDb = installMockDb();
     try {
       const searchQueries: string[] = [];
+      const searchWorkflows: unknown[] = [];
       const registry = new AgentToolRegistry();
       registry.register(
         createStubSearchTool(async (input) => {
           const query = String(input.query || "initial");
           searchQueries.push(query);
+          searchWorkflows.push(input.workflow);
           return {
             mode: "search",
             source: "OpenAlex",
@@ -548,7 +555,7 @@ describe("AgentRuntime HITL review workflow", function () {
             {
               id: "call-search",
               name: "literature_search",
-              arguments: { mode: "search", query: "initial search" },
+              arguments: { workflow: "review", mode: "search", query: "initial search" },
             },
           ],
           assistantMessage: {
@@ -558,7 +565,7 @@ describe("AgentRuntime HITL review workflow", function () {
               {
                 id: "call-search",
                 name: "literature_search",
-                arguments: { mode: "search", query: "initial search" },
+                arguments: { workflow: "review", mode: "search", query: "initial search" },
               },
             ],
           },
@@ -602,6 +609,7 @@ describe("AgentRuntime HITL review workflow", function () {
       if (outcome.kind !== "completed") return;
       assert.equal(outcome.text, "Stopped after review.");
       assert.deepEqual(searchQueries, ["initial search", "refined search"]);
+      assert.deepEqual(searchWorkflows, ["review", "review"]);
       assert.equal(adapter.stepIndex, 1);
     } finally {
       restoreDb();
@@ -634,7 +642,7 @@ describe("AgentRuntime HITL review workflow", function () {
             {
               id: "call-search",
               name: "literature_search",
-              arguments: { mode: "search", query: "cancel flow" },
+              arguments: { workflow: "review", mode: "search", query: "cancel flow" },
             },
           ],
           assistantMessage: {
@@ -644,7 +652,7 @@ describe("AgentRuntime HITL review workflow", function () {
               {
                 id: "call-search",
                 name: "literature_search",
-                arguments: { mode: "search", query: "cancel flow" },
+                arguments: { workflow: "review", mode: "search", query: "cancel flow" },
               },
             ],
           },

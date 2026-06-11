@@ -40,7 +40,12 @@ export function getRelayBaseUrl(): string {
 // ---------------------------------------------------------------------------
 
 interface PendingCommand {
-  type: "NEW_CHAT" | "LOAD_CHAT" | "DELETE_CHAT" | "SCRAPE_HISTORY" | "ENSURE_TAB";
+  type:
+    | "NEW_CHAT"
+    | "LOAD_CHAT"
+    | "DELETE_CHAT"
+    | "SCRAPE_HISTORY"
+    | "ENSURE_TAB";
   chatUrl?: string;
   chatId?: string;
   target?: string;
@@ -97,6 +102,21 @@ export type RelayTurnStatus =
   | "incomplete"
   | "error";
 
+export interface RelayTurnDiagnostic {
+  reasonCode?: string | null;
+  phase?: RelayQueryPhase | RelayTurnStatus | string | null;
+  siteId?: string | null;
+  message?: string | null;
+  composerTextMatched?: boolean | null;
+  uploadDetected?: boolean | null;
+  sendControlState?: string | null;
+  clickAttempts?: number | null;
+  requestObserved?: boolean | null;
+  streamObserved?: boolean | null;
+  userTurnMatched?: boolean | null;
+  assistantTurnMatched?: boolean | null;
+}
+
 export interface RelayState {
   status: "idle" | "pending" | "running" | "done" | "error";
   remote_chat_url: string | null;
@@ -129,6 +149,7 @@ export interface RelayState {
   thinking_revision: number;
   run_state: RelayRunState | null;
   completion_reason: RelayCompletionReason | null;
+  last_diagnostic: RelayTurnDiagnostic | null;
   responses: Array<{
     seq: number;
     attempt?: number;
@@ -148,6 +169,7 @@ export interface RelayState {
     baseline_transcript_count?: number;
     baseline_transcript_hash?: string | null;
     turn_status?: RelayTurnStatus | null;
+    diagnostic?: RelayTurnDiagnostic | null;
   }>;
   activeSessionId: string | null;
   pendingCommand: PendingCommand | null;
@@ -164,6 +186,17 @@ export interface RelayState {
 interface ExtensionStatus {
   chatTabAlive: boolean;
   chatUrl: string | null;
+  siteId: string | null;
+  url: string | null;
+  contentScriptAlive: boolean;
+  mainWorldInjected: boolean;
+  composerFound: boolean;
+  sendControlState: string | null;
+  uploadControlFound: boolean;
+  networkHookActive: boolean;
+  lastRequestAt: number | null;
+  lastStreamAt: number | null;
+  lastDiagnostic: RelayTurnDiagnostic | null;
   ts: number;
 }
 
@@ -227,6 +260,7 @@ if (!Z._webchatRelay) {
       thinking_revision: 0,
       run_state: null,
       completion_reason: null,
+      last_diagnostic: null,
       responses: [],
       activeSessionId: null,
       pendingCommand: null,
@@ -262,10 +296,24 @@ function _store(): {
   return ep[STORAGE_KEY];
 }
 
-function S(): RelayState { return _store().state; }
-function getMirroredHistory(): Array<{ id: string; title: string; chatUrl: string }> { return _store().mirroredHistory; }
-function setMirroredHistory(h: Array<{ id: string; title: string; chatUrl: string }>) { _store().mirroredHistory = h; }
-function getHistorySiteSync(): HistorySiteSyncMap { return _store().historySiteSync; }
+function S(): RelayState {
+  return _store().state;
+}
+function getMirroredHistory(): Array<{
+  id: string;
+  title: string;
+  chatUrl: string;
+}> {
+  return _store().mirroredHistory;
+}
+function setMirroredHistory(
+  h: Array<{ id: string; title: string; chatUrl: string }>,
+) {
+  _store().mirroredHistory = h;
+}
+function getHistorySiteSync(): HistorySiteSyncMap {
+  return _store().historySiteSync;
+}
 function cloneScrapedTranscriptSnapshot(
   snapshot: ScrapedTranscriptSnapshot | null,
 ): ScrapedTranscriptSnapshot | null {
@@ -273,18 +321,23 @@ function cloneScrapedTranscriptSnapshot(
   return {
     messages: Array.isArray(snapshot.messages)
       ? snapshot.messages.map((message) => ({
-        messageKey:
-          typeof message?.messageKey === "string" ? message.messageKey : undefined,
-        role: typeof message?.role === "string" ? message.role : "assistant",
-        text: typeof message?.text === "string" ? message.text : "",
-        thinking:
-          typeof message?.thinking === "string" ? message.thinking : undefined,
-        attachments: Array.isArray(message?.attachments)
-          ? message.attachments.filter(
-            (attachment): attachment is string => typeof attachment === "string",
-          )
-          : undefined,
-      }))
+          messageKey:
+            typeof message?.messageKey === "string"
+              ? message.messageKey
+              : undefined,
+          role: typeof message?.role === "string" ? message.role : "assistant",
+          text: typeof message?.text === "string" ? message.text : "",
+          thinking:
+            typeof message?.thinking === "string"
+              ? message.thinking
+              : undefined,
+          attachments: Array.isArray(message?.attachments)
+            ? message.attachments.filter(
+                (attachment): attachment is string =>
+                  typeof attachment === "string",
+              )
+            : undefined,
+        }))
       : [],
     chatUrl: typeof snapshot.chatUrl === "string" ? snapshot.chatUrl : null,
     chatId: typeof snapshot.chatId === "string" ? snapshot.chatId : null,
@@ -314,23 +367,28 @@ function normalizeScrapedTranscriptSnapshot(
 ): ScrapedTranscriptSnapshot {
   const messages = Array.isArray(body.messages)
     ? (body.messages as Array<Record<string, unknown>>).map((message) => ({
-      messageKey:
-        typeof message?.messageKey === "string" ? message.messageKey : undefined,
-      role: typeof message?.role === "string" ? message.role : "assistant",
-      text: typeof message?.text === "string" ? message.text : "",
-      thinking:
-        typeof message?.thinking === "string" ? message.thinking : undefined,
-      attachments: Array.isArray(message?.attachments)
-        ? message.attachments.filter(
-          (attachment): attachment is string => typeof attachment === "string",
-        )
-        : undefined,
-    }))
+        messageKey:
+          typeof message?.messageKey === "string"
+            ? message.messageKey
+            : undefined,
+        role: typeof message?.role === "string" ? message.role : "assistant",
+        text: typeof message?.text === "string" ? message.text : "",
+        thinking:
+          typeof message?.thinking === "string" ? message.thinking : undefined,
+        attachments: Array.isArray(message?.attachments)
+          ? message.attachments.filter(
+              (attachment): attachment is string =>
+                typeof attachment === "string",
+            )
+          : undefined,
+      }))
     : [];
   const chatUrl = typeof body.chatUrl === "string" ? body.chatUrl : null;
   const chatId = typeof body.chatId === "string" ? body.chatId : null;
   let siteHostname =
-    typeof body.siteHostname === "string" ? normalizeHistorySiteHostname(body.siteHostname) : "";
+    typeof body.siteHostname === "string"
+      ? normalizeHistorySiteHostname(body.siteHostname)
+      : "";
   if (!siteHostname && chatUrl) {
     try {
       siteHostname = normalizeHistorySiteHostname(new URL(chatUrl).hostname);
@@ -344,9 +402,7 @@ function normalizeScrapedTranscriptSnapshot(
       ? Math.floor(capturedAtRaw)
       : Date.now();
   const source =
-    body.source === "network" || body.source === "dom"
-      ? body.source
-      : null;
+    body.source === "network" || body.source === "dom" ? body.source : null;
 
   return {
     messages,
@@ -358,7 +414,9 @@ function normalizeScrapedTranscriptSnapshot(
   };
 }
 
-function normalizeHistorySiteHostname(hostname: string | null | undefined): string {
+function normalizeHistorySiteHostname(
+  hostname: string | null | undefined,
+): string {
   return String(hostname || "")
     .trim()
     .toLowerCase()
@@ -397,18 +455,22 @@ function cloneHistorySiteSync(): HistorySiteSyncMap {
 function applyChatHistoryUpdate(body: Record<string, unknown>): void {
   if (!Array.isArray(body.sessions)) return;
 
-  const incoming = (body.sessions as Array<{ id: string; title: string; chatUrl: string }>)
-    .filter((session) =>
+  const incoming = (
+    body.sessions as Array<{ id: string; title: string; chatUrl: string }>
+  ).filter(
+    (session) =>
       session &&
       typeof session.id === "string" &&
       typeof session.title === "string" &&
-      typeof session.chatUrl === "string"
-    );
+      typeof session.chatUrl === "string",
+  );
   const incomingSites = new Set<string>();
 
   for (const session of incoming) {
     try {
-      incomingSites.add(normalizeHistorySiteHostname(new URL(session.chatUrl).hostname));
+      incomingSites.add(
+        normalizeHistorySiteHostname(new URL(session.chatUrl).hostname),
+      );
     } catch {
       // Ignore malformed URLs from the extension.
     }
@@ -530,7 +592,8 @@ function jsonReply(
 
 function parseBody(data: unknown): Record<string, unknown> {
   if (typeof data === "string") return JSON.parse(data);
-  if (typeof data === "object" && data !== null) return data as Record<string, unknown>;
+  if (typeof data === "object" && data !== null)
+    return data as Record<string, unknown>;
   return {};
 }
 
@@ -639,24 +702,87 @@ function normalizeTurnStatus(
     : fallback;
 }
 
+function readNullableString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function readNullableBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function readNullableNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function normalizeTurnDiagnostic(
+  body: Record<string, unknown>,
+  fallback: RelayTurnDiagnostic | null = null,
+): RelayTurnDiagnostic | null {
+  const raw =
+    body.diagnostic && typeof body.diagnostic === "object"
+      ? { ...(body.diagnostic as Record<string, unknown>), ...body }
+      : body;
+  const diagnostic: RelayTurnDiagnostic = {
+    reasonCode: readNullableString(raw.reasonCode),
+    phase: readNullableString(raw.phase),
+    siteId: readNullableString(raw.siteId),
+    message: readNullableString(raw.message),
+    composerTextMatched: readNullableBoolean(raw.composerTextMatched),
+    uploadDetected: readNullableBoolean(raw.uploadDetected),
+    sendControlState: readNullableString(raw.sendControlState),
+    clickAttempts:
+      raw.clickAttempts == null
+        ? null
+        : Math.max(0, Math.floor(Number(raw.clickAttempts) || 0)),
+    requestObserved: readNullableBoolean(raw.requestObserved),
+    streamObserved: readNullableBoolean(raw.streamObserved),
+    userTurnMatched: readNullableBoolean(raw.userTurnMatched),
+    assistantTurnMatched: readNullableBoolean(raw.assistantTurnMatched),
+  };
+  const hasValue = Object.values(diagnostic).some(
+    (value) => value !== null && value !== undefined,
+  );
+  return hasValue ? diagnostic : fallback;
+}
+
+function applyTurnDiagnostic(body: Record<string, unknown>): void {
+  const diagnostic = normalizeTurnDiagnostic(body, S().last_diagnostic);
+  if (diagnostic) {
+    S().last_diagnostic = diagnostic;
+  }
+}
+
+function deriveRemoteChatIdFromUrl(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === "chatgpt.com") {
+      const match = parsed.pathname.match(/^\/c\/([^/?#]+)/);
+      return match ? match[1] : null;
+    }
+    if (parsed.hostname === "chat.deepseek.com") {
+      const match = parsed.pathname.match(/^\/a\/chat\/s\/([^/?#]+)/);
+      return match ? match[1] : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function applyRemoteTurnMetadata(body: Record<string, unknown>): void {
   if ("remote_chat_url" in body) {
     S().remote_chat_url =
-      typeof body.remote_chat_url === "string"
-        ? body.remote_chat_url
-        : null;
+      typeof body.remote_chat_url === "string" ? body.remote_chat_url : null;
   }
   if ("remote_chat_id" in body) {
     S().remote_chat_id =
-      typeof body.remote_chat_id === "string"
-        ? body.remote_chat_id
-        : null;
+      typeof body.remote_chat_id === "string" ? body.remote_chat_id : null;
   }
   if ("user_turn_key" in body) {
     S().user_turn_key =
-      typeof body.user_turn_key === "string"
-        ? body.user_turn_key
-        : null;
+      typeof body.user_turn_key === "string" ? body.user_turn_key : null;
   }
   if ("assistant_turn_key" in body) {
     S().assistant_turn_key =
@@ -691,6 +817,7 @@ function resetPerTurnTracking(): void {
   S().thinking_revision = 0;
   S().run_state = null;
   S().completion_reason = null;
+  S().last_diagnostic = null;
   if (S().turn_status !== "navigating") {
     S().turn_status =
       S().remote_chat_url || S().remote_chat_id ? "ready" : null;
@@ -712,7 +839,9 @@ function isRunningExpired(): boolean {
 
 function createEndpoint(
   methods: string[],
-  handler: (opts: EndpointOptions) => Promise<EndpointResponse> | EndpointResponse,
+  handler: (
+    opts: EndpointOptions,
+  ) => Promise<EndpointResponse> | EndpointResponse,
 ) {
   return class {
     supportedMethods = methods;
@@ -823,6 +952,7 @@ const AckQueryPhaseEndpoint = createEndpoint(["POST"], (opts) => {
   }
 
   S().query.phase = nextPhase;
+  applyTurnDiagnostic(body);
   if (nextPhase === "claimed" || nextPhase === "prompt_applied") {
     S().running_since = Date.now();
   }
@@ -901,6 +1031,7 @@ const PollResponseEndpoint = createEndpoint(["GET"], () => {
     baseline_transcript_count: S().baseline_transcript_count,
     baseline_transcript_hash: S().baseline_transcript_hash,
     turn_status: S().turn_status,
+    diagnostic: S().last_diagnostic,
     current_seq: S().query.seq,
   });
 });
@@ -925,11 +1056,11 @@ const UpdatePartialEndpoint = createEndpoint(["POST"], (opts) => {
   } else if ("thinking" in body) {
     S().partial_thinking = body.thinking as string | null;
   }
+  applyTurnDiagnostic(body);
   applyRemoteTurnMetadata(body);
   if ("answer_anchor_id" in body) {
-    S().answer_anchor_id = typeof body.answer_anchor_id === "string"
-      ? body.answer_anchor_id
-      : null;
+    S().answer_anchor_id =
+      typeof body.answer_anchor_id === "string" ? body.answer_anchor_id : null;
   }
   if ("answer_revision" in body) {
     const revision = Number(body.answer_revision);
@@ -974,13 +1105,24 @@ const UpdateTurnStateEndpoint = createEndpoint(["POST"], (opts) => {
   const body = parseBody(opts.data);
   expireStaleClaimIfNeeded();
 
-  if ("seq" in body && body.seq != null && S().active_seq > 0 && body.seq !== S().active_seq) {
+  if (
+    "seq" in body &&
+    body.seq != null &&
+    S().active_seq > 0 &&
+    body.seq !== S().active_seq
+  ) {
     return jsonReply({ ok: false, reason: "seq_mismatch" });
   }
-  if ("attempt" in body && body.attempt != null && S().active_attempt > 0 && !attemptMatches(body)) {
+  if (
+    "attempt" in body &&
+    body.attempt != null &&
+    S().active_attempt > 0 &&
+    !attemptMatches(body)
+  ) {
     return jsonReply({ ok: false, reason: "attempt_mismatch" });
   }
 
+  applyTurnDiagnostic(body);
   applyRemoteTurnMetadata(body);
 
   if ("turn_status" in body) {
@@ -1016,7 +1158,9 @@ const SubmitResponseEndpoint = createEndpoint(["POST"], (opts) => {
 
   const entry = {
     seq: body.seq as number,
-    attempt: ("attempt" in body ? Number(body.attempt) : S().active_attempt) || undefined,
+    attempt:
+      ("attempt" in body ? Number(body.attempt) : S().active_attempt) ||
+      undefined,
     text: body.response as string | undefined,
     error: body.error as string | undefined,
     timestamp: new Date().toISOString(),
@@ -1031,10 +1175,9 @@ const SubmitResponseEndpoint = createEndpoint(["POST"], (opts) => {
     thinking_revision: Number.isFinite(Number(body.thinking_revision))
       ? Number(body.thinking_revision)
       : S().thinking_revision,
-    run_state: normalizeRunState(
-      body.run_state,
-      body.error ? "error" : "done",
-    ) || (body.error ? "error" : "done"),
+    run_state:
+      normalizeRunState(body.run_state, body.error ? "error" : "done") ||
+      (body.error ? "error" : "done"),
     completion_reason: normalizeCompletionReason(
       body.completion_reason,
       body.error ? "error" : "settled",
@@ -1055,7 +1198,9 @@ const SubmitResponseEndpoint = createEndpoint(["POST"], (opts) => {
       typeof body.assistant_turn_key === "string"
         ? (body.assistant_turn_key as string)
         : S().assistant_turn_key,
-    baseline_transcript_count: Number.isFinite(Number(body.baseline_transcript_count))
+    baseline_transcript_count: Number.isFinite(
+      Number(body.baseline_transcript_count),
+    )
       ? Number(body.baseline_transcript_count)
       : S().baseline_transcript_count,
     baseline_transcript_hash:
@@ -1070,6 +1215,7 @@ const SubmitResponseEndpoint = createEndpoint(["POST"], (opts) => {
           ? "incomplete"
           : "done",
     ),
+    diagnostic: normalizeTurnDiagnostic(body, S().last_diagnostic) || undefined,
   };
   S().responses.push(entry);
   S().partial_text = null;
@@ -1086,6 +1232,7 @@ const SubmitResponseEndpoint = createEndpoint(["POST"], (opts) => {
   S().thinking_revision = entry.thinking_revision || 0;
   S().run_state = entry.run_state;
   S().completion_reason = entry.completion_reason || null;
+  S().last_diagnostic = entry.diagnostic || S().last_diagnostic || null;
   S().status = entry.error ? "error" : "done";
   S().query.phase = entry.error ? "error" : "done";
 
@@ -1095,7 +1242,12 @@ const SubmitResponseEndpoint = createEndpoint(["POST"], (opts) => {
 // GET /heartbeat — lightweight connectivity check for the extension
 const HeartbeatEndpoint = createEndpoint(["GET"], () => {
   _store().lastExtensionContact = Date.now();
-  return jsonReply({ ok: true, ts: Date.now(), seq: S().query.seq, active_target: S().active_target || null });
+  return jsonReply({
+    ok: true,
+    ts: Date.now(),
+    seq: S().query.seq,
+    active_target: S().active_target || null,
+  });
 });
 
 // GET /debug — minimal endpoint used by the browser extension for port discovery
@@ -1108,7 +1260,10 @@ const PollCommandEndpoint = createEndpoint(["GET"], () => {
   const cmd = S().pendingCommand;
   if (cmd) {
     S().pendingCommand = null;
-    return jsonReply({ command: cmd, active_target: S().active_target || null });
+    return jsonReply({
+      command: cmd,
+      active_target: S().active_target || null,
+    });
   }
   return jsonReply({ command: null, active_target: S().active_target || null });
 });
@@ -1175,9 +1330,26 @@ const UpdateChatHistoryEndpoint = createEndpoint(["POST"], (opts) => {
 });
 
 // POST /update_chat_url
-const UpdateChatUrlEndpoint = createEndpoint(["POST"], () => {
-  // Chat URL tracking (minimal — just acknowledge)
-  return jsonReply({ ok: true });
+const UpdateChatUrlEndpoint = createEndpoint(["POST"], (opts) => {
+  const body = parseBody(opts.data);
+  const chatUrl =
+    typeof body.chat_url === "string"
+      ? body.chat_url
+      : typeof body.chatUrl === "string"
+        ? body.chatUrl
+        : null;
+  if (chatUrl) {
+    S().remote_chat_url = chatUrl;
+    S().remote_chat_id = deriveRemoteChatIdFromUrl(chatUrl);
+    if (!S().turn_status) {
+      S().turn_status = "ready";
+    }
+  }
+  return jsonReply({
+    ok: true,
+    remote_chat_url: S().remote_chat_url,
+    remote_chat_id: S().remote_chat_id,
+  });
 });
 
 // POST /update_mode — extension reports ChatGPT's actual thinking mode
@@ -1212,7 +1384,12 @@ const LoadChatEndpoint = createEndpoint(["POST"], (opts) => {
   return jsonReply({
     ok: true,
     session: session
-      ? { id: session.id, title: session.title, chatUrl: session.chatUrl, messages: [] }
+      ? {
+          id: session.id,
+          title: session.title,
+          chatUrl: session.chatUrl,
+          messages: [],
+        }
       : { id: sessionId, title: "Unknown", chatUrl: null, messages: [] },
   });
 });
@@ -1223,6 +1400,26 @@ const ExtensionStatusEndpoint = createEndpoint(["POST"], (opts) => {
   _store().extensionStatus = {
     chatTabAlive: !!body.chatTabAlive,
     chatUrl: (body.chatUrl as string) || null,
+    siteId: readNullableString(body.siteId),
+    url: readNullableString(body.url) || readNullableString(body.chatUrl),
+    contentScriptAlive: body.contentScriptAlive !== false,
+    mainWorldInjected: body.mainWorldInjected !== false,
+    composerFound: body.composerFound !== false,
+    sendControlState: readNullableString(body.sendControlState),
+    uploadControlFound: body.uploadControlFound === true,
+    networkHookActive: body.networkHookActive !== false,
+    lastRequestAt: readNullableNumber(body.lastRequestAt),
+    lastStreamAt: readNullableNumber(body.lastStreamAt),
+    lastDiagnostic:
+      normalizeTurnDiagnostic(
+        {
+          ...(body.lastDiagnostic && typeof body.lastDiagnostic === "object"
+            ? (body.lastDiagnostic as Record<string, unknown>)
+            : {}),
+          siteId: body.siteId,
+        },
+        null,
+      ) || null,
     ts: Date.now(),
   };
   _store().lastExtensionContact = Date.now();
@@ -1366,7 +1563,12 @@ export function relayAckQueryPhase(
   }
 
   S().query.phase = phase;
-  if (phase === "claimed" || phase === "prompt_applied" || phase === "submitted" || phase === "streaming") {
+  if (
+    phase === "claimed" ||
+    phase === "prompt_applied" ||
+    phase === "submitted" ||
+    phase === "streaming"
+  ) {
     S().running_since = Date.now();
   }
   if (phase === "submitted" && !S().run_state) {
@@ -1423,11 +1625,16 @@ export function relayPollResponse(): {
   baseline_transcript_count: number;
   baseline_transcript_hash: string | null;
   turn_status: RelayTurnStatus | null;
+  diagnostic: RelayTurnDiagnostic | null;
   current_seq: number;
 } {
   expireStaleClaimIfNeeded();
   // Passive timeout
-  if (S().status === "running" && S().running_since > 0 && Date.now() - S().running_since > PIPELINE_TIMEOUT_MS) {
+  if (
+    S().status === "running" &&
+    S().running_since > 0 &&
+    Date.now() - S().running_since > PIPELINE_TIMEOUT_MS
+  ) {
     S().status = "error";
     S().query.phase = "error";
     S().responses.push({
@@ -1455,6 +1662,7 @@ export function relayPollResponse(): {
     baseline_transcript_count: S().baseline_transcript_count,
     baseline_transcript_hash: S().baseline_transcript_hash,
     turn_status: S().turn_status,
+    diagnostic: S().last_diagnostic,
     current_seq: S().query.seq,
   };
 }
@@ -1474,7 +1682,11 @@ export function relaySetActiveTarget(target: string): void {
 }
 
 /** Set a pending command directly (no HTTP). */
-export function relaySetCommand(cmd: { type: string; chatUrl?: string; chatId?: string }): void {
+export function relaySetCommand(cmd: {
+  type: string;
+  chatUrl?: string;
+  chatId?: string;
+}): void {
   S().pendingCommand = cmd as any;
 }
 
@@ -1513,14 +1725,23 @@ export function relayRefreshChat(): { ok: boolean; chatUrl: string | null } {
   if (!chatUrl) return { ok: false, chatUrl: null };
   setScrapedTranscript(null);
   S().turn_status = "navigating";
-  S().pendingCommand = { type: "LOAD_CHAT", chatUrl, chatId: chatId || undefined } as any;
+  S().pendingCommand = {
+    type: "LOAD_CHAT",
+    chatUrl,
+    chatId: chatId || undefined,
+  } as any;
   return { ok: true, chatUrl };
 }
 
 /** Load a chat session directly (no HTTP). */
 export function relayLoadChat(sessionId: string): {
   ok: boolean;
-  session: { id: string; title: string; chatUrl: string | null; messages: unknown[] };
+  session: {
+    id: string;
+    title: string;
+    chatUrl: string | null;
+    messages: unknown[];
+  };
 } {
   const session = getMirroredHistory().find((s) => s.id === sessionId);
   resetState();
@@ -1537,7 +1758,12 @@ export function relayLoadChat(sessionId: string): {
   return {
     ok: true,
     session: session
-      ? { id: session.id, title: session.title, chatUrl: session.chatUrl, messages: [] }
+      ? {
+          id: session.id,
+          title: session.title,
+          chatUrl: session.chatUrl,
+          messages: [],
+        }
       : { id: sessionId, title: "Unknown", chatUrl: null, messages: [] },
   };
 }
@@ -1556,8 +1782,16 @@ export function relayUpdateTurnState(opts: {
 }
 
 /** Get mirrored chat history directly (no HTTP). */
-export function relayGetChatHistory(): Array<{ id: string; title: string; chatUrl: string | null }> {
-  return getMirroredHistory().map((s) => ({ id: s.id, title: s.title, chatUrl: s.chatUrl }));
+export function relayGetChatHistory(): Array<{
+  id: string;
+  title: string;
+  chatUrl: string | null;
+}> {
+  return getMirroredHistory().map((s) => ({
+    id: s.id,
+    title: s.title,
+    chatUrl: s.chatUrl,
+  }));
 }
 
 /** Get mirrored chat history plus per-site freshness metadata (no HTTP). */
@@ -1593,7 +1827,10 @@ export function relayGetStateSnapshot(): RelayState {
 }
 
 /** Check if the Chrome extension has contacted the relay recently. */
-export function relayGetExtensionLiveness(): { lastContact: number; aliveSinceMs: number } {
+export function relayGetExtensionLiveness(): {
+  lastContact: number;
+  aliveSinceMs: number;
+} {
   const lc = _store().lastExtensionContact || 0;
   return { lastContact: lc, aliveSinceMs: lc ? Date.now() - lc : Infinity };
 }

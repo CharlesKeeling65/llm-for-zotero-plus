@@ -1,6 +1,8 @@
 import { defineConfig } from "zotero-plugin-scaffold";
 import pkg from "./package.json";
 
+const workflowTestsEnabled = process.env.LLM_FOR_ZOTERO_WORKFLOW_TESTS === "1";
+
 export default defineConfig({
   source: ["src", "addon"],
   dist: ".scaffold/build",
@@ -44,6 +46,14 @@ export default defineConfig({
   },
 
   test: {
+    entries: workflowTestsEnabled ? "test-workflows" : "test",
+    ...(workflowTestsEnabled
+      ? {
+          abortOnFail: true,
+          mocha: { timeout: 30000 },
+          watch: false,
+        }
+      : {}),
     waitForPlugin: `() => Zotero.${pkg.config.addonInstance}.data.initialized`,
   },
 

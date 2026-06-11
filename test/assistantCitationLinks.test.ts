@@ -11,18 +11,123 @@ import {
   extractStandalonePaperSourceLabel,
   formatSourceLabelWithPage,
   formatUnverifiedCitationChipLabel,
+  isPdfBackedCitationCandidateForTests,
   lookupCachedCitationPage,
   matchAssistantCitationCandidates,
   rememberCachedCitationPage,
+  resolveAuthoritativeNonPdfCitationCandidateForTests,
   INLINE_CITATION_SKIP_SELECTOR,
+  type AssistantCitationPaperCandidate,
 } from "../src/modules/contextPanel/assistantCitationLinks";
 import type { PaperContextRef } from "../src/modules/contextPanel/types";
 
 const testDir = dirname(fileURLToPath(import.meta.url));
+const globalScope = globalThis as typeof globalThis & { Zotero?: any };
+
+function makeZoteroItem(params: {
+  id: number;
+  kind: "regular" | "attachment";
+  fields?: Record<string, unknown>;
+  parentID?: number;
+  attachmentFilename?: string;
+  attachmentContentType?: string;
+}): Zotero.Item {
+  return {
+    id: params.id,
+    parentID: params.parentID,
+    attachmentFilename: params.attachmentFilename,
+    attachmentContentType: params.attachmentContentType,
+    isRegularItem: () => params.kind === "regular",
+    isAttachment: () => params.kind === "attachment",
+    getField: (field: string) => params.fields?.[field] || "",
+  } as unknown as Zotero.Item;
+}
+
+function installZoteroItems(
+  items: Record<number, Zotero.Item | undefined>,
+): void {
+  globalScope.Zotero = {
+    Items: {
+      get: (itemId: number) => items[itemId] || null,
+    },
+  };
+}
+
+function installLivePaperContext(params: {
+  itemId: number;
+  contextItemId: number;
+  title: string;
+  firstCreator: string;
+  year?: string;
+  citationKey?: string;
+  attachmentTitle?: string;
+}): void {
+  installZoteroItems({
+    [params.itemId]: makeZoteroItem({
+      id: params.itemId,
+      kind: "regular",
+      fields: {
+        title: params.title,
+        firstCreator: params.firstCreator,
+        year: params.year,
+        citationKey: params.citationKey,
+      },
+    }),
+    [params.contextItemId]: makeZoteroItem({
+      id: params.contextItemId,
+      kind: "attachment",
+      parentID: params.itemId,
+      fields: { title: params.attachmentTitle || "Live PDF" },
+      attachmentFilename: "live.pdf",
+    }),
+  });
+}
+
+function makeCitationCandidate(
+  paperContext: PaperContextRef,
+): AssistantCitationPaperCandidate {
+  return {
+    paperContext,
+    displayPaperContext: paperContext,
+    contextItemId: paperContext.contextItemId,
+    sourceLabel: `(${paperContext.firstCreator || paperContext.title})`,
+    citationLabel: [paperContext.firstCreator, paperContext.year]
+      .filter(Boolean)
+      .join(", "),
+    displaySourceLabel: `(${paperContext.firstCreator || paperContext.title})`,
+    displayCitationLabel: [paperContext.firstCreator, paperContext.year]
+      .filter(Boolean)
+      .join(", "),
+    normalizedSourceLabel: String(
+      paperContext.firstCreator || paperContext.title || "",
+    ).toLowerCase(),
+    normalizedCitationLabel: [paperContext.firstCreator, paperContext.year]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase(),
+    normalizedDisplaySourceLabel: String(
+      paperContext.firstCreator || paperContext.title || "",
+    ).toLowerCase(),
+    normalizedDisplayCitationLabel: [
+      paperContext.firstCreator,
+      paperContext.year,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase(),
+  };
+}
 
 describe("assistantCitationLinks", function () {
+  const originalZotero = globalScope.Zotero;
+
   afterEach(function () {
     clearCachedCitationPagesForTests();
+    if (originalZotero === undefined) {
+      delete globalScope.Zotero;
+    } else {
+      globalScope.Zotero = originalZotero;
+    }
   });
 
   it("extracts a standalone paper source label from a citation line", function () {
@@ -125,6 +230,199 @@ describe("assistantCitationLinks", function () {
     );
   });
 
+  it("classifies only PDF-backed citation candidates as page-locatable", function () {
+    installZoteroItems({
+      11: makeZoteroItem({
+        id: 11,
+        kind: "attachment",
+        parentID: 1,
+        attachmentFilename: "paper.pdf",
+        attachmentContentType: "application/pdf",
+      }),
+      22: makeZoteroItem({
+        id: 22,
+        kind: "attachment",
+        parentID: 2,
+        attachmentFilename: "test.md",
+        attachmentContentType: "text/markdown",
+      }),
+    });
+    const pdfContext: PaperContextRef = {
+      itemId: 1,
+      contextItemId: 11,
+      title: "PDF paper",
+    };
+    const markdownContext: PaperContextRef = {
+      itemId: 2,
+      contextItemId: 22,
+      title: "Markdown paper",
+      attachmentTitle: "test",
+      contentSourceMode: "markdown",
+    };
+    const makeCandidate = (paperContext: PaperContextRef) => ({
+      paperContext,
+      displayPaperContext: paperContext,
+      contextItemId: paperContext.contextItemId,
+      sourceLabel: "(Paper)",
+      citationLabel: "Paper",
+      displaySourceLabel: "(Paper)",
+      displayCitationLabel: "Paper",
+      normalizedSourceLabel: "paper",
+      normalizedCitationLabel: "paper",
+      normalizedDisplaySourceLabel: "paper",
+      normalizedDisplayCitationLabel: "paper",
+    });
+
+    assert.isTrue(
+      isPdfBackedCitationCandidateForTests(makeCandidate(pdfContext)),
+    );
+    assert.isFalse(
+      isPdfBackedCitationCandidateForTests(makeCandidate(markdownContext)),
+    );
+    assert.isFalse(
+      isPdfBackedCitationCandidateForTests(
+        makeCandidate({
+          itemId: 2,
+          contextItemId: 22,
+          title: "Missing mode markdown",
+        }),
+      ),
+    );
+  });
+
+  it("stops PDF fallback when the top static citation candidate is text-backed", function () {
+    installZoteroItems({
+      11: makeZoteroItem({
+        id: 11,
+        kind: "attachment",
+        parentID: 1,
+        attachmentFilename: "paper.pdf",
+        attachmentContentType: "application/pdf",
+      }),
+      22: makeZoteroItem({
+        id: 22,
+        kind: "attachment",
+        parentID: 2,
+        attachmentFilename: "test.md",
+        attachmentContentType: "text/markdown",
+      }),
+    });
+    const markdownCandidate = makeCitationCandidate({
+      itemId: 2,
+      contextItemId: 22,
+      title: "Markdown paper",
+      firstCreator: "Smith",
+      year: "2024",
+      attachmentTitle: "test.md",
+      contentSourceMode: "markdown",
+    });
+    const pdfCandidate = makeCitationCandidate({
+      itemId: 1,
+      contextItemId: 11,
+      title: "PDF paper",
+      firstCreator: "Jones",
+      year: "2023",
+    });
+    const extracted = extractStandalonePaperSourceLabel("(Smith, 2024)");
+
+    assert.equal(
+      resolveAuthoritativeNonPdfCitationCandidateForTests({
+        orderedCandidates: [markdownCandidate, pdfCandidate],
+        staticCandidates: [markdownCandidate],
+        extractedCitation: extracted,
+      }),
+      markdownCandidate,
+    );
+  });
+
+  it("keeps PDF citation candidates eligible for page navigation", function () {
+    installZoteroItems({
+      11: makeZoteroItem({
+        id: 11,
+        kind: "attachment",
+        parentID: 1,
+        attachmentFilename: "paper.pdf",
+        attachmentContentType: "application/pdf",
+      }),
+      22: makeZoteroItem({
+        id: 22,
+        kind: "attachment",
+        parentID: 2,
+        attachmentFilename: "test.md",
+        attachmentContentType: "text/markdown",
+      }),
+    });
+    const pdfCandidate = makeCitationCandidate({
+      itemId: 1,
+      contextItemId: 11,
+      title: "PDF paper",
+      firstCreator: "Smith",
+      year: "2024",
+    });
+    const markdownCandidate = makeCitationCandidate({
+      itemId: 2,
+      contextItemId: 22,
+      title: "Markdown paper",
+      firstCreator: "Jones",
+      year: "2023",
+      attachmentTitle: "test.md",
+      contentSourceMode: "markdown",
+    });
+    const extracted = extractStandalonePaperSourceLabel("(Smith, 2024)");
+
+    assert.isNull(
+      resolveAuthoritativeNonPdfCitationCandidateForTests({
+        orderedCandidates: [pdfCandidate, markdownCandidate],
+        staticCandidates: [pdfCandidate],
+        extractedCitation: extracted,
+      }),
+    );
+  });
+
+  it("allows fallback when the top text-backed candidate is neither static nor ranked", function () {
+    installZoteroItems({
+      11: makeZoteroItem({
+        id: 11,
+        kind: "attachment",
+        parentID: 1,
+        attachmentFilename: "paper.pdf",
+        attachmentContentType: "application/pdf",
+      }),
+      22: makeZoteroItem({
+        id: 22,
+        kind: "attachment",
+        parentID: 2,
+        attachmentFilename: "test.md",
+        attachmentContentType: "text/markdown",
+      }),
+    });
+    const markdownCandidate = makeCitationCandidate({
+      itemId: 2,
+      contextItemId: 22,
+      title: "Markdown paper",
+      firstCreator: "Smith",
+      year: "2024",
+      attachmentTitle: "test.md",
+      contentSourceMode: "markdown",
+    });
+    const pdfCandidate = makeCitationCandidate({
+      itemId: 1,
+      contextItemId: 11,
+      title: "PDF paper",
+      firstCreator: "Jones",
+      year: "2023",
+    });
+    const extracted = extractStandalonePaperSourceLabel("(Garcia, 2026)");
+
+    assert.isNull(
+      resolveAuthoritativeNonPdfCitationCandidateForTests({
+        orderedCandidates: [markdownCandidate, pdfCandidate],
+        staticCandidates: [],
+        extractedCitation: extracted,
+      }),
+    );
+  });
+
   it("preserves ambiguous matches when two papers share the same citation label", function () {
     const papers: PaperContextRef[] = [
       {
@@ -184,6 +482,123 @@ describe("assistantCitationLinks", function () {
     assert.equal(matches[0].contextItemId, 22);
   });
 
+  it("matches stored no-year citations after live metadata adds a year", function () {
+    installLivePaperContext({
+      itemId: 1,
+      contextItemId: 11,
+      title: "Information theoretic analysis of neural drift",
+      firstCreator: "Heiney et al.",
+      year: "2026",
+      citationKey: "heiney2026drift",
+    });
+    const papers: PaperContextRef[] = [
+      {
+        itemId: 1,
+        contextItemId: 11,
+        title: "Information theoretic...",
+        firstCreator: "Heiney et al.",
+      },
+    ];
+
+    const matches = matchAssistantCitationCandidates("(Heiney et al)", papers);
+
+    assert.lengthOf(matches, 1);
+    assert.equal(matches[0].contextItemId, 11);
+    assert.equal(matches[0].citationLabel, "Heiney et al.");
+    assert.equal(matches[0].displayCitationLabel, "Heiney et al., 2026");
+    assert.equal(
+      matches[0].displayPaperContext.title,
+      "Information theoretic analysis of neural drift",
+    );
+  });
+
+  it("matches stale snapshot years while displaying the live corrected year", function () {
+    installLivePaperContext({
+      itemId: 1,
+      contextItemId: 11,
+      title: "Information theoretic analysis of neural drift",
+      firstCreator: "Heiney et al.",
+      year: "2026",
+    });
+    const papers: PaperContextRef[] = [
+      {
+        itemId: 1,
+        contextItemId: 11,
+        title: "Information theoretic...",
+        firstCreator: "Heiney et al.",
+        year: "2025",
+      },
+    ];
+
+    const matches = matchAssistantCitationCandidates(
+      "(Heiney et al., 2025)",
+      papers,
+    );
+
+    assert.lengthOf(matches, 1);
+    assert.equal(matches[0].citationLabel, "Heiney et al., 2025");
+    assert.equal(matches[0].displayCitationLabel, "Heiney et al., 2026");
+  });
+
+  it("matches citation keys from stored and live metadata", function () {
+    installLivePaperContext({
+      itemId: 1,
+      contextItemId: 11,
+      title: "Information theoretic analysis of neural drift",
+      firstCreator: "Heiney et al.",
+      year: "2026",
+      citationKey: "live-heiney-2026",
+    });
+    const papers: PaperContextRef[] = [
+      {
+        itemId: 1,
+        contextItemId: 11,
+        title: "Information theoretic...",
+        firstCreator: "Heiney et al.",
+        year: "2025",
+        citationKey: "stored-heiney-2025",
+      },
+    ];
+
+    const storedKeyMatches = matchAssistantCitationCandidates(
+      "(Heiney et al., 2025 [stored-heiney-2025])",
+      papers,
+    );
+    const liveKeyMatches = matchAssistantCitationCandidates(
+      "(Heiney et al., 2026 [live-heiney-2026])",
+      papers,
+    );
+
+    assert.lengthOf(storedKeyMatches, 1);
+    assert.lengthOf(liveKeyMatches, 1);
+    assert.equal(storedKeyMatches[0].contextItemId, 11);
+    assert.equal(liveKeyMatches[0].contextItemId, 11);
+    assert.equal(liveKeyMatches[0].displayCitationLabel, "Heiney et al., 2026");
+  });
+
+  it("keeps stored fallback labels matchable after live metadata is added", function () {
+    installLivePaperContext({
+      itemId: 1,
+      contextItemId: 11,
+      title: "Information theoretic analysis of neural drift",
+      firstCreator: "Heiney et al.",
+      year: "2026",
+    });
+    const papers: PaperContextRef[] = [
+      {
+        itemId: 1,
+        contextItemId: 11,
+        title: "Untitled",
+      },
+    ];
+
+    const matches = matchAssistantCitationCandidates("(Paper 1)", papers);
+
+    assert.lengthOf(matches, 1);
+    assert.equal(matches[0].citationLabel, "Paper 1");
+    assert.equal(matches[0].displayCitationLabel, "Heiney et al., 2026");
+  });
+
   it("parses citation rows with external citationKey and page suffix", function () {
     const papers: PaperContextRef[] = [
       {
@@ -220,24 +635,18 @@ describe("assistantCitationLinks", function () {
 
     assert.equal(extracted?.pageLabel, "11");
     assert.equal(
-      formatUnverifiedCitationChipLabel(
-        extracted?.displayCitationLabel || "",
-      ),
+      formatUnverifiedCitationChipLabel(extracted?.displayCitationLabel || ""),
       "Chandra et al., 2025",
     );
     assert.notInclude(
-      formatUnverifiedCitationChipLabel(
-        extracted?.displayCitationLabel || "",
-      ),
+      formatUnverifiedCitationChipLabel(extracted?.displayCitationLabel || ""),
       "page 11",
     );
   });
 
   it("strips unverified page suffixes from raw inline citation labels", function () {
     assert.equal(
-      formatUnverifiedCitationChipLabel(
-        "(Chandra et al., 2025, page 11)",
-      ),
+      formatUnverifiedCitationChipLabel("(Chandra et al., 2025, page 11)"),
       "(Chandra et al., 2025)",
     );
   });
@@ -249,6 +658,7 @@ describe("assistantCitationLinks", function () {
       ".llm-citation-inline-wrap",
       ".llm-citation-text",
       ".llm-citation-icon",
+      ".llm-quote-card",
     ]) {
       assert.include(INLINE_CITATION_SKIP_SELECTOR, selector);
     }
@@ -495,6 +905,13 @@ describe("assistantCitationLinks", function () {
   });
 
   it("does not return the single candidate when citation label does not match", function () {
+    installLivePaperContext({
+      itemId: 1,
+      contextItemId: 11,
+      title: "Information theoretic analysis of neural drift",
+      firstCreator: "Heiney et al.",
+      year: "2026",
+    });
     const papers: PaperContextRef[] = [
       {
         itemId: 1,
@@ -590,27 +1007,31 @@ describe("citation page cache", function () {
       resolve(testDir, "../src/modules/contextPanel/assistantCitationLinks.ts"),
       "utf8",
     );
-    const start = source.indexOf("function startCitationQuoteLocationCacheWarm");
+    const start = source.indexOf(
+      "function startCitationQuoteLocationCacheWarm",
+    );
     const end = source.indexOf("function updateCitationButtonPage");
     const warmSection = source.slice(start, end);
 
     assert.isAtLeast(start, 0);
     assert.isAbove(end, start);
     assert.include(warmSection, "warmQuoteLocationCacheForAttachment");
+    assert.include(warmSection, "isPdfBackedCitationCandidate");
     assert.notInclude(warmSection, "updateCitationButtonPage");
     assert.notInclude(warmSection, "rememberCachedCitationPage");
     assert.include(source, "lookupCachedQuoteLocationForAttachment");
     assert.include(source, "navigateToHiddenQuoteLocation");
   });
 
-  it("does not expose internal quote ids in unavailable quote text", function () {
+  it("omits unresolved quote placeholders instead of rendering fallback text", function () {
     const source = readFileSync(
       resolve(testDir, "../src/modules/contextPanel/assistantCitationLinks.ts"),
       "utf8",
     );
 
-    assert.include(source, 'missing.textContent = "[quote unavailable]"');
-    assert.notInclude(source, "[quote unavailable:");
+    assert.notInclude(source, "[quote unavailable]");
+    assert.notInclude(source, "createQuoteCitationUnavailableElement");
+    assert.include(source, "if (quoteCitation) {");
   });
 });
 

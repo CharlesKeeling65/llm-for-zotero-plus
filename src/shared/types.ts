@@ -25,6 +25,14 @@ export type ChatAttachment = {
   contentHash?: string;
 };
 
+export type GeneratedChatImage = {
+  id: string;
+  label?: string;
+  path?: string;
+  src?: string;
+  revisedPrompt?: string;
+};
+
 export type PaperContentSourceMode =
   | "text"
   | "mineru"
@@ -88,6 +96,15 @@ export type CollectionContextRef = {
   libraryID: number;
 };
 
+/** A Zotero tag or tag scope selected as context scope. */
+export type TagContextRef = {
+  name: string;
+  libraryID: number;
+  normalizedName?: string;
+  scope?: "allTagged" | "untagged";
+  includeAutomatic?: boolean;
+};
+
 export type ActiveNoteSession = {
   noteKind: "item" | "standalone";
   noteId: number;
@@ -115,6 +132,7 @@ export type ActiveNoteContext = {
 export type ConversationSystem = "upstream" | "claude_code" | "codex";
 
 export type GlobalConversationSummary = {
+  conversationID: string;
   conversationKey: number;
   libraryID: number;
   createdAt: number;
@@ -124,6 +142,7 @@ export type GlobalConversationSummary = {
 };
 
 export type PaperConversationSummary = {
+  conversationID: string;
   conversationKey: number;
   libraryID: number;
   paperItemID: number;
@@ -137,6 +156,7 @@ export type PaperConversationSummary = {
 export type ClaudeConversationKind = "global" | "paper";
 
 export type ClaudeConversationSummary = {
+  conversationID: string;
   conversationKey: number;
   libraryID: number;
   kind: ClaudeConversationKind;
@@ -158,6 +178,7 @@ export type ClaudeConversationSummary = {
 export type CodexConversationKind = "global" | "paper";
 
 export type CodexConversationSummary = {
+  conversationID: string;
   conversationKey: number;
   libraryID: number;
   kind: CodexConversationKind;

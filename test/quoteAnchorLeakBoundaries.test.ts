@@ -40,7 +40,7 @@ describe("quote anchor leak boundaries", function () {
     assert.notInclude(traceSource, "inlineEl.textContent = itemEntry.text");
   });
 
-  it("copies and exports quote anchors with unavailable fallback enabled", function () {
+  it("copies and exports quote anchors with unresolved placeholders omitted", function () {
     const chatSource = source("src/modules/contextPanel/chat.ts");
     const notesSource = source("src/modules/contextPanel/notes.ts");
     const menuSource = source(
@@ -48,7 +48,9 @@ describe("quote anchor leak boundaries", function () {
     );
 
     assert.include(menuSource, "target.quoteCitations");
-    assert.include(chatSource, '{ unresolved: "unavailable" }');
-    assert.include(notesSource, '{ unresolved: "unavailable" }');
+    assert.include(chatSource, '{ unresolved: "omit" }');
+    assert.include(notesSource, '{ unresolved: "omit" }');
+    assert.notInclude(chatSource, "[quote unavailable]");
+    assert.notInclude(notesSource, "[quote unavailable]");
   });
 });

@@ -1,7 +1,11 @@
 import { assert } from "chai";
 import { createEditCurrentNoteTool } from "../src/agent/tools/write/editCurrentNote";
 import { ZoteroGateway } from "../src/agent/services/zoteroGateway";
-import { createNoteFromAssistantText } from "../src/modules/contextPanel/notes";
+import {
+  createNoteFromAssistantText,
+  createNoteFromChatHistory,
+  createStandaloneNoteFromAssistantText,
+} from "../src/modules/contextPanel/notes";
 import {
   getTrackedAssistantNoteForParent,
   rememberAssistantNoteForParent,
@@ -35,13 +39,25 @@ describe("editCurrentNote create tracking", function () {
         get?: (id: number) => Zotero.Item | null;
       };
       Item?: new (itemType: string) => Zotero.Item;
+      Attachments?: {
+        importEmbeddedImage?: (params: {
+          blob: Blob;
+          parentItemID: number;
+        }) => Promise<{ key: string } | null>;
+      };
+    };
+    IOUtils?: {
+      read?: (path: string) => Promise<Uint8Array>;
     };
   };
   const originalZotero = globalScope.Zotero;
   const originalZtoolkit = globalScope.ztoolkit;
+  const originalIOUtils = globalScope.IOUtils;
   const prefStore = new Map<string, unknown>();
   const savedItems = new Map<number, Zotero.Item>();
   const parentNoteIds: number[] = [];
+  const importedImageParents: number[] = [];
+  const importedImagePaths: string[] = [];
   let nextNoteId = 100;
   let parentItem: Zotero.Item;
 
@@ -112,6 +128,8 @@ describe("editCurrentNote create tracking", function () {
     prefStore.clear();
     savedItems.clear();
     parentNoteIds.splice(0);
+    importedImageParents.splice(0);
+    importedImagePaths.splice(0);
     nextNoteId = 100;
     parentItem = {
       id: 9,
@@ -134,6 +152,18 @@ describe("editCurrentNote create tracking", function () {
           savedItems.get(id) || (id === 9 ? parentItem : null),
       },
       Item: MockNoteItem as unknown as new (itemType: string) => Zotero.Item,
+      Attachments: {
+        importEmbeddedImage: async ({ parentItemID }) => {
+          importedImageParents.push(parentItemID);
+          return { key: `IMG${parentItemID}_${importedImageParents.length}` };
+        },
+      },
+    };
+    globalScope.IOUtils = {
+      read: async (path: string) => {
+        importedImagePaths.push(path);
+        return new Uint8Array([1, 2, 3, 4]);
+      },
     };
     globalScope.ztoolkit = {
       ...(originalZtoolkit || {}),
@@ -149,9 +179,14 @@ describe("editCurrentNote create tracking", function () {
     }
     if (originalZotero) {
       globalScope.Zotero = originalZotero;
-      return;
+    } else {
+      delete globalScope.Zotero;
     }
-    delete globalScope.Zotero;
+    if (originalIOUtils) {
+      globalScope.IOUtils = originalIOUtils;
+    } else {
+      delete globalScope.IOUtils;
+    }
   });
 
   it("does not remember agent-created HTML notes for response-menu appends", async function () {
@@ -307,5 +342,133 @@ describe("editCurrentNote create tracking", function () {
     assert.equal(getTrackedAssistantNoteForParent(9)?.id, childNotes(9)[0].id);
     assert.include(childNotes(9)[0].getNote(), "First response");
     assert.include(childNotes(9)[0].getNote(), "Second response");
+  });
+
+  it("response-menu note creation embeds generated images as Zotero note attachments", async function () {
+    const result = await createNoteFromAssistantText(
+      parentItem,
+      "Generated a figure.",
+      "Codex",
+      undefined,
+      {
+        appendToTrackedNote: true,
+        rememberCreatedNote: true,
+        generatedImages: [
+          {
+            id: "img-1",
+            label: "spine.png",
+            path: "/tmp/spine.png",
+          },
+        ],
+      },
+    );
+
+    assert.equal(result, "created");
+    assert.lengthOf(childNotes(9), 1);
+    const note = childNotes(9)[0];
+    assert.include(note.getNote(), "Generated a figure.");
+    assert.include(note.getNote(), 'data-attachment-key="IMG100_1"');
+    assert.notInclude(note.getNote(), "Generated image embedded");
+    assert.notInclude(note.getNote(), "spine.png</p>");
+    assert.deepEqual(importedImageParents, [100]);
+    assert.deepEqual(importedImagePaths, ["/tmp/spine.png"]);
+  });
+
+  it("tracked response-menu note appends embed generated images into the existing note", async function () {
+    await createNoteFromAssistantText(
+      parentItem,
+      "First response",
+      "Codex",
+      undefined,
+      {
+        appendToTrackedNote: true,
+        rememberCreatedNote: true,
+      },
+    );
+
+    const result = await createNoteFromAssistantText(
+      parentItem,
+      "Second response",
+      "Codex",
+      undefined,
+      {
+        appendToTrackedNote: true,
+        rememberCreatedNote: true,
+        generatedImages: [
+          {
+            id: "img-2",
+            label: "diagram.png",
+            path: "/tmp/diagram.png",
+          },
+        ],
+      },
+    );
+
+    assert.equal(result, "appended");
+    assert.lengthOf(childNotes(9), 1);
+    const note = childNotes(9)[0];
+    assert.include(note.getNote(), "First response");
+    assert.include(note.getNote(), "Second response");
+    assert.include(note.getNote(), 'data-attachment-key="IMG100_1"');
+    assert.deepEqual(importedImageParents, [100]);
+  });
+
+  it("standalone response notes embed generated images", async function () {
+    await createStandaloneNoteFromAssistantText(
+      1,
+      "Standalone generated figure.",
+      "Codex",
+      undefined,
+      undefined,
+      [
+        {
+          id: "img-standalone",
+          label: "standalone.png",
+          path: "/tmp/standalone.png",
+        },
+      ],
+    );
+
+    const note = Array.from(savedItems.values()).find(
+      (item) => (item as any).isNote?.() && !item.parentID,
+    ) as unknown as MockNoteItem | undefined;
+    assert.isOk(note);
+    assert.include(note!.getNote(), "Standalone generated figure.");
+    assert.include(note!.getNote(), 'data-attachment-key="IMG100_1"');
+    assert.deepEqual(importedImageParents, [100]);
+  });
+
+  it("chat-history note export embeds assistant generated images and keeps user screenshots", async function () {
+    await createNoteFromChatHistory(parentItem, [
+      {
+        role: "user",
+        text: "Please make a diagram.",
+        timestamp: 1,
+        screenshotImages: ["data:image/png;base64,USERINPUT"],
+      },
+      {
+        role: "assistant",
+        text: "",
+        timestamp: 2,
+        modelName: "Codex",
+        generatedImages: [
+          {
+            id: "img-history",
+            label: "history.png",
+            src: "file:///tmp/history.png",
+          },
+        ],
+      },
+    ]);
+
+    assert.lengthOf(childNotes(9), 1);
+    const note = childNotes(9)[0];
+    assert.include(note.getNote(), "Please make a diagram.");
+    assert.include(note.getNote(), 'src="data:image/png;base64,USERINPUT"');
+    assert.include(note.getNote(), 'data-attachment-key="IMG100_1"');
+    assert.notInclude(note.getNote(), "Generated image embedded");
+    assert.notInclude(note.getNote(), "history.png</p>");
+    assert.deepEqual(importedImageParents, [100]);
+    assert.deepEqual(importedImagePaths, ["/tmp/history.png"]);
   });
 });

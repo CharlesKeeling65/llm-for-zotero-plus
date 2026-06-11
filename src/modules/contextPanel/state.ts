@@ -10,9 +10,11 @@ import type {
   QuoteCitation,
   OtherContextRef,
   CollectionContextRef,
+  TagContextRef,
   ChatRuntimeMode,
   PaperContextSendMode,
   PaperContentSourceMode,
+  GeneratedChatImage,
 } from "./types";
 import { TTLMap } from "./contexts/ttlMap";
 // =============================================================================
@@ -22,6 +24,7 @@ import { TTLMap } from "./contexts/ttlMap";
 export const chatHistory = new Map<number, Message[]>();
 export const loadedConversationKeys = new Set<number>();
 export const loadingConversationTasks = new Map<number, Promise<void>>();
+export const webChatIsolatedConversationKeys = new Set<number>();
 export const selectedModelCache = new Map<number, string>();
 export const selectedReasoningCache = new Map<
   number,
@@ -112,12 +115,46 @@ export function setPanelFontScalePercent(value: number) {
   // Lazy-import to avoid circular dependency (prefHelpers imports from state).
   import("./prefHelpers").then((m) => m.setFontScalePref(value)).catch(() => {});
 }
+export let messageLineSpacingPercent = 150; // MESSAGE_LINE_SPACING_DEFAULT_PERCENT
+export function setMessageLineSpacingPercent(value: number) {
+  messageLineSpacingPercent = value;
+  import("./prefHelpers")
+    .then((m) => m.setMessageLineSpacingPref(value))
+    .catch(() => {});
+}
+export let messageParagraphSpacingPx = 8; // MESSAGE_PARAGRAPH_SPACING_DEFAULT_PX
+export function setMessageParagraphSpacingPx(value: number) {
+  messageParagraphSpacingPx = value;
+  import("./prefHelpers")
+    .then((m) => m.setMessageParagraphSpacingPref(value))
+    .catch(() => {});
+}
+export let messageWordSpacingPx = 0; // MESSAGE_WORD_SPACING_DEFAULT_PX
+export function setMessageWordSpacingPx(value: number) {
+  messageWordSpacingPx = value;
+  import("./prefHelpers")
+    .then((m) => m.setMessageWordSpacingPref(value))
+    .catch(() => {});
+}
+export let messageFontFamily = "";
+export function setMessageFontFamily(value: string) {
+  messageFontFamily = value;
+  import("./prefHelpers")
+    .then((m) => m.setMessageFontFamilyPref(value))
+    .catch(() => {});
+}
 /** Call once at plugin startup to restore the persisted font scale. */
 export function initFontScale(): void {
   // Lazy-import to avoid circular dependency.
-  import("./prefHelpers").then((m) => {
-    panelFontScalePercent = m.getFontScalePref();
-  }).catch(() => {});
+  import("./prefHelpers")
+    .then((m) => {
+      panelFontScalePercent = m.getFontScalePref();
+      messageLineSpacingPercent = m.getMessageLineSpacingPref();
+      messageParagraphSpacingPx = m.getMessageParagraphSpacingPref();
+      messageWordSpacingPx = m.getMessageWordSpacingPref();
+      messageFontFamily = m.getMessageFontFamilyPref();
+    })
+    .catch(() => {});
 }
 
 export let responseMenuTarget: {
@@ -129,6 +166,7 @@ export let responseMenuTarget: {
   assistantTimestamp?: number;
   paperContexts?: PaperContextRef[];
   quoteCitations?: QuoteCitation[];
+  generatedImages?: GeneratedChatImage[];
 } | null = null;
 export function setResponseMenuTarget(value: typeof responseMenuTarget) {
   responseMenuTarget = value;
@@ -153,6 +191,7 @@ export const selectedFilePreviewExpandedCache = new Map<number, boolean>();
 export const selectedPaperContextCache = new Map<number, PaperContextRef[]>();
 export const selectedOtherRefContextCache = new Map<number, OtherContextRef[]>();
 export const selectedCollectionContextCache = new Map<number, CollectionContextRef[]>();
+export const selectedTagContextCache = new Map<number, TagContextRef[]>();
 // Flat override maps: key = "ownerItemId:paperItemId:contextItemId"
 export const paperContextModeOverrides = new Map<string, PaperContextSendMode>();
 export const paperContentSourceOverrides = new Map<string, PaperContentSourceMode>();

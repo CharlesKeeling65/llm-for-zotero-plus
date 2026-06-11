@@ -1,5 +1,8 @@
 import { config } from "../../../package.json";
-import { renderMarkdown } from "../../utils/markdown";
+import {
+  renderMarkdown,
+  renderMarkdownWithLegacyParser,
+} from "../../utils/markdown";
 import {
   createInlineMermaidSvgElement,
   sanitizeRenderedMermaidSvgWithReason,
@@ -25,10 +28,12 @@ const MERMAID_WHEEL_ZOOM_DELTA_MAX = 24;
 const MERMAID_WHEEL_ZOOM_SENSITIVITY = 0.002;
 type MermaidThemeKey = "light" | "dark";
 const MERMAID_RENDER_VERSION = "3";
-const MERMAID_VENDOR_SCRIPT_URL =
-  `chrome://${config.addonRef}/content/vendor/mermaid/mermaid.min.js`;
+const MERMAID_VENDOR_SCRIPT_URL = `chrome://${config.addonRef}/content/vendor/mermaid/mermaid.min.js`;
 
-const MERMAID_THEME_VARIABLES: Record<MermaidThemeKey, Record<string, string>> = {
+const MERMAID_THEME_VARIABLES: Record<
+  MermaidThemeKey,
+  Record<string, string>
+> = {
   light: {
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     fontSize: "15px",
@@ -414,8 +419,324 @@ export function renderAssistantMarkdownHtmlForChat(
   return renderMarkdown(sanitizeText(text), options);
 }
 
+const SAFE_RENDERED_MARKDOWN_TAGS = new Set([
+  "a",
+  "annotation",
+  "blockquote",
+  "br",
+  "code",
+  "del",
+  "div",
+  "em",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "hr",
+  "img",
+  "input",
+  "li",
+  "math",
+  "menclose",
+  "mfenced",
+  "mfrac",
+  "mi",
+  "mn",
+  "mo",
+  "mover",
+  "mpadded",
+  "mroot",
+  "mrow",
+  "mspace",
+  "msqrt",
+  "mstyle",
+  "msub",
+  "msubsup",
+  "msup",
+  "mtable",
+  "mtd",
+  "mtext",
+  "mtr",
+  "munder",
+  "munderover",
+  "ol",
+  "p",
+  "pre",
+  "semantics",
+  "span",
+  "strong",
+  "sub",
+  "sup",
+  "table",
+  "tbody",
+  "td",
+  "th",
+  "thead",
+  "tr",
+  "ul",
+]);
+
+const SAFE_GLOBAL_MARKDOWN_ATTRS = new Set([
+  "aria-hidden",
+  "aria-label",
+  "class",
+  "data-code-lang",
+  "data-copy-feedback",
+  "data-llm-copy-source",
+  "data-llm-mermaid-render-version",
+  "data-llm-mermaid-source",
+  "data-llm-mermaid-theme",
+  "data-mermaid-state",
+  "role",
+  "style",
+  "title",
+]);
+
+const KATEX_SVG_TAGS = new Set(["svg", "path", "line"]);
+
+function compactRenderedUrl(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f\s]+/g, "");
+}
+
+function isSafeRenderedMarkdownUrl(
+  value: string,
+  kind: "href" | "src",
+): boolean {
+  const compact = compactRenderedUrl(value.trim());
+  if (!compact || compact.startsWith("//")) return false;
+  if (compact.startsWith("#")) return true;
+
+  const match = compact.match(/^([a-z][a-z0-9+.-]*):/i);
+  if (!match) return true;
+  const protocol = match[1].toLowerCase();
+  if (kind === "href")
+    return ["http", "https", "mailto", "zotero"].includes(protocol);
+  if (["http", "https", "file"].includes(protocol)) return true;
+  return (
+    protocol === "data" && /^data:image\/[a-z0-9.+-]+;base64,/i.test(compact)
+  );
+}
+
+function getRenderedMarkdownTagName(element: Element): string {
+  return element.localName.toLowerCase();
+}
+
+function getRenderedMarkdownParentElement(element: Element): Element | null {
+  const parentElement = element.parentElement;
+  if (parentElement) return parentElement;
+  const parentNode = element.parentNode;
+  return parentNode && parentNode.nodeType === 1
+    ? (parentNode as Element)
+    : null;
+}
+
+function hasRenderedMarkdownAncestorClass(
+  element: Element,
+  className: string,
+): boolean {
+  let parent = getRenderedMarkdownParentElement(element);
+  while (parent) {
+    if (parent.classList?.contains(className)) return true;
+    parent = getRenderedMarkdownParentElement(parent);
+  }
+  return false;
+}
+
+function isSafeKatexSvgElement(element: Element): boolean {
+  return (
+    KATEX_SVG_TAGS.has(getRenderedMarkdownTagName(element)) &&
+    hasRenderedMarkdownAncestorClass(element, "katex")
+  );
+}
+
+function isSafeRenderedMarkdownElement(element: Element): boolean {
+  const tagName = getRenderedMarkdownTagName(element);
+  return (
+    SAFE_RENDERED_MARKDOWN_TAGS.has(tagName) || isSafeKatexSvgElement(element)
+  );
+}
+
+function isKatexSvgNumber(value: string): boolean {
+  return /^-?(?:\d+(?:\.\d+)?|\.\d+)$/.test(value);
+}
+
+function isKatexSvgLength(value: string): boolean {
+  return /^(?:\d+(?:\.\d+)?|\.\d+)(?:em|%)?$/i.test(value.trim());
+}
+
+function isKatexSvgViewBox(value: string): boolean {
+  const parts = value.trim().split(/[\s,]+/);
+  return (
+    parts.length === 4 &&
+    parts.every((part) => part !== "" && isKatexSvgNumber(part))
+  );
+}
+
+function isKatexSvgPreserveAspectRatio(value: string): boolean {
+  return /^(?:none|x(?:Min|Mid|Max)Y(?:Min|Mid|Max)(?:\s+(?:meet|slice))?)$/.test(
+    value.trim(),
+  );
+}
+
+function isKatexSvgPathData(value: string): boolean {
+  return /^[MmZzLlHhVvCcSsQqTtAaEe0-9,.\s+-]+$/.test(value.trim());
+}
+
+function isSafeKatexSvgAttribute(
+  tagName: string,
+  attrName: string,
+  attrValue: string,
+): boolean {
+  if (tagName === "svg") {
+    if (attrName === "xmlns") return attrValue === "http://www.w3.org/2000/svg";
+    if (attrName === "width" || attrName === "height")
+      return isKatexSvgLength(attrValue);
+    if (attrName === "viewbox") return isKatexSvgViewBox(attrValue);
+    if (attrName === "preserveaspectratio")
+      return isKatexSvgPreserveAspectRatio(attrValue);
+    return false;
+  }
+  if (tagName === "path") {
+    return attrName === "d" && isKatexSvgPathData(attrValue);
+  }
+  if (tagName === "line") {
+    if (attrName === "x1" || attrName === "y1")
+      return isKatexSvgLength(attrValue);
+    if (attrName === "x2" || attrName === "y2")
+      return isKatexSvgLength(attrValue);
+    return attrName === "stroke-width" && isKatexSvgLength(attrValue);
+  }
+  return false;
+}
+
+function isSafeRenderedMarkdownAttribute(
+  element: Element,
+  attrName: string,
+  attrValue: string,
+): boolean {
+  const tagName = getRenderedMarkdownTagName(element);
+  if (!attrName || attrName.startsWith("on")) return false;
+  if (isSafeKatexSvgElement(element)) {
+    return isSafeKatexSvgAttribute(tagName, attrName, attrValue);
+  }
+  if (SAFE_GLOBAL_MARKDOWN_ATTRS.has(attrName)) return true;
+  if (attrName.startsWith("data-llm-")) return true;
+
+  if (tagName === "a") {
+    if (attrName === "href")
+      return isSafeRenderedMarkdownUrl(attrValue, "href");
+    return attrName === "target" || attrName === "rel";
+  }
+  if (tagName === "img") {
+    if (attrName === "src") return isSafeRenderedMarkdownUrl(attrValue, "src");
+    return attrName === "alt" || attrName === "data-attachment-key";
+  }
+  if (tagName === "ol") return attrName === "start";
+  if (tagName === "input") {
+    return (
+      attrName === "type" || attrName === "disabled" || attrName === "checked"
+    );
+  }
+  if (tagName === "math") return attrName === "xmlns" || attrName === "display";
+  if (tagName === "annotation") return attrName === "encoding";
+  return false;
+}
+
+export function isSafeRenderedMarkdownElementForTests(
+  element: Element,
+): boolean {
+  return isSafeRenderedMarkdownElement(element);
+}
+
+export function isSafeRenderedMarkdownAttributeForTests(
+  element: Element,
+  attrName: string,
+  attrValue: string,
+): boolean {
+  return isSafeRenderedMarkdownAttribute(
+    element,
+    attrName.toLowerCase(),
+    attrValue,
+  );
+}
+
+function sanitizeRenderedMarkdownFragment(
+  fragment: ParentNode,
+  doc: Document,
+): void {
+  const elements = Array.from(
+    fragment.querySelectorAll("*") as any,
+  ) as Element[];
+  for (const element of elements) {
+    const tagName = getRenderedMarkdownTagName(element);
+    if (!isSafeRenderedMarkdownElement(element)) {
+      element.parentNode?.replaceChild(
+        doc.createTextNode(element.textContent || ""),
+        element,
+      );
+      continue;
+    }
+
+    for (const attr of Array.from(element.attributes)) {
+      const attrName = attr.name.toLowerCase();
+      if (!isSafeRenderedMarkdownAttribute(element, attrName, attr.value)) {
+        element.removeAttribute(attr.name);
+      }
+    }
+
+    if (tagName === "a") {
+      element.setAttribute("target", "_blank");
+      element.setAttribute("rel", "noopener");
+    } else if (tagName === "input") {
+      const input = element as HTMLInputElement;
+      if (input.type !== "checkbox") {
+        element.parentNode?.replaceChild(doc.createTextNode(""), element);
+      } else {
+        input.disabled = true;
+      }
+    }
+  }
+}
+
+function setRenderedMarkdownHtml(
+  target: HTMLElement,
+  html: string,
+  doc: Document,
+): boolean {
+  const setDirectHtml = () => {
+    target.innerHTML = html;
+  };
+
+  try {
+    const template = doc.createElement("template") as HTMLTemplateElement;
+    if (
+      !template.content ||
+      typeof template.content.querySelectorAll !== "function"
+    ) {
+      setDirectHtml();
+      return true;
+    }
+    template.innerHTML = html;
+    sanitizeRenderedMarkdownFragment(template.content, doc);
+    while (target.firstChild) target.removeChild(target.firstChild);
+    target.appendChild(template.content);
+    return true;
+  } catch (_err) {
+    // Zotero chrome documents may expose partial HTMLTemplateElement support.
+    // Direct innerHTML is the pre-sanitizer compatibility path for rendered HTML.
+    try {
+      setDirectHtml();
+      return true;
+    } catch (_directErr) {
+      return false;
+    }
+  }
+}
+
 function formatCodeCopyButtonLabel(rawLang: string): string {
-  const lang = sanitizeText(rawLang || "").trim().toLowerCase();
+  const lang = sanitizeText(rawLang || "")
+    .trim()
+    .toLowerCase();
   const labels: Record<string, string> = {
     bash: "Bash",
     css: "CSS",
@@ -578,9 +899,7 @@ function setScopedGlobalValue(
   }
 }
 
-function restoreScopedGlobalValue(
-  restore: ScopedGlobalRestore,
-): void {
+function restoreScopedGlobalValue(restore: ScopedGlobalRestore): void {
   const { target, key, previousValue, hadValue, changed } = restore;
   if (!changed) return;
   if (!hadValue) {
@@ -646,7 +965,10 @@ export function needsMermaidCytoscapeLayoutHost(source: string): boolean {
   );
 }
 
-function createMermaidDocumentFacade(doc: Document, body: HTMLElement): Document {
+function createMermaidDocumentFacade(
+  doc: Document,
+  body: HTMLElement,
+): Document {
   const proxy = new Proxy(doc, {
     get(target, property, receiver) {
       if (property === "body") return body;
@@ -724,7 +1046,10 @@ function createMermaidCytoscapeLayoutHost(doc: Document): HTMLElement {
 function createMermaidCytoscapeStylesheetSentinel(
   doc: Document,
 ): HTMLStyleElement {
-  const style = doc.createElementNS(HTML_NAMESPACE, "style") as HTMLStyleElement;
+  const style = doc.createElementNS(
+    HTML_NAMESPACE,
+    "style",
+  ) as HTMLStyleElement;
   // Cytoscape otherwise tries document.head.insertBefore(...), but Zotero
   // windows do not always expose a browser-like head element on this path.
   style.id = MERMAID_CYTOSCAPE_STYLESHEET_ID;
@@ -771,20 +1096,10 @@ async function withDocumentGlobals<T>(
     globalObject.console || windowObject.console || noopMermaidConsole;
   const restores: ScopedGlobalRestore[] = [];
 
-  addScopedGlobalValue(
-    restores,
-    globalObject,
-    "console",
-    scopedConsole,
-  );
+  addScopedGlobalValue(restores, globalObject, "console", scopedConsole);
   addScopedGlobalValue(restores, globalObject, "document", doc);
   addScopedGlobalValue(restores, globalObject, "window", win);
-  addScopedGlobalValue(
-    restores,
-    windowObject,
-    "console",
-    scopedConsole,
-  );
+  addScopedGlobalValue(restores, windowObject, "console", scopedConsole);
   for (const key of MERMAID_BROWSER_GLOBAL_KEYS) {
     addScopedGlobalValue(
       restores,
@@ -818,7 +1133,9 @@ function getMermaidScriptMount(doc: Document): Node | null {
 function getMermaidRenderer(doc: Document): Promise<Mermaid> {
   const win = doc.defaultView;
   if (!win) {
-    return Promise.reject(new Error("Unable to load Mermaid without a window."));
+    return Promise.reject(
+      new Error("Unable to load Mermaid without a window."),
+    );
   }
 
   const existing = getMermaidGlobal(win);
@@ -1174,28 +1491,28 @@ function restoreMermaidEdgeLabels(line: string, labels: string[]): string {
 }
 
 function decodeMermaidLabelHtmlEntities(label: string): string {
-  return label.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|#39);/gi, (
-    entity,
-    body: string,
-  ) => {
-    const lower = body.toLowerCase();
-    if (lower === "amp") return "&";
-    if (lower === "lt") return "<";
-    if (lower === "gt") return ">";
-    if (lower === "quot") return '"';
-    if (lower === "apos" || lower === "#39") return "'";
-    const codePoint = lower.startsWith("#x")
-      ? Number.parseInt(lower.slice(2), 16)
-      : lower.startsWith("#")
-        ? Number.parseInt(lower.slice(1), 10)
-        : Number.NaN;
-    if (!Number.isFinite(codePoint)) return entity;
-    try {
-      return String.fromCodePoint(codePoint);
-    } catch {
-      return entity;
-    }
-  });
+  return label.replace(
+    /&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|#39);/gi,
+    (entity, body: string) => {
+      const lower = body.toLowerCase();
+      if (lower === "amp") return "&";
+      if (lower === "lt") return "<";
+      if (lower === "gt") return ">";
+      if (lower === "quot") return '"';
+      if (lower === "apos" || lower === "#39") return "'";
+      const codePoint = lower.startsWith("#x")
+        ? Number.parseInt(lower.slice(2), 16)
+        : lower.startsWith("#")
+          ? Number.parseInt(lower.slice(1), 10)
+          : Number.NaN;
+      if (!Number.isFinite(codePoint)) return entity;
+      try {
+        return String.fromCodePoint(codePoint);
+      } catch {
+        return entity;
+      }
+    },
+  );
 }
 
 function normalizeMermaidLabelMarkdown(label: string): string {
@@ -1225,28 +1542,30 @@ function normalizeMermaidFlowchartLabelsInLine(line: string): string {
       return `${prefix}["${escapeMermaidQuotedLabel(normalizedLabel)}"]`;
     },
   );
-  const normalized = quotedNormalized.replace(
-    /(\b[A-Za-z][\w-]*\s*)\[(?!\[)([^\]\n]*[()?:;][^\]\n]*)\]/g,
-    (match, prefix: string, label: string) => {
-      const trimmed = label.trim();
-      if (!trimmed || trimmed.startsWith('"') || trimmed.startsWith("'")) {
-        return match;
-      }
-      const normalizedLabel = normalizeMermaidLabelMarkdown(label);
-      const escapedLabel = escapeMermaidQuotedLabel(normalizedLabel);
-      return `${prefix}["${escapedLabel}"]`;
-    },
-  ).replace(
-    /(\b[A-Za-z][\w-]*\s*)\[(?!\[)([^\]"\n]*)\]/g,
-    (match, prefix: string, label: string) => {
-      const normalizedLabel = normalizeMermaidLabelMarkdown(label);
-      if (normalizedLabel === label) return match;
-      if (!shouldQuoteMermaidFlowchartLabel(normalizedLabel)) {
-        return `${prefix}[${normalizedLabel}]`;
-      }
-      return `${prefix}["${escapeMermaidQuotedLabel(normalizedLabel)}"]`;
-    },
-  );
+  const normalized = quotedNormalized
+    .replace(
+      /(\b[A-Za-z][\w-]*\s*)\[(?!\[)([^\]\n]*[()?:;][^\]\n]*)\]/g,
+      (match, prefix: string, label: string) => {
+        const trimmed = label.trim();
+        if (!trimmed || trimmed.startsWith('"') || trimmed.startsWith("'")) {
+          return match;
+        }
+        const normalizedLabel = normalizeMermaidLabelMarkdown(label);
+        const escapedLabel = escapeMermaidQuotedLabel(normalizedLabel);
+        return `${prefix}["${escapedLabel}"]`;
+      },
+    )
+    .replace(
+      /(\b[A-Za-z][\w-]*\s*)\[(?!\[)([^\]"\n]*)\]/g,
+      (match, prefix: string, label: string) => {
+        const normalizedLabel = normalizeMermaidLabelMarkdown(label);
+        if (normalizedLabel === label) return match;
+        if (!shouldQuoteMermaidFlowchartLabel(normalizedLabel)) {
+          return `${prefix}[${normalizedLabel}]`;
+        }
+        return `${prefix}["${escapeMermaidQuotedLabel(normalizedLabel)}"]`;
+      },
+    );
   return restoreMermaidEdgeLabels(normalized, labels);
 }
 
@@ -1260,7 +1579,10 @@ function hasDarkMermaidFill(definition: string): boolean {
   return fill ? isDarkCssColor(fill) : false;
 }
 
-function hasMermaidStyleProperty(definition: string, property: string): boolean {
+function hasMermaidStyleProperty(
+  definition: string,
+  property: string,
+): boolean {
   return new RegExp(`(?:^|[,;])\\s*${property}\\s*:`, "i").test(definition);
 }
 
@@ -1435,12 +1757,7 @@ async function renderMermaidSvgWithRetry(
   } catch (firstError) {
     if (normalizedSource === themedSource) throw firstError;
     try {
-      const svg = await renderMermaidSvg(
-        mermaid,
-        doc,
-        themedSource,
-        preview,
-      );
+      const svg = await renderMermaidSvg(mermaid, doc, themedSource, preview);
       return polishRenderedMermaidSvg(extractRenderedMermaidSvg(svg), themeKey);
     } catch {
       throw firstError;
@@ -1531,7 +1848,10 @@ export function renderMermaidBlocks(
   return enqueueMermaidRender(() => renderMermaidBlocksNow(root, doc, options));
 }
 
-export function attachRenderedCopyButtons(root: ParentNode, doc: Document): void {
+export function attachRenderedCopyButtons(
+  root: ParentNode,
+  doc: Document,
+): void {
   const copyables = Array.from(
     root.querySelectorAll(".llm-copyable[data-llm-copy-source]"),
   ) as HTMLElement[];
@@ -1584,7 +1904,16 @@ export function renderRenderedMarkdownInto(
   options?: RenderedMarkdownOptions,
 ): void {
   target.classList.add("llm-rendered-markdown");
-  target.innerHTML = renderAssistantMarkdownHtmlForChat(text, options);
+  const html = renderAssistantMarkdownHtmlForChat(text, options);
+  if (!setRenderedMarkdownHtml(target, html, doc)) {
+    const legacyHtml = renderMarkdownWithLegacyParser(
+      sanitizeText(text),
+      options,
+    );
+    if (!setRenderedMarkdownHtml(target, legacyHtml, doc)) {
+      target.textContent = sanitizeText(text);
+    }
+  }
   attachRenderedCopyButtons(target, doc);
   void renderMermaidBlocks(
     target,

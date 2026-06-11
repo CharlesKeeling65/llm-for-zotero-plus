@@ -31,6 +31,71 @@ type ResolvedWriteInput = {
   requestedFilePath?: string;
 };
 
+type FileIOAction = FileIOInput["action"];
+
+const FILE_IO_ACTION_FIELDS = ["action", "mode", "operation", "op"] as const;
+const FILE_IO_PATH_FIELDS = [
+  "filePath",
+  "path",
+  "file_path",
+  "filepath",
+] as const;
+const FILE_IO_CONTENT_FIELDS = [
+  "content",
+  "text",
+  "contents",
+  "data",
+] as const;
+
+const FILE_IO_READ_ACTIONS = new Set([
+  "read",
+  "open",
+  "load",
+  "view",
+  "read_file",
+  "load_file",
+]);
+
+const FILE_IO_WRITE_ACTIONS = new Set([
+  "write",
+  "create",
+  "save",
+  "overwrite",
+  "write_file",
+  "create_file",
+  "save_file",
+]);
+
+function normalizeFileIOAction(value: unknown): FileIOAction | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (FILE_IO_READ_ACTIONS.has(normalized)) return "read";
+  if (FILE_IO_WRITE_ACTIONS.has(normalized)) return "write";
+  return null;
+}
+
+function readFirstStringField(
+  args: Record<string, unknown>,
+  fields: readonly string[],
+): string | null {
+  for (const field of fields) {
+    const value = args[field];
+    if (typeof value === "string") return value;
+  }
+  return null;
+}
+
+function normalizeFileIOActionFromArgs(
+  args: Record<string, unknown>,
+): FileIOAction | null {
+  for (const field of FILE_IO_ACTION_FIELDS) {
+    const value = args[field];
+    if (typeof value !== "string" || !value.trim()) continue;
+    return normalizeFileIOAction(value);
+  }
+  return null;
+}
+
 function normalizePathForPrefix(value: string): string {
   return value.replace(/\\/g, "/").replace(/\/+$/g, "");
 }
@@ -358,30 +423,20 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       if (!validateObject<Record<string, unknown>>(args)) {
         return fail("Expected an object with action and filePath");
       }
-      const action =
-        args.action === "read" || args.action === "write"
-          ? args.action
-          : args.action === undefined &&
-              (args.mode === "read" || args.mode === "write")
-            ? args.mode
-            : null;
+      const action = normalizeFileIOActionFromArgs(args);
       if (action !== "read" && action !== "write") {
         return fail(
           "action must be 'read' or 'write'. Example: file_io({ action:'read', filePath:'/absolute/path.md' })",
         );
       }
-      const rawFilePath =
-        typeof args.filePath === "string"
-          ? args.filePath
-          : typeof args.path === "string"
-            ? args.path
-            : "";
-      if (!rawFilePath.trim()) {
+      const rawFilePath = readFirstStringField(args, FILE_IO_PATH_FIELDS);
+      if (!rawFilePath?.trim()) {
         return fail(
           "filePath is required: an absolute path to the file. Deprecated alias path is accepted for older prompts.",
         );
       }
-      if (action === "write" && typeof args.content !== "string") {
+      const rawContent = readFirstStringField(args, FILE_IO_CONTENT_FIELDS);
+      if (action === "write" && rawContent === null) {
         return fail("content is required for action 'write'");
       }
       const encoding =
@@ -399,7 +454,7 @@ export function createFileIOTool(): AgentToolDefinition<FileIOInput, unknown> {
       return ok<FileIOInput>({
         action,
         filePath: rawFilePath.trim(),
-        content: action === "write" ? String(args.content) : undefined,
+        content: action === "write" ? rawContent || "" : undefined,
         encoding,
         offset,
         length,

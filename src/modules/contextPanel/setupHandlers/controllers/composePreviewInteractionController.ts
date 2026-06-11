@@ -21,6 +21,7 @@ import {
   isManagedBlobPath,
   removeAttachmentFile,
 } from "../../attachmentStorage";
+import { isPdfContextAttachment } from "../../contextAttachmentSupport";
 import { buildPaperKey } from "../../pdfContext";
 import {
   clearSelectedPaperState,
@@ -41,12 +42,17 @@ import {
   selectedOtherRefContextCache,
   selectedPaperContextCache,
   selectedPaperPreviewExpandedCache,
+  selectedTagContextCache,
 } from "../../state";
 import type {
   PaperContentSourceMode,
   PaperContextRef,
   SelectedTextContext,
 } from "../../types";
+import {
+  isPaperContextFullTextOnlySourceMode,
+  isPaperContextReaderFocusableSourceMode,
+} from "./composeContextController";
 import {
   removePinnedSelectedText,
   togglePinnedFile,
@@ -365,6 +371,27 @@ export function attachComposePreviewInteractionController(
         return;
       }
 
+      const tagClearBtn = target.closest(
+        ".llm-tag-clear",
+      ) as HTMLButtonElement | null;
+      if (tagClearBtn) {
+        event.preventDefault();
+        event.stopPropagation();
+        const index = Number.parseInt(tagClearBtn.dataset.tagIndex || "", 10);
+        const tags = selectedTagContextCache.get(item.id) || [];
+        if (Number.isFinite(index) && index >= 0 && index < tags.length) {
+          const next = tags.filter((_, itemIndex) => itemIndex !== index);
+          if (next.length) {
+            selectedTagContextCache.set(item.id, next);
+          } else {
+            selectedTagContextCache.delete(item.id);
+          }
+          deps.updatePaperPreviewPreservingScroll();
+          setStatus(t("Tag context removed."), "ready");
+        }
+        return;
+      }
+
       const clearBtn = target.closest(
         ".llm-paper-context-clear",
       ) as HTMLButtonElement | null;
@@ -423,6 +450,13 @@ export function attachComposePreviewInteractionController(
         item.id,
         paperContext,
       );
+      if (isPaperContextFullTextOnlySourceMode(contentSource)) {
+        setStatus(
+          t("Attachment sources are always sent as full text."),
+          "ready",
+        );
+        return;
+      }
       if (contentSource === "pdf" && !deps.isWebChatMode()) {
         setStatus(
           t(
@@ -479,6 +513,8 @@ export function attachComposePreviewInteractionController(
         ".llm-paper-chip-menu-row",
       ) as HTMLButtonElement | null;
       if (cardRow) {
+        const item = getItem();
+        if (!item) return;
         const paperChipForCard = cardRow.closest(
           ".llm-paper-context-chip",
         ) as HTMLDivElement | null;
@@ -489,6 +525,11 @@ export function attachComposePreviewInteractionController(
         const paperContextForCard =
           deps.resolvePaperContextFromChipElement(paperChipForCard);
         if (!paperContextForCard) return;
+        const contentSource = deps.resolvePaperContentSourceMode(
+          item.id,
+          paperContextForCard,
+        );
+        if (!isPaperContextReaderFocusableSourceMode(contentSource)) return;
         void deps
           .focusPaperContextInActiveTab(paperContextForCard)
           .then((focused) => {
@@ -516,9 +557,19 @@ export function attachComposePreviewInteractionController(
       if (!paperContext) return;
       const mouse = event as MouseEvent;
       if (mouse.metaKey || mouse.ctrlKey) {
-        void openPaperContextInReader(paperContext);
+        const contentSource = deps.resolvePaperContentSourceMode(
+          item.id,
+          paperContext,
+        );
+        if (isPaperContextReaderFocusableSourceMode(contentSource)) {
+          void openPaperContextInReader({
+            ...paperContext,
+            contentSourceMode: contentSource,
+          });
+        }
         return;
       }
+      if (paperChip.dataset.paperContextMenu === "false") return;
       deps.openPaperChipMenu(paperChip, paperContext, { sticky: true });
     });
   }
@@ -575,10 +626,7 @@ export function attachComposePreviewInteractionController(
 
     const currentItem = getItem();
     const currentPanelItemId = asFinitePositiveItemId(
-      currentItem?.isAttachment?.() &&
-        currentItem.attachmentContentType === "application/pdf"
-        ? currentItem.id
-        : 0,
+      isPdfContextAttachment(currentItem) ? currentItem?.id : 0,
     );
     if (currentPanelItemId) return currentPanelItemId;
 
@@ -587,7 +635,7 @@ export function attachComposePreviewInteractionController(
     const attachments = basePaper.getAttachments?.() || [];
     for (const attachmentId of attachments) {
       const attachment = Zotero.Items.get(attachmentId) || null;
-      if (attachment?.attachmentContentType === "application/pdf") {
+      if (isPdfContextAttachment(attachment)) {
         return attachment.id;
       }
     }

@@ -31,51 +31,100 @@ import {
 import { clearCodexZoteroMcpPreflightCache } from "../codexAppServer/mcpSetup";
 
 let runtime: AgentRuntime | null = null;
+let runtimeInitTask: Promise<AgentRuntime> | null = null;
+let agentLifecycleGeneration = 0;
 let _actionRegistry: ActionRegistry | null = null;
 let _toolRegistry: ReturnType<typeof createBuiltInToolRegistry> | null = null;
 
 // Hoisted so getAgentApi() can expose them to third-party plugin authors.
 let _zoteroGateway: ZoteroGateway | null = null;
 
-function createToolRegistry() {
-  _zoteroGateway = new ZoteroGateway();
+class AgentSubsystemInitializationCancelledError extends Error {
+  constructor() {
+    super("Agent subsystem initialization was cancelled");
+    this.name = "AgentSubsystemInitializationCancelledError";
+  }
+}
+
+function assertAgentInitCurrent(generation: number): void {
+  if (generation !== agentLifecycleGeneration) {
+    throw new AgentSubsystemInitializationCancelledError();
+  }
+}
+
+function createToolRegistry(zoteroGateway: ZoteroGateway) {
   const pdfService = new PdfService();
-  const pdfPageService = new PdfPageService(pdfService, _zoteroGateway);
+  const pdfPageService = new PdfPageService(pdfService, zoteroGateway);
   const retrievalService = new RetrievalService(pdfService);
   return createBuiltInToolRegistry({
-    zoteroGateway: _zoteroGateway,
+    zoteroGateway,
     pdfService,
     pdfPageService,
     retrievalService,
   });
 }
 
-export async function initAgentSubsystem(): Promise<AgentRuntime> {
-  if (runtime) return runtime;
+async function createAgentSubsystemRuntime(
+  generation: number,
+): Promise<AgentRuntime> {
   await initAgentTraceStore();
+  assertAgentInitCurrent(generation);
   await initConversationMemoryStore();
+  assertAgentInitCurrent(generation);
   await initAgentTranscriptStore();
+  assertAgentInitCurrent(generation);
   await initAgentToolResultHandleStore();
+  assertAgentInitCurrent(generation);
   await initAgentEvidenceStore();
+  assertAgentInitCurrent(generation);
   await initAgentCoverageStore();
-  _toolRegistry = createToolRegistry();
-  runtime = new AgentRuntime({
-    registry: _toolRegistry,
+  assertAgentInitCurrent(generation);
+
+  const zoteroGateway = new ZoteroGateway();
+  const toolRegistry = createToolRegistry(zoteroGateway);
+  const nextRuntime = new AgentRuntime({
+    registry: toolRegistry,
     adapterFactory: (request) => createAgentModelAdapter(request),
   });
+  const actionRegistry = createBuiltInActionRegistry();
 
-  _actionRegistry = createBuiltInActionRegistry();
+  assertAgentInitCurrent(generation);
   registerMcpServer({
-    toolRegistry: _toolRegistry,
-    zoteroGateway: _zoteroGateway!,
+    toolRegistry,
+    zoteroGateway,
   });
 
-  return runtime;
+  assertAgentInitCurrent(generation);
+  _zoteroGateway = zoteroGateway;
+  _toolRegistry = toolRegistry;
+  runtime = nextRuntime;
+  _actionRegistry = actionRegistry;
+
+  return nextRuntime;
+}
+
+export async function initAgentSubsystem(): Promise<AgentRuntime> {
+  if (runtime) return runtime;
+  if (!runtimeInitTask) {
+    const generation = agentLifecycleGeneration;
+    const task = createAgentSubsystemRuntime(generation);
+    runtimeInitTask = task;
+    void task
+      .finally(() => {
+        if (runtimeInitTask === task) {
+          runtimeInitTask = null;
+        }
+      })
+      .catch(() => undefined);
+  }
+  return runtimeInitTask;
 }
 
 export function shutdownAgentSubsystem(): void {
+  agentLifecycleGeneration += 1;
   unregisterMcpServer();
   clearCodexZoteroMcpPreflightCache();
+  runtimeInitTask = null;
   _actionRegistry = null;
   _toolRegistry = null;
   resetClaudeBridgeRuntime();

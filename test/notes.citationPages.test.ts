@@ -128,11 +128,11 @@ describe("notes citation page export", function () {
     assert.notInclude(result.noteText, "[[quote:");
   });
 
-  it("does not export unresolved quote anchors into chat-history text", function () {
+  it("omits unresolved quote anchors from chat-history text", function () {
     const messages: Message[] = [
       {
         role: "assistant",
-        text: "Evidence:\n\n[[quote:Q_missing]]",
+        text: "Evidence:\n\n[[quote:Q_missing]]\n\nContinue.",
         timestamp: 2,
         modelName: "Claude",
         quoteCitations: [],
@@ -141,9 +141,35 @@ describe("notes citation page export", function () {
 
     const result = buildChatHistoryNotePayload(messages);
 
-    assert.include(result.noteText, "[quote unavailable]");
+    assert.include(result.noteText, "Evidence");
+    assert.include(result.noteText, "Continue.");
     assert.notInclude(result.noteText, "[[quote:");
+    assert.notInclude(result.noteText, "[quote unavailable]");
     assert.notInclude(result.noteHtml, "[[quote:");
+    assert.notInclude(result.noteHtml, "[quote unavailable]");
+  });
+
+  it("does not export leaked source metadata markers into chat-history text", function () {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        text: '"our results provide evidence that the activity of dynamic engrams..." [[source=(Tomé, 2024), section=Dynamic and selective engrams emerge with memory consolidation, chunk=28]]',
+        timestamp: 2,
+        modelName: "Claude",
+        quoteCitations: [],
+      },
+    ];
+
+    const result = buildChatHistoryNotePayload(messages);
+
+    assert.include(result.noteText, "> our results provide evidence");
+    assert.include(result.noteText, "(Tomé, 2024)");
+    assert.notInclude(result.noteText, "[[source=");
+    assert.notInclude(result.noteText, "section=");
+    assert.notInclude(result.noteText, "chunk=");
+    assert.notInclude(result.noteHtml, "[[source=");
+    assert.notInclude(result.noteHtml, "section=");
+    assert.notInclude(result.noteHtml, "chunk=");
   });
 
   it("does not export model-written blockquote pages without a verified cache", function () {

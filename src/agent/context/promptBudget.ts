@@ -345,7 +345,66 @@ function compactPaperContext(
   return Object.keys(compact).length ? compact : undefined;
 }
 
-function compactEvidenceSnippet(record: unknown): Record<string, unknown> {
+function normalizeQuoteCitationId(value: unknown): string {
+  const id = compactScalar(value, 80);
+  return typeof id === "string" ? id.replace(/[^A-Za-z0-9_-]/g, "") : "";
+}
+
+function compactQuoteCitationRecord(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Record<string, unknown>;
+  const id = normalizeQuoteCitationId(source.id);
+  const quoteText = compactScalar(source.quoteText, 1_200);
+  const citationLabel = compactScalar(source.citationLabel, 240);
+  if (!id || typeof quoteText !== "string" || !quoteText.trim()) {
+    return undefined;
+  }
+  if (
+    typeof citationLabel !== "string" ||
+    !citationLabel.trim()
+  ) {
+    return undefined;
+  }
+  const compact = compactMetadataValue(source);
+  if (!compact || typeof compact !== "object" || Array.isArray(compact)) {
+    return undefined;
+  }
+  return {
+    ...(compact as Record<string, unknown>),
+    id,
+    quoteText,
+    citationLabel,
+  };
+}
+
+function compactQuoteCitations(value: unknown): {
+  quoteCitations?: Record<string, unknown>[];
+  ids: Set<string>;
+} {
+  const ids = new Set<string>();
+  if (!Array.isArray(value)) return { ids };
+  const quoteCitations: Record<string, unknown>[] = [];
+  for (const entry of value) {
+    const citation = compactQuoteCitationRecord(entry);
+    if (!citation) continue;
+    const id = normalizeQuoteCitationId(citation.id);
+    if (!id || ids.has(id)) continue;
+    ids.add(id);
+    quoteCitations.push(citation);
+    if (quoteCitations.length >= 20) break;
+  }
+  return {
+    quoteCitations: quoteCitations.length ? quoteCitations : undefined,
+    ids,
+  };
+}
+
+function compactEvidenceSnippet(
+  record: unknown,
+  validQuoteCitationIds?: Set<string>,
+): Record<string, unknown> {
   if (!record || typeof record !== "object") {
     return { text: compactScalar(record, 900) };
   }
@@ -377,6 +436,12 @@ function compactEvidenceSnippet(record: unknown): Record<string, unknown> {
     "matchedQueryVariant",
     "whyMatched",
   ]) {
+    if (
+      key === "quoteCitationId" &&
+      !validQuoteCitationIds?.has(normalizeQuoteCitationId(source[key]))
+    ) {
+      continue;
+    }
     const value = compactScalar(source[key], key === "whyMatched" ? 500 : 240);
     if (value !== undefined && value !== "") compact[key] = value;
   }
@@ -390,7 +455,11 @@ function compactEvidenceSnippet(record: unknown): Record<string, unknown> {
   if (paperContext) compact.paperContext = paperContext;
   if (Array.isArray(source.passages)) {
     compact.passageCount = source.passages.length;
-    compact.passages = source.passages.slice(0, 4).map(compactEvidenceSnippet);
+    compact.passages = source.passages
+      .slice(0, 4)
+      .map((passage) =>
+        compactEvidenceSnippet(passage, validQuoteCitationIds),
+      );
   }
   return compact;
 }
@@ -535,6 +604,7 @@ function buildEvidenceCompactToolResult(params: {
     return buildGenericCompactToolResult(params);
   }
   const source = params.content as Record<string, unknown>;
+  const compactedQuoteCitations = compactQuoteCitations(source.quoteCitations);
   const base: Record<string, unknown> = {
     mode: compactScalar(source.mode),
     intent: compactScalar(source.intent),
@@ -543,7 +613,7 @@ function buildEvidenceCompactToolResult(params: {
     resourcePool: compactMetadataValue(source.resourcePool),
     answerContract: compactMetadataValue(source.answerContract),
     warnings: compactMetadataValue(source.warnings),
-    quoteCitations: compactMetadataValue(source.quoteCitations),
+    quoteCitations: compactedQuoteCitations.quoteCitations,
     modelContextCompacted: true,
     compactionReason:
       "The complete provider-bound prompt exceeded the active context budget.",
@@ -594,13 +664,31 @@ function buildEvidenceCompactToolResult(params: {
     if (!tryPush("paperMatches", compactPaperMatch(match))) break;
   }
   for (const snippet of snippets) {
-    if (!tryPush("snippets", compactEvidenceSnippet(snippet))) break;
+    if (
+      !tryPush(
+        "snippets",
+        compactEvidenceSnippet(snippet, compactedQuoteCitations.ids),
+      )
+    )
+      break;
   }
   for (const result of results) {
-    if (!tryPush("results", compactEvidenceSnippet(result))) break;
+    if (
+      !tryPush(
+        "results",
+        compactEvidenceSnippet(result, compactedQuoteCitations.ids),
+      )
+    )
+      break;
   }
   for (const paper of papers) {
-    if (!tryPush("papers", compactEvidenceSnippet(paper))) break;
+    if (
+      !tryPush(
+        "papers",
+        compactEvidenceSnippet(paper, compactedQuoteCitations.ids),
+      )
+    )
+      break;
   }
   for (const key of [
     "paperMatches",

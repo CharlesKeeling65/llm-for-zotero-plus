@@ -22,7 +22,10 @@ type SearchLiteratureOnlineMode =
   | "search"
   | "metadata";
 
+type SearchLiteratureOnlineWorkflow = "answer" | "review";
+
 type SearchLiteratureOnlineInput = {
+  workflow: SearchLiteratureOnlineWorkflow;
   mode: SearchLiteratureOnlineMode;
   source?: "openalex" | "arxiv" | "europepmc";
   itemId?: number;
@@ -44,12 +47,18 @@ export function createSearchLiteratureOnlineTool(
     spec: {
       name: "search_literature_online",
       description:
-        "Search live scholarly sources or fetch canonical external metadata through one general tool. Use mode:'metadata' for CrossRef/Semantic Scholar metadata, or recommendation/reference/citation/search modes for live literature discovery.",
+        "Search live scholarly sources or fetch canonical external metadata. Use workflow:'answer' to gather scholarly results for chat answers, or workflow:'review' for Zotero import/review-card workflows.",
       inputSchema: {
         type: "object",
         required: ["mode"],
         additionalProperties: false,
         properties: {
+          workflow: {
+            type: "string",
+            enum: ["answer", "review"],
+            description:
+              "answer returns scholarly search results directly to the model for source-cited answers. review opens the Zotero review card for importing papers, saving notes, refining searches, or applying metadata.",
+          },
           mode: {
             type: "string",
             enum: [
@@ -86,11 +95,11 @@ export function createSearchLiteratureOnlineTool(
     },
     guidance: {
       matches: (request) =>
-        /\b(related papers?|similar papers?|find papers?|search (the )?(internet|literature)|citations?|references?|papers? (by|from)|publications? (by|from))\b/i.test(
+        /\b(related papers?|similar papers?|find papers?|search (the )?(internet|online|web|literature)|online search|web search|citations?|references?|papers? (by|from)|publications? (by|from))\b/i.test(
           request.userText,
         ),
       instruction:
-        "When the user explicitly asks to discover, find, or search for papers online, call search_literature_online and let the review card present the result. Do not use this tool for questions about the content of papers already in context (e.g. counting references, summarizing, explaining)." +
+        "When the user explicitly asks to search online or search the literature, use search_literature_online with workflow:'answer' by default so the model can answer from scholarly results and cite sources. Use workflow:'review' only when the user wants to import/add papers to Zotero, save selected search results to a note, refine results inside the card, or review metadata changes. Do not use this tool for questions about the content of papers already in context (e.g. counting references, summarizing, explaining)." +
         "\n\nSource selection:" +
         "\n• recommendations, references, citations modes → always use source:'openalex' (only OpenAlex supports these)." +
         "\n• search mode → source:'openalex' (default, broadest coverage), source:'arxiv' (preprints, CS/ML/physics), or source:'europepmc' (biomedical/life sciences)." +
@@ -182,8 +191,13 @@ export function createSearchLiteratureOnlineTool(
           ? args.source
           : undefined;
       const source = requiresOpenAlex ? "openalex" : rawSource;
+      const workflow =
+        args.workflow === "review" || args.workflow === "answer"
+          ? args.workflow
+          : "answer";
 
       return ok<SearchLiteratureOnlineInput>({
+        workflow,
         mode,
         source,
         itemId,
@@ -200,12 +214,15 @@ export function createSearchLiteratureOnlineTool(
     execute: async (input, context) => {
       const results = await service.execute(input, context);
       return {
+        workflow: input.workflow,
         mode: input.mode,
         ...((results && typeof results === "object" ? results : { results }) as object),
       };
     },
     createResultReviewAction: (input, result, context) =>
-      createSearchLiteratureReviewAction(result, context, input),
+      input.workflow === "review"
+        ? createSearchLiteratureReviewAction(result, context, input)
+        : null,
     resolveResultReview: (input, result, resolution, context) =>
       resolveSearchLiteratureReview(input, result, resolution, context),
   };

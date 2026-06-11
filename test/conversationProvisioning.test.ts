@@ -15,6 +15,7 @@ type QueryRecord = {
 };
 
 type RuntimeConversationRow = {
+  conversationID?: string;
   conversationKey: number;
   libraryID: number;
   kind: "global" | "paper";
@@ -25,6 +26,7 @@ type RuntimeConversationRow = {
 };
 
 type RegistryRow = RuntimeConversationRow & {
+  conversationID: string;
   system: "claude_code" | "codex";
   profileSignature: string;
   valid: number;
@@ -75,7 +77,7 @@ function installProvisioningDb(): {
         }
         if (
           sql.includes("FROM llm_for_zotero_conversation_registry") &&
-          sql.includes("WHERE conversation_key = ?")
+          sql.includes("WHERE legacy_conversation_key = ?")
         ) {
           const row = registry.get(Number(queryParams[0]));
           return row
@@ -95,6 +97,7 @@ function installProvisioningDb(): {
         }
         if (sql.includes("INSERT INTO llm_for_zotero_conversation_registry")) {
           const [
+            conversationID,
             conversationKey,
             system,
             kind,
@@ -104,6 +107,7 @@ function installProvisioningDb(): {
           ] = queryParams;
           registry.set(Number(conversationKey), {
             conversationKey: Number(conversationKey),
+            conversationID: String(conversationID),
             system: system as "claude_code" | "codex",
             kind: kind as "global" | "paper",
             profileSignature: String(profileSignature),
@@ -112,9 +116,9 @@ function installProvisioningDb(): {
               Number.isFinite(Number(paperItemID)) && Number(paperItemID) > 0
                 ? Number(paperItemID)
                 : null,
-            createdAt: Number(queryParams[6]),
-            updatedAt: Number(queryParams[7]),
-            title: typeof queryParams[8] === "string" ? queryParams[8] : null,
+            createdAt: Number(queryParams[7]),
+            updatedAt: Number(queryParams[8]),
+            title: typeof queryParams[9] === "string" ? queryParams[9] : null,
             valid: 1,
           });
           return [];
@@ -124,6 +128,7 @@ function installProvisioningDb(): {
           sql.includes("INSERT INTO llm_for_zotero_claude_conversations")
         ) {
           const [
+            conversationID,
             conversationKey,
             libraryID,
             kind,
@@ -133,6 +138,7 @@ function installProvisioningDb(): {
             title,
           ] = queryParams;
           conversations.set(Number(conversationKey), {
+            conversationID: String(conversationID),
             conversationKey: Number(conversationKey),
             libraryID: Number(libraryID),
             kind: kind as "global" | "paper",

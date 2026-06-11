@@ -17,6 +17,7 @@ import { EDITABLE_ARTICLE_METADATA_FIELDS } from "../../services/zoteroGateway";
 import {
   ok,
   fail,
+  PAPER_CONTEXT_REF_SCHEMA,
   validateObject,
   normalizePositiveInt,
   normalizeToolPaperContext,
@@ -52,7 +53,10 @@ function normalizeOperationEntry(
       ) as PaperContextRef | undefined) || undefined
     : undefined;
   return {
-    id: typeof value.id === "string" && value.id.trim() ? value.id.trim() : `op-${index + 1}`,
+    id:
+      typeof value.id === "string" && value.id.trim()
+        ? value.id.trim()
+        : `op-${index + 1}`,
     type: "update_metadata",
     itemId: normalizePositiveInt(value.itemId),
     paperContext,
@@ -78,9 +82,9 @@ export function createUpdateMetadataTool(
         properties: {
           itemId: {
             type: "number",
-            description:
-              "Zotero item ID. If omitted, targets the active item.",
+            description: "Zotero item ID. If omitted, targets the active item.",
           },
+          paperContext: PAPER_CONTEXT_REF_SCHEMA,
           metadata: {
             type: "object",
             additionalProperties: true,
@@ -122,8 +126,32 @@ export function createUpdateMetadataTool(
             description:
               "Metadata fields to update. At least one field must be provided.",
           },
+          operations: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: true,
+              properties: {
+                id: { type: "string" },
+                itemId: { type: "number" },
+                paperContext: PAPER_CONTEXT_REF_SCHEMA,
+                metadata: {
+                  type: "object",
+                  additionalProperties: true,
+                  description: "Metadata fields to update.",
+                },
+                patch: {
+                  type: "object",
+                  additionalProperties: true,
+                  description:
+                    "Deprecated alias for metadata in batch operations.",
+                },
+              },
+            },
+            description:
+              "Batch metadata operations. Each entry accepts itemId, paperContext, and metadata.",
+          },
         },
-        required: ["metadata"],
       },
       mutability: "write",
       requiresConfirmation: true,
@@ -136,7 +164,7 @@ export function createUpdateMetadataTool(
         ),
       instruction:
         "When the user asks to fix, correct, or enrich metadata from external sources, " +
-        "use search_literature_online mode:'metadata' first to fetch canonical data, " +
+        "use literature_search with workflow:'review' and mode:'metadata' first to fetch canonical data, " +
         "then let the review card handle the update. " +
         "Only call update_metadata directly when the user provides specific field values to set " +
         "(e.g. 'change the title to XYZ').",
@@ -170,12 +198,18 @@ export function createUpdateMetadataTool(
       }
 
       // Batch mode: { operations: [...] }
+      if (
+        Object.prototype.hasOwnProperty.call(args, "operations") &&
+        !Array.isArray(args.operations)
+      ) {
+        return fail(
+          "operations must be an array of metadata updates. Example: { operations: [{ itemId: 123, metadata: { title: 'New Title' } }] }",
+        );
+      }
       if (Array.isArray(args.operations)) {
         const operations = args.operations
           .map((entry, index) => normalizeOperationEntry(entry, index))
-          .filter(
-            (entry): entry is UpdateMetadataOperation => Boolean(entry),
-          );
+          .filter((entry): entry is UpdateMetadataOperation => Boolean(entry));
         if (!operations.length) {
           return fail(
             "operations must contain at least one entry with valid metadata fields.",
@@ -196,9 +230,17 @@ export function createUpdateMetadataTool(
         );
       }
 
+      const paperContext = validateObject<Record<string, unknown>>(
+        args.paperContext,
+      )
+        ? (normalizeToolPaperContext(
+            args.paperContext as Record<string, unknown>,
+          ) as PaperContextRef | undefined) || undefined
+        : undefined;
       const operation: UpdateMetadataOperation = {
         type: "update_metadata",
         itemId: normalizePositiveInt(args.itemId),
+        paperContext,
         metadata,
       };
 
@@ -236,28 +278,24 @@ export function createUpdateMetadataTool(
             isBatch,
           );
         })
-        .filter(
-          (f): f is NonNullable<typeof f> => Boolean(f),
-        );
+        .filter((f): f is NonNullable<typeof f> => Boolean(f));
 
       const title = isBatch
         ? `Update metadata for ${input.operations.length} items`
-        : `Update metadata for ${
-            (() => {
-              const op = input.operations[0];
-              const item = zoteroGateway.resolveMetadataItem({
-                itemId: op.itemId,
-                paperContext: op.paperContext,
-                request: context.request,
-                item: context.item,
-              });
-              return (
-                zoteroGateway.getEditableArticleMetadata(item)?.title ||
-                op.paperContext?.title ||
-                `Item ${op.itemId ?? "active item"}`
-              );
-            })()
-          }`;
+        : `Update metadata for ${(() => {
+            const op = input.operations[0];
+            const item = zoteroGateway.resolveMetadataItem({
+              itemId: op.itemId,
+              paperContext: op.paperContext,
+              request: context.request,
+              item: context.item,
+            });
+            return (
+              zoteroGateway.getEditableArticleMetadata(item)?.title ||
+              op.paperContext?.title ||
+              `Item ${op.itemId ?? "active item"}`
+            );
+          })()}`;
 
       return {
         toolName: "update_metadata",

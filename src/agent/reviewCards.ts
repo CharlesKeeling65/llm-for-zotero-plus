@@ -29,6 +29,7 @@ type SearchLiteratureOnlineMode =
   | "metadata";
 
 type SearchLiteratureOnlineSource = "openalex" | "arxiv" | "europepmc";
+type SearchLiteratureOnlineWorkflow = "answer" | "review";
 
 type SearchReviewPaper = {
   rowId: string;
@@ -76,6 +77,7 @@ type SearchReviewPrepared =
     };
 
 type SearchReviewArgs = {
+  workflow?: SearchLiteratureOnlineWorkflow;
   mode?: SearchLiteratureOnlineMode;
   source?: SearchLiteratureOnlineSource;
   limit?: number;
@@ -510,6 +512,7 @@ function normalizeSearchReviewArgs(args: unknown): SearchReviewArgs {
   const record = args as Record<string, unknown>;
   const paperContext = validateMetadataPaperContext(record.paperContext);
   return {
+    workflow: readString(record.workflow) as SearchLiteratureOnlineWorkflow | undefined,
     mode: readString(record.mode) as SearchLiteratureOnlineMode | undefined,
     source: readString(record.source) as SearchLiteratureOnlineSource | undefined,
     limit: readPositiveInt(record.limit),
@@ -960,6 +963,7 @@ export function resolveSearchLiteratureReview(
       call: {
         name: "literature_search",
         arguments: {
+          workflow: "review",
           mode: "search",
           query:
             readString(data.nextQuery) ||

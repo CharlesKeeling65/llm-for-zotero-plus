@@ -2,6 +2,7 @@ import { assert } from "chai";
 import {
   appendSelectedTextContextForItem,
   getSelectedTextContextEntries,
+  resolvePanelContextLifecycleState,
   resolveContextSourceItemIdAsync,
   setSelectedTextContextEntries,
   syncSelectedTextContextForSource,
@@ -367,7 +368,7 @@ describe("contextResolution note-edit sync", function () {
     );
   });
 
-  it("does not preload parent context when Zotero best attachment is not a PDF", async function () {
+  it("preloads parent context when Zotero best attachment is an HTML snapshot", async function () {
     const parentItem = {
       id: 250,
       isAttachment: () => false,
@@ -387,6 +388,108 @@ describe("contextResolution note-edit sync", function () {
     const items = new Map<number, unknown>([
       [250, parentItem],
       [251, snapshot],
+    ]);
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      Items: {
+        get: (id: number) => items.get(id) || null,
+      },
+      Tabs: {
+        selectedType: "library",
+        selectedID: "library",
+        _tabs: [],
+      },
+    };
+
+    assert.equal(
+      await resolveContextSourceItemIdAsync(
+        parentItem as unknown as Zotero.Item,
+      ),
+      251,
+    );
+    const paperContext = resolvePaperContextRefFromAttachment(
+      snapshot as unknown as Zotero.Item,
+    );
+    assert.equal(paperContext?.itemId, 250);
+    assert.equal(paperContext?.contextItemId, 251);
+    assert.equal(paperContext?.contentSourceMode, "html");
+  });
+
+  it("marks parent lifecycle context as async when sync fallback is only first child", function () {
+    const parentItem = {
+      id: 252,
+      isAttachment: () => false,
+      isRegularItem: () => true,
+      getAttachments: () => [253],
+      getField: () => "Parent Paper",
+      getBestAttachment: async () => snapshot,
+    };
+    const firstPdf = {
+      id: 253,
+      parentID: 252,
+      attachmentContentType: "application/pdf",
+      attachmentFilename: "main.pdf",
+      isAttachment: () => true,
+      isRegularItem: () => false,
+      getField: () => "Main PDF",
+    };
+    const snapshot = {
+      id: 254,
+      parentID: 252,
+      attachmentContentType: "text/html",
+      attachmentFilename: "snapshot.html",
+      isAttachment: () => true,
+      isRegularItem: () => false,
+      getField: () => "Snapshot",
+    };
+    const items = new Map<number, unknown>([
+      [252, parentItem],
+      [253, firstPdf],
+      [254, snapshot],
+    ]);
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      Items: {
+        get: (id: number) => items.get(id) || null,
+      },
+      Tabs: {
+        selectedType: "library",
+        selectedID: "library",
+        _tabs: [],
+      },
+    };
+
+    const lifecycle = resolvePanelContextLifecycleState(
+      parentItem as unknown as Zotero.Item,
+    );
+
+    assert.equal(lifecycle?.ownerItemId, 252);
+    assert.equal(lifecycle?.contextItemId, 253);
+    assert.equal(lifecycle?.sourceKind, "first-child");
+    assert.isTrue(lifecycle?.requiresAsyncResolution);
+  });
+
+  it("does not preload parent context when Zotero best attachment is unsupported", async function () {
+    const parentItem = {
+      id: 255,
+      isAttachment: () => false,
+      isRegularItem: () => true,
+      getAttachments: () => [256],
+      getField: () => "Parent Paper",
+      getBestAttachment: async () => image,
+    };
+    const image = {
+      id: 256,
+      parentID: 255,
+      attachmentContentType: "image/png",
+      attachmentFilename: "image.png",
+      isAttachment: () => true,
+      isRegularItem: () => false,
+      getField: () => "Image",
+    };
+    const items = new Map<number, unknown>([
+      [255, parentItem],
+      [256, image],
     ]);
     globalScope.Zotero = {
       ...(originalZotero || {}),

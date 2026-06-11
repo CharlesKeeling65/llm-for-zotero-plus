@@ -57,6 +57,21 @@ export type CodexAppServerItemEvent = {
   title?: string;
   serverName?: string;
   arguments?: unknown;
+  query?: string;
+  action?: unknown;
+  command?: string;
+  cwd?: string;
+  path?: string;
+  result?: unknown;
+  savedPath?: string;
+  revisedPrompt?: string;
+  exitCode?: number;
+  durationMs?: number;
+  changes?: unknown;
+  success?: boolean;
+  namespace?: string;
+  model?: string;
+  receiverThreadIds?: unknown;
   raw?: Record<string, unknown>;
 };
 
@@ -711,6 +726,20 @@ function normalizeCodexAppServerFieldText(
   return text ? text.slice(0, maxLength) : undefined;
 }
 
+function normalizeCodexAppServerRawString(
+  value: unknown,
+  maxLength = 4000,
+): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text ? text.slice(0, maxLength) : undefined;
+}
+
+function normalizeCodexAppServerNumber(value: unknown): number | undefined {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
 function readCodexAppServerObjectName(value: unknown): string | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return normalizeCodexAppServerFieldText(value);
@@ -745,6 +774,32 @@ function copyCodexAppServerRawMetadata(
     "args",
     "input",
     "error",
+    "query",
+    "action",
+    "command",
+    "cwd",
+    "processId",
+    "source",
+    "commandActions",
+    "aggregatedOutput",
+    "exitCode",
+    "durationMs",
+    "changes",
+    "result",
+    "savedPath",
+    "saved_path",
+    "revisedPrompt",
+    "revised_prompt",
+    "path",
+    "success",
+    "namespace",
+    "prompt",
+    "model",
+    "reasoningEffort",
+    "receiverThreadIds",
+    "senderThreadId",
+    "agentsStates",
+    "contentItems",
   ];
   const raw: Record<string, unknown> = {};
   for (const key of keys) {
@@ -788,6 +843,26 @@ function extractCodexAppServerItem(
     arguments?: unknown;
     args?: unknown;
     input?: unknown;
+    query?: unknown;
+    action?: unknown;
+    command?: unknown;
+    cwd?: unknown;
+    path?: unknown;
+    result?: unknown;
+    savedPath?: unknown;
+    saved_path?: unknown;
+    revisedPrompt?: unknown;
+    revised_prompt?: unknown;
+    exitCode?: unknown;
+    exit_code?: unknown;
+    durationMs?: unknown;
+    duration_ms?: unknown;
+    changes?: unknown;
+    success?: unknown;
+    namespace?: unknown;
+    model?: unknown;
+    receiverThreadIds?: unknown;
+    receiver_thread_ids?: unknown;
   };
   const status = typeof item.status === "string" ? item.status.trim() : "";
   return {
@@ -830,6 +905,27 @@ function extractCodexAppServerItem(
       readCodexAppServerObjectName(item.mcpServerName) ||
       readCodexAppServerObjectName(item.server),
     arguments: item.arguments ?? item.args ?? item.input,
+    query: normalizeCodexAppServerFieldText(item.query, 1000),
+    action: item.action,
+    command: normalizeCodexAppServerRawString(item.command, 8000),
+    cwd: normalizeCodexAppServerRawString(item.cwd, 4000),
+    path: normalizeCodexAppServerRawString(item.path, 4000),
+    result: item.result,
+    savedPath:
+      normalizeCodexAppServerRawString(item.savedPath, 4000) ||
+      normalizeCodexAppServerRawString(item.saved_path, 4000),
+    revisedPrompt:
+      normalizeCodexAppServerRawString(item.revisedPrompt, 8000) ||
+      normalizeCodexAppServerRawString(item.revised_prompt, 8000),
+    exitCode: normalizeCodexAppServerNumber(item.exitCode ?? item.exit_code),
+    durationMs: normalizeCodexAppServerNumber(
+      item.durationMs ?? item.duration_ms,
+    ),
+    changes: item.changes,
+    success: typeof item.success === "boolean" ? item.success : undefined,
+    namespace: normalizeCodexAppServerFieldText(item.namespace, 240),
+    model: normalizeCodexAppServerFieldText(item.model, 240),
+    receiverThreadIds: item.receiverThreadIds ?? item.receiver_thread_ids,
     raw: copyCodexAppServerRawMetadata(sourceRecord),
   };
 }

@@ -1,10 +1,17 @@
 import { assert } from "chai";
 import {
   getHistoryDayGroupLabel,
+  getHistoryEntryLabelType,
   groupHistoryEntriesByDay,
+  formatHistoryPaperScopeLabel,
+  isOrphanHistoryEntry,
   maybeSelectPaperHistoryTarget,
   normalizeHistoryPaperItemID,
+  readHistoryPaperDisplayMetadata,
+  resolveHistoryEntryPaperBaseItem,
+  resolveHistoryEntryPaperDisplayMetadata,
   resolveHistoryEntryPaperItem,
+  resolveHistoryEntrySourceState,
   resolvePaperHistoryNavigationDecision,
 } from "../src/modules/contextPanel/setupHandlers/controllers/conversationHistoryController";
 
@@ -66,8 +73,284 @@ describe("conversationHistoryController", function () {
 
     assert.deepEqual(calls, [42]);
     assert.deepEqual(resolved, { id: 42, title: "Paper" });
-    assert.equal(resolveHistoryEntryPaperItem({}, () => ({ id: 1 })), null);
+    assert.equal(
+      resolveHistoryEntryPaperItem({}, () => ({ id: 1 })),
+      null,
+    );
     assert.equal(normalizeHistoryPaperItemID("not-a-number"), 0);
+  });
+
+  it("resolves child attachment and note history targets to their parent paper", function () {
+    const parent = {
+      id: 42,
+      isRegularItem: () => true,
+      isAttachment: () => false,
+      isNote: () => false,
+    };
+    const attachment = {
+      id: 99,
+      parentID: 42,
+      isRegularItem: () => false,
+      isAttachment: () => true,
+      isNote: () => false,
+    };
+    const note = {
+      id: 100,
+      parentID: 42,
+      isRegularItem: () => false,
+      isAttachment: () => false,
+      isNote: () => true,
+    };
+    const items = new Map<
+      number,
+      typeof parent | typeof attachment | typeof note
+    >([
+      [42, parent],
+      [99, attachment],
+      [100, note],
+    ]);
+
+    assert.equal(
+      resolveHistoryEntryPaperBaseItem({ paperItemID: 99 }, (id) =>
+        items.get(id),
+      ),
+      parent,
+    );
+    assert.equal(
+      resolveHistoryEntryPaperBaseItem({ paperItemID: 100 }, (id) =>
+        items.get(id),
+      ),
+      parent,
+    );
+  });
+
+  it("reads paper display metadata with Zotero field fallbacks", function () {
+    const metadata = readHistoryPaperDisplayMetadata({
+      id: 42,
+      firstCreator: "Fallback Creator",
+      isRegularItem: () => true,
+      getDisplayTitle: () => "Display title",
+      getField: (field) => {
+        if (field === "date") return "2017-06-01";
+        return "";
+      },
+    });
+
+    assert.deepEqual(metadata, {
+      itemID: 42,
+      title: "Display title",
+      firstCreator: "Fallback Creator",
+      year: "2017",
+    });
+    assert.equal(
+      formatHistoryPaperScopeLabel(metadata),
+      "Fallback Creator, 2017",
+    );
+  });
+
+  it("resolves paper display metadata through child-item parent IDs", function () {
+    const parent = {
+      id: 42,
+      isRegularItem: () => true,
+      isAttachment: () => false,
+      getField: (field: string) => {
+        if (field === "title") return "Parent paper";
+        if (field === "firstCreator") return "Mensch and Kording";
+        if (field === "year") return "2017";
+        return "";
+      },
+    };
+    const attachment = {
+      id: 99,
+      parentID: 42,
+      isRegularItem: () => false,
+      isAttachment: () => true,
+      getField: () => "",
+    };
+    const items = new Map<number, typeof parent | typeof attachment>([
+      [42, parent],
+      [99, attachment],
+    ]);
+
+    const metadata = resolveHistoryEntryPaperDisplayMetadata(
+      { paperItemID: 99 },
+      (id) => items.get(id),
+    );
+
+    assert.deepEqual(metadata, {
+      itemID: 42,
+      title: "Parent paper",
+      firstCreator: "Mensch and Kording",
+      year: "2017",
+    });
+  });
+
+  it("marks paper history with a live regular item as active", function () {
+    const item = {
+      id: 42,
+      isRegularItem: () => true,
+      isAttachment: () => false,
+      isNote: () => false,
+    };
+
+    assert.equal(
+      resolveHistoryEntrySourceState(
+        { kind: "paper", paperItemID: 42 },
+        (id) => (id === 42 ? item : null),
+      ),
+      "active",
+    );
+    assert.equal(
+      getHistoryEntryLabelType({ kind: "paper", sourceState: "active" }),
+      "paper",
+    );
+  });
+
+  it("marks missing paper history parents as orphan", function () {
+    assert.equal(
+      resolveHistoryEntrySourceState(
+        { kind: "paper", paperItemID: 42 },
+        () => null,
+      ),
+      "orphan",
+    );
+    assert.isTrue(
+      isOrphanHistoryEntry({ kind: "paper", sourceState: "orphan" }),
+    );
+    assert.equal(
+      getHistoryEntryLabelType({ kind: "paper", sourceState: "orphan" }),
+      "orphan",
+    );
+  });
+
+  it("marks trashed regular paper history items as orphan", function () {
+    const trashedItem = {
+      id: 42,
+      deleted: true,
+      isRegularItem: () => true,
+      isAttachment: () => false,
+      isNote: () => false,
+    };
+
+    assert.equal(
+      resolveHistoryEntrySourceState(
+        { kind: "paper", paperItemID: 42 },
+        (id) => (id === 42 ? trashedItem : null),
+      ),
+      "orphan",
+    );
+  });
+
+  it("keeps child-item paper history active when the parent item is live", function () {
+    const parent = {
+      id: 42,
+      isRegularItem: () => true,
+      isAttachment: () => false,
+      isNote: () => false,
+    };
+    const attachment = {
+      id: 99,
+      parentID: 42,
+      isRegularItem: () => false,
+      isAttachment: () => true,
+      isNote: () => false,
+    };
+    const items = new Map<number, typeof parent | typeof attachment>([
+      [42, parent],
+      [99, attachment],
+    ]);
+
+    assert.equal(
+      resolveHistoryEntrySourceState({ kind: "paper", paperItemID: 99 }, (id) =>
+        items.get(id),
+      ),
+      "active",
+    );
+  });
+
+  it("marks child-item paper history orphan when the parent item is missing", function () {
+    const attachment = {
+      id: 99,
+      parentID: 42,
+      isRegularItem: () => false,
+      isAttachment: () => true,
+      isNote: () => false,
+    };
+
+    assert.equal(
+      resolveHistoryEntrySourceState(
+        { kind: "paper", paperItemID: 99 },
+        (id) => (id === 99 ? attachment : null),
+      ),
+      "orphan",
+    );
+  });
+
+  it("marks child-item paper history orphan when the parent item is trashed", function () {
+    const parent = {
+      id: 42,
+      deleted: true,
+      isRegularItem: () => true,
+      isAttachment: () => false,
+      isNote: () => false,
+    };
+    const attachment = {
+      id: 99,
+      parentID: 42,
+      isRegularItem: () => false,
+      isAttachment: () => true,
+      isNote: () => false,
+    };
+    const items = new Map<number, typeof parent | typeof attachment>([
+      [42, parent],
+      [99, attachment],
+    ]);
+
+    assert.equal(
+      resolveHistoryEntrySourceState({ kind: "paper", paperItemID: 99 }, (id) =>
+        items.get(id),
+      ),
+      "orphan",
+    );
+  });
+
+  it("keeps child-item paper history active when only the child is trashed", function () {
+    const parent = {
+      id: 42,
+      isRegularItem: () => true,
+      isAttachment: () => false,
+      isNote: () => false,
+    };
+    const attachment = {
+      id: 99,
+      deleted: true,
+      parentID: 42,
+      isRegularItem: () => false,
+      isAttachment: () => true,
+      isNote: () => false,
+    };
+    const items = new Map<number, typeof parent | typeof attachment>([
+      [42, parent],
+      [99, attachment],
+    ]);
+
+    assert.equal(
+      resolveHistoryEntrySourceState({ kind: "paper", paperItemID: 99 }, (id) =>
+        items.get(id),
+      ),
+      "active",
+    );
+  });
+
+  it("keeps library history entries active with the library label type", function () {
+    assert.equal(
+      resolveHistoryEntrySourceState({ kind: "global" }, () => null),
+      "active",
+    );
+    assert.equal(
+      getHistoryEntryLabelType({ kind: "global", sourceState: "active" }),
+      "library",
+    );
   });
 
   it("decides whether paper history should load in place or select the target paper", function () {
@@ -113,19 +396,24 @@ describe("conversationHistoryController", function () {
   });
 
   it("selects the target paper for different-paper history targets", async function () {
-    const calls: Array<{ ids: number[]; selectInLibrary?: boolean }> = [];
+    const calls: Array<{
+      ids: number[];
+      options?: boolean | { selectInLibrary?: boolean };
+    }> = [];
     const selected = await maybeSelectPaperHistoryTarget({
       decision: "select-target-paper",
       paperItemID: 202,
       getPane: () => ({
-        selectItems: (ids, selectInLibrary) => {
-          calls.push({ ids, selectInLibrary });
+        selectItems: (ids, options) => {
+          calls.push({ ids, options });
         },
       }),
     });
 
     assert.isTrue(selected);
-    assert.deepEqual(calls, [{ ids: [202], selectInLibrary: true }]);
+    assert.deepEqual(calls, [
+      { ids: [202], options: { selectInLibrary: true } },
+    ]);
   });
 
   it("does not select a paper for missing paper history metadata", async function () {

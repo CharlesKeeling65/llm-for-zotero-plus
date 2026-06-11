@@ -1,11 +1,6 @@
 import { unzipSync } from "fflate";
 
-import type { PaperContentSourceMode } from "./types";
-
-export type TextAttachmentSourceMode = Extract<
-  PaperContentSourceMode,
-  "markdown" | "html" | "txt" | "docx"
->;
+import type { TextAttachmentSourceMode } from "./contextAttachmentTypes";
 
 function normalizeMetadataText(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";

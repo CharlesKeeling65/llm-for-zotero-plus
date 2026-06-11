@@ -1,4 +1,4 @@
-import { getCoreAgentRuntime } from "../agent";
+import { initAgentSubsystem } from "../agent";
 import type { AgentEvent } from "../agent/types";
 import { updateClaudeRuntimeRetention, buildClaudeScope } from "./runtime";
 import { CLAUDE_RUNTIME_RELEASE_GRACE_MS, isClaudeConversationKey } from "./constants";
@@ -66,13 +66,16 @@ async function ensureRemoteRetention(entry: ThreadRetentionEntry, body: Element)
     mountId: entry.mountId,
     probeId: entry.probeId,
   });
-  entry.retainInFlight = updateClaudeRuntimeRetention(getCoreRuntime(), {
-    conversationKey: entry.target.conversationKey,
-    scope: entry.target.scope,
-    mountId: entry.mountId,
-    retain: true,
-    probeId: entry.probeId,
-  })
+  entry.retainInFlight = getCoreRuntime()
+    .then((coreRuntime) =>
+      updateClaudeRuntimeRetention(coreRuntime, {
+        conversationKey: entry.target.conversationKey,
+        scope: entry.target.scope,
+        mountId: entry.mountId,
+        retain: true,
+        probeId: entry.probeId,
+      }),
+    )
     .then((retained) => {
       entry.retainedRemotely = retained;
       pushRetentionEvent(body, "frontend.runtime_retention.retain_result", {
@@ -109,7 +112,7 @@ function makeProbeId(): string {
   return `retain-probe-${Date.now()}-${nextMountOrdinal++}`;
 }
 
-const getCoreRuntime = () => getCoreAgentRuntime();
+const getCoreRuntime = () => initAgentSubsystem();
 
 function resolveRetentionTarget(item: any | null | undefined): RetentionTarget | null {
   if (!item) return null;
@@ -170,7 +173,7 @@ export async function retainClaudeRuntimeForBody(
               mountId: liveEntry.mountId,
               probeId: liveEntry.probeId,
             });
-            await updateClaudeRuntimeRetention(getCoreRuntime(), {
+            await updateClaudeRuntimeRetention(await getCoreRuntime(), {
               conversationKey: liveEntry.target.conversationKey,
               scope: liveEntry.target.scope,
               mountId: liveEntry.mountId,
@@ -234,12 +237,14 @@ export async function releaseClaudeRuntimeForBody(body: Element): Promise<void> 
       mountId: liveEntry.mountId,
       probeId: liveEntry.probeId,
     });
-    void updateClaudeRuntimeRetention(getCoreRuntime(), {
-      conversationKey: liveEntry.target.conversationKey,
-      scope: liveEntry.target.scope,
-      mountId: liveEntry.mountId,
-      retain: false,
-      probeId: liveEntry.probeId,
-    }).catch(() => {});
+    void (async () => {
+      await updateClaudeRuntimeRetention(await getCoreRuntime(), {
+        conversationKey: liveEntry.target.conversationKey,
+        scope: liveEntry.target.scope,
+        mountId: liveEntry.mountId,
+        retain: false,
+        probeId: liveEntry.probeId,
+      });
+    })().catch(() => {});
   }, CLAUDE_RUNTIME_RELEASE_GRACE_MS);
 }

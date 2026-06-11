@@ -167,6 +167,28 @@ describe("standalone system toggle", function () {
         forceFresh: true,
         summary: {
           ...draft,
+          title: "can you add 1 to all the coefficients",
+        },
+        kind: "paper",
+        paperItemID: 42,
+      }),
+    );
+    assert.isFalse(
+      isReusableConversationDraft({
+        forceFresh: true,
+        summary: {
+          ...draft,
+          isDraft: false,
+        },
+        kind: "paper",
+        paperItemID: 42,
+      }),
+    );
+    assert.isFalse(
+      isReusableConversationDraft({
+        forceFresh: true,
+        summary: {
+          ...draft,
           providerSessionId: "thread-123",
         },
         kind: "paper",
@@ -266,6 +288,51 @@ describe("standalone system toggle", function () {
         kind: "global",
         libraryID: 1,
       }),
+    );
+  });
+
+  it("does not collapse titled zero-count conversations out of standalone history", function () {
+    const entries = [
+      {
+        conversationKey: 5_000_000_101,
+        kind: "global" as const,
+        libraryID: 1,
+        userTurnCount: 0,
+        lastActivityAt: 100,
+        title: "can you add 1 to all the coefficients",
+      },
+      {
+        conversationKey: 5_000_000_102,
+        kind: "global" as const,
+        libraryID: 1,
+        userTurnCount: 0,
+        lastActivityAt: 200,
+        title: "why did this disappear",
+      },
+      {
+        conversationKey: 5_000_000_103,
+        kind: "global" as const,
+        libraryID: 1,
+        userTurnCount: 0,
+        lastActivityAt: 300,
+        title: "New Codex chat",
+      },
+      {
+        conversationKey: 5_000_000_104,
+        kind: "global" as const,
+        libraryID: 1,
+        userTurnCount: 0,
+        lastActivityAt: 400,
+        title: "New Codex chat",
+      },
+    ];
+
+    assert.deepEqual(
+      collapseDuplicateReusableConversationDrafts({
+        entries,
+        activeConversationKey: 5_000_000_101,
+      }).map((entry) => entry.conversationKey),
+      [5_000_000_101, 5_000_000_102, 5_000_000_104],
     );
   });
 

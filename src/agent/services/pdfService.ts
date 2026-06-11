@@ -1,8 +1,9 @@
-import {
-  ensurePDFTextCached,
-  resolveTextAttachmentSourceMode,
-} from "../../modules/contextPanel/pdfContext";
+import { ensurePDFTextCached } from "../../modules/contextPanel/pdfContext";
 import { pdfTextCache } from "../../modules/contextPanel/state";
+import {
+  isPdfContextAttachment,
+  isSupportedContextAttachment,
+} from "../../modules/contextPanel/contextAttachmentSupport";
 import {
   formatPaperCitationLabel,
   formatPaperSourceLabel,
@@ -15,20 +16,13 @@ function getFirstPdfChildAttachment(
   item: Zotero.Item | null | undefined,
 ): Zotero.Item | null {
   if (!item) return null;
-  if (
-    item.isAttachment?.() &&
-    item.attachmentContentType === "application/pdf"
-  ) {
+  if (isPdfContextAttachment(item)) {
     return item;
   }
   if (!item.isRegularItem?.()) return null;
   for (const attachmentId of item.getAttachments()) {
     const attachment = Zotero.Items.get(attachmentId);
-    if (
-      attachment &&
-      attachment.isAttachment?.() &&
-      attachment.attachmentContentType === "application/pdf"
-    ) {
+    if (isPdfContextAttachment(attachment)) {
       return attachment;
     }
   }
@@ -39,12 +33,7 @@ export function resolveContextItemFromPaperContext(
   paperContext: PaperContextRef,
 ): Zotero.Item | null {
   const direct = Zotero.Items.get(paperContext.contextItemId);
-  if (
-    direct &&
-    direct.isAttachment?.() &&
-    (direct.attachmentContentType === "application/pdf" ||
-      resolveTextAttachmentSourceMode(direct))
-  ) {
+  if (isSupportedContextAttachment(direct)) {
     return direct;
   }
   const item = Zotero.Items.get(paperContext.itemId);

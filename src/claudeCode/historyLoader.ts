@@ -1,11 +1,10 @@
-import type { ClaudeConversationSummary } from "../shared/types";
-import { listClaudeConversationsForScope } from "./runtime";
 import {
-  listAllClaudePaperConversationsByLibrary,
-  listClaudeGlobalConversations,
-} from "./store";
+  conversationRepository,
+  type ConversationCatalogEntry,
+} from "../core/conversations/repository";
 
 export type ClaudeConversationHistoryEntry = {
+  conversationID: string;
   conversationKey: number;
   kind: "global" | "paper";
   title: string;
@@ -18,20 +17,31 @@ export type ClaudeConversationHistoryEntry = {
   scopedConversationKey?: string;
 };
 
-function normalizeTitle(summary: ClaudeConversationSummary): string {
+function normalizeTitle(summary: ConversationCatalogEntry): string {
   const title = (summary.title || "").trim();
   if (title) return title;
   return summary.kind === "paper" ? "New Claude paper chat" : "New Claude chat";
 }
 
-function toEntry(summary: ClaudeConversationSummary): ClaudeConversationHistoryEntry {
-  const isDraft = (summary.userTurnCount || 0) <= 0;
+function isDraftSummary(summary: ConversationCatalogEntry): boolean {
+  const userTurnCount = Number(summary.userTurnCount || 0);
+  return (
+    userTurnCount <= 0 &&
+    !summary.title?.trim() &&
+    !summary.providerSessionId?.trim() &&
+    !summary.scopedConversationKey?.trim()
+  );
+}
+
+function toEntry(summary: ConversationCatalogEntry): ClaudeConversationHistoryEntry {
+  const isDraft = isDraftSummary(summary);
   return {
+    conversationID: summary.conversationID,
     conversationKey: summary.conversationKey,
     kind: summary.kind,
     title: normalizeTitle(summary),
     createdAt: summary.createdAt,
-    lastActivityAt: summary.updatedAt,
+    lastActivityAt: summary.lastActivityAt,
     userTurnCount: summary.userTurnCount,
     isDraft,
     paperItemID: summary.paperItemID,
@@ -42,11 +52,12 @@ function toEntry(summary: ClaudeConversationSummary): ClaudeConversationHistoryE
 
 export async function loadClaudeConversationHistoryScope(params: {
   libraryID: number;
-  kind: "global" | "paper";
-  paperItemID?: number;
-  limit?: number;
+    kind: "global" | "paper";
+    paperItemID?: number;
+    limit?: number;
 }): Promise<ClaudeConversationHistoryEntry[]> {
-  const summaries = await listClaudeConversationsForScope({
+  const summaries = await conversationRepository.listCatalogEntries({
+    system: "claude_code",
     libraryID: params.libraryID,
     kind: params.kind,
     paperItemID: params.paperItemID,
@@ -57,16 +68,19 @@ export async function loadClaudeConversationHistoryScope(params: {
 
 export async function loadAllClaudeConversationHistory(params: {
   libraryID: number;
-  limit?: number;
+  limit?: number | null;
 }): Promise<ClaudeConversationHistoryEntry[]> {
-  const normalizedLimit = Number.isFinite(params.limit)
-    ? Math.max(1, Math.floor(params.limit as number))
-    : 100;
-  const [paperSummaries, globalSummaries] = await Promise.all([
-    listAllClaudePaperConversationsByLibrary(params.libraryID, normalizedLimit),
-    listClaudeGlobalConversations(params.libraryID, normalizedLimit),
-  ]);
-  return [...paperSummaries, ...globalSummaries]
-    .map(toEntry)
-    .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+  const normalizedLimit =
+    params.limit === null
+      ? null
+      : Number.isFinite(params.limit)
+        ? Math.max(1, Math.floor(params.limit as number))
+        : 100;
+  return (
+    await conversationRepository.listAllCatalogEntries({
+      system: "claude_code",
+      libraryID: params.libraryID,
+      limit: normalizedLimit,
+    })
+  ).map(toEntry);
 }

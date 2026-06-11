@@ -35,6 +35,7 @@ import {
   buildAgentInitialMessages,
   normalizeHistoryMessages,
 } from "./model/messageBuilder";
+import { classifyWriteNoteDestination } from "./writeNoteDestination";
 import { detectSkillIntent } from "./model/skillClassifier";
 import { getAllSkills, getMatchedSkillIds } from "./skills";
 import {
@@ -434,12 +435,11 @@ function isWriteNoteFileRequest(
     ...(request.forcedSkillIds || []),
   ]);
   if (!activeSkillIds.has("write-note")) return false;
-  const text = request.userText || "";
-  if (/\b(zotero\s+note|current\s+zotero\s+note|active\s+note)\b/i.test(text)) {
-    return false;
-  }
-  return /\b(obsidian|vault|markdown\s+file|md\s+file|file|folder|directory|disk|export|save|write\s+(?:it|this|that)?\s*(?:to|into))\b/i.test(
-    text,
+  return (
+    classifyWriteNoteDestination(
+      request.userText,
+      getNotesDirectoryNickname(),
+    ) === "file"
   );
 }
 

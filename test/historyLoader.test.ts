@@ -11,6 +11,7 @@ import {
   CODEX_GLOBAL_CONVERSATION_KEY_BASE,
   CODEX_PAPER_CONVERSATION_KEY_BASE,
 } from "../src/shared/conversationKeySpace";
+import { buildConversationID } from "../src/shared/conversationRegistry";
 import {
   createGlobalConversation,
   getLatestEmptyGlobalConversation,
@@ -69,6 +70,12 @@ describe("historyLoader", function () {
     assert.deepEqual(rows, [
       {
         mode: "open",
+        conversationID: buildConversationID({
+          conversationKey: 2_000_000_001,
+          system: "upstream",
+          kind: "global",
+          libraryID: 1,
+        }),
         conversationKey: 2_000_000_001,
         title: "First chat",
         createdAt: 100,
@@ -78,6 +85,12 @@ describe("historyLoader", function () {
       },
       {
         mode: "open",
+        conversationID: buildConversationID({
+          conversationKey: 2_000_000_002,
+          system: "upstream",
+          kind: "global",
+          libraryID: 1,
+        }),
         conversationKey: 2_000_000_002,
         title: "New chat",
         createdAt: 400,
@@ -94,7 +107,11 @@ describe("historyLoader", function () {
       DB: {
         queryAsync: async (sql: string, params?: unknown[]) => {
           const normalizedParams = Array.isArray(params) ? params : [];
-          if (sql.includes("INSERT OR IGNORE INTO llm_for_zotero_paper_conversations")) {
+          if (
+            sql.includes(
+              "INSERT OR IGNORE INTO llm_for_zotero_paper_conversations",
+            )
+          ) {
             return [];
           }
           if (
@@ -146,6 +163,13 @@ describe("historyLoader", function () {
     assert.deepEqual(rows, [
       {
         mode: "paper",
+        conversationID: buildConversationID({
+          conversationKey: 321,
+          system: "upstream",
+          kind: "paper",
+          libraryID: 3,
+          paperItemID: 321,
+        }),
         conversationKey: 321,
         title: "Paper thread",
         createdAt: 200,
@@ -218,6 +242,62 @@ describe("historyLoader", function () {
           paperItemID: undefined,
         },
       ],
+    );
+  });
+
+  it("can load all upstream search candidates without a recent-history limit", async function () {
+    const queries: string[] = [];
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      DB: {
+        queryAsync: async (sql: string) => {
+          queries.push(sql);
+          if (
+            sql.includes("FROM llm_for_zotero_paper_conversations pc") &&
+            sql.includes("WHERE pc.library_id = ?") &&
+            !sql.includes("pc.paper_item_id = ?")
+          ) {
+            return [
+              {
+                conversationKey: 1_500_000_010,
+                libraryID: 1,
+                paperItemID: 10,
+                sessionVersion: 2,
+                createdAt: 100,
+                title: "Old paper conversation",
+                lastActivityAt: 100,
+                userTurnCount: 1,
+              },
+            ];
+          }
+          if (sql.includes("FROM llm_for_zotero_global_conversations gc")) {
+            return [
+              {
+                conversationKey: 2_000_000_001,
+                libraryID: 1,
+                createdAt: 200,
+                title: "Old library conversation",
+                lastActivityAt: 200,
+                userTurnCount: 1,
+              },
+            ];
+          }
+          return [];
+        },
+      },
+    };
+
+    const rows = await loadAllConversationHistory({ libraryID: 1, limit: null });
+
+    assert.lengthOf(rows, 2);
+    assert.isFalse(
+      queries
+        .filter(
+          (sql) =>
+            sql.includes("FROM llm_for_zotero_paper_conversations pc") ||
+            sql.includes("FROM llm_for_zotero_global_conversations gc"),
+        )
+        .some((sql) => sql.includes("LIMIT ?")),
     );
   });
 
@@ -413,6 +493,17 @@ describe("historyLoader", function () {
         queryAsync: async (sql: string, params?: unknown[]) => {
           const normalizedParams = Array.isArray(params) ? params : [];
           if (
+            sql.includes("SELECT conversation_key AS conversationKey") &&
+            sql.includes("FROM llm_for_zotero_global_conversations") &&
+            sql.includes("WHERE conversation_key = ?")
+          ) {
+            return conversations
+              .filter(
+                (row) => row.conversationKey === Number(normalizedParams[0]),
+              )
+              .map((row) => ({ conversationKey: row.conversationKey }));
+          }
+          if (
             sql.includes("SELECT MAX(conversation_key)") &&
             sql.includes("FROM llm_for_zotero_global_conversations")
           ) {
@@ -424,20 +515,18 @@ describe("historyLoader", function () {
               },
             ];
           }
-          if (
-            sql.includes("INSERT INTO llm_for_zotero_global_conversations")
-          ) {
+          if (sql.includes("INSERT INTO llm_for_zotero_global_conversations")) {
             conversations.push({
-              conversationKey: Number(normalizedParams[0]),
-              libraryID: Number(normalizedParams[1]),
-              createdAt: Number(normalizedParams[2]),
+              conversationKey: Number(normalizedParams[1]),
+              libraryID: Number(normalizedParams[2]),
+              createdAt: Number(normalizedParams[3]),
               title: "",
             });
             return [];
           }
           if (
             sql.includes("FROM llm_for_zotero_global_conversations gc") &&
-            sql.includes("HAVING SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END) = 0")
+            sql.includes("COALESCE(gc.user_turn_count, 0) = 0")
           ) {
             return conversations
               .filter((row) => row.libraryID === Number(normalizedParams[0]))
@@ -504,7 +593,7 @@ describe("historyLoader", function () {
             sql.includes("NOT EXISTS")
           ) {
             const row = conversations.find(
-              (entry) => entry.conversationKey === Number(normalizedParams[1]),
+              (entry) => entry.conversationKey === Number(normalizedParams[2]),
             );
             if (row) row.createdAt = Number(normalizedParams[0]);
             return [];
@@ -563,7 +652,7 @@ describe("historyLoader", function () {
             sql.includes("NOT EXISTS")
           ) {
             const row = conversations.find(
-              (entry) => entry.conversationKey === Number(normalizedParams[1]),
+              (entry) => entry.conversationKey === Number(normalizedParams[2]),
             );
             if (row) row.createdAt = Number(normalizedParams[0]);
             return [];

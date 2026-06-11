@@ -7,7 +7,12 @@
  */
 
 import { config } from "../../../package.json";
-import type { PaperContextRef, QuoteCitation } from "../../shared/types";
+import type {
+  CollectionContextRef,
+  PaperContextRef,
+  QuoteCitation,
+  TagContextRef,
+} from "../../shared/types";
 import { readNoteSnapshot } from "../../modules/contextPanel/noteSnapshot";
 import { extractQuoteCitationsFromToolContent } from "../../modules/contextPanel/quoteCitations";
 import type { AgentToolRegistry } from "../tools/registry";
@@ -49,7 +54,6 @@ export const ZOTERO_MCP_SAFE_READ_TOOL_NAMES = [
   "library_retrieve",
   "paper_read",
   "literature_search",
-  "web_search",
 ] as const;
 export const ZOTERO_MCP_WRITE_TOOL_NAMES = [
   "library_update",
@@ -120,6 +124,8 @@ export type ZoteroMcpActiveScope = {
   title?: string;
   userText?: string;
   paperContext?: PaperContextRef;
+  selectedCollectionContexts?: CollectionContextRef[];
+  selectedTagContexts?: TagContextRef[];
 };
 
 type McpServerDeps = {
@@ -386,6 +392,65 @@ function normalizePaperContext(
   };
 }
 
+function normalizeCollectionContexts(
+  values: CollectionContextRef[] | undefined,
+): CollectionContextRef[] | undefined {
+  if (!Array.isArray(values)) return undefined;
+  const out: CollectionContextRef[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const collectionId = normalizePositiveInt(value?.collectionId);
+    const libraryID = normalizePositiveInt(value?.libraryID);
+    const name = normalizeText(value?.name);
+    if (!collectionId || !libraryID || !name) continue;
+    const key = `${libraryID}:${collectionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ collectionId, libraryID, name });
+  }
+  return out.length ? out : undefined;
+}
+
+function normalizeTagContexts(
+  values: TagContextRef[] | undefined,
+): TagContextRef[] | undefined {
+  if (!Array.isArray(values)) return undefined;
+  const out: TagContextRef[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const libraryID = normalizePositiveInt(value?.libraryID);
+    const scope =
+      value?.scope === "allTagged" || value?.scope === "untagged"
+        ? value.scope
+        : undefined;
+    const name =
+      normalizeText(value?.name) ||
+      (scope === "allTagged"
+        ? "All Tagged"
+        : scope === "untagged"
+          ? "Untagged"
+          : undefined);
+    if (!libraryID || !name) continue;
+    const normalizedName = normalizeText(
+      value?.normalizedName || value?.name,
+    )?.toLowerCase();
+    const includeAutomatic = value?.includeAutomatic === true;
+    const key = scope
+      ? `${libraryID}:scope:${scope}:${includeAutomatic ? "auto" : "manual"}`
+      : `${libraryID}:tag:${normalizedName || name.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      name,
+      libraryID,
+      normalizedName: normalizedName || undefined,
+      scope,
+      includeAutomatic: includeAutomatic || undefined,
+    });
+  }
+  return out.length ? out : undefined;
+}
+
 function normalizeNoteKind(value: unknown): "item" | "standalone" | undefined {
   return value === "item" || value === "standalone" ? value : undefined;
 }
@@ -416,6 +481,10 @@ function normalizeActiveScope(
     title: normalizeText(scope.title),
     userText: normalizeText(scope.userText, 4000),
     paperContext,
+    selectedCollectionContexts: normalizeCollectionContexts(
+      scope.selectedCollectionContexts,
+    ),
+    selectedTagContexts: normalizeTagContexts(scope.selectedTagContexts),
   };
 }
 
@@ -690,7 +759,7 @@ function decorateMcpToolDescription(
   mutability: ToolSpec["mutability"],
 ): string {
   const scopeGuidance =
-    "Zotero MCP scope: omit libraryID, activeItemId, and activeContextItemId to use the current Codex Zotero chat scope. Use library_search with explicit entity and mode, for example library_search({ entity:'items', mode:'search', text:'...' }) or library_search({ entity:'collections', mode:'list', view:'tree' }), to discover Zotero items. Use library_retrieve for broad folder/library evidence search across a scoped resource pool: intent:'enumerate' for comprehensive quality-first local evidence search including which/all/how-many/list questions, intent:'summarize' for taxonomy/theme synthesis, and intent:'verify' for exact presence/absence. Use library_read for structured item state, and paper_read for close reading one known paper: mode:'overview' for summaries/main message, mode:'targeted' for textual evidence/sections/pages, mode:'visual' for rendered PDF pages, and mode:'capture' for the currently visible reader page. Use literature_search for scholarly discovery/import workflows and web_search for general web lookup. For counting questions, prefer library_search totalCount/returnedCount/limited metadata or library_retrieve intent:'enumerate' coverage instead of hand-counting listed results.";
+    "Zotero MCP scope: omit libraryID, activeItemId, and activeContextItemId to use the current Codex Zotero chat scope. Use library_search with explicit entity and mode, for example library_search({ entity:'items', mode:'search', text:'...' }) or library_search({ entity:'collections', mode:'list', view:'tree' }), to discover Zotero items. Use library_retrieve for broad folder/library evidence search across a scoped resource pool: intent:'enumerate' for comprehensive quality-first local evidence search including which/all/how-many/list questions, intent:'summarize' for taxonomy/theme synthesis, and intent:'verify' for exact presence/absence. Use library_read for structured item state, and paper_read for close reading one known paper: mode:'overview' for summaries/main message, mode:'targeted' for textual evidence/sections/pages, mode:'visual' for rendered PDF pages, and mode:'capture' for the currently visible reader page. Use literature_search for scholarly online search: workflow:'answer' returns scholarly results for source-cited answers, while workflow:'review' opens Zotero import/review-card workflows. No general web-search MCP tool is available. For counting questions, prefer library_search totalCount/returnedCount/limited metadata or library_retrieve intent:'enumerate' coverage instead of hand-counting listed results.";
   const writeGuidance =
     toolName === "zotero_script"
       ? "zotero_script runs directly without a review card. Write scripts must call env.snapshot(item) before mutating items, or env.addUndoStep(fn) for custom changes, so undo_last_action can revert the operation."
@@ -958,6 +1027,8 @@ function createToolContext(
     authMode: "codex_app_server",
     selectedPaperContexts: paperContext ? [paperContext] : undefined,
     fullTextPaperContexts: paperContext ? [paperContext] : undefined,
+    selectedCollectionContexts: scope?.selectedCollectionContexts,
+    selectedTagContexts: scope?.selectedTagContexts,
     activeNoteContext,
   };
   return {

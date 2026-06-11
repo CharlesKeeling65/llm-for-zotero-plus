@@ -9,6 +9,7 @@ import {
   RUNTIME_CONVERSATION_KEY_END,
   RUNTIME_DEFAULT_CONVERSATION_KEY_OFFSET,
   buildDefaultConversationKey,
+  buildDefaultUpstreamGlobalConversationKey,
   classifyConversationKey,
   getConversationKeyRange,
   getRuntimeAllocatedConversationKeyRange,
@@ -75,6 +76,17 @@ describe("conversation key space", function () {
       kind: "paper",
     });
     assert.isFalse(isConversationKeyForKind("upstream", "global", 42));
+  });
+
+  it("builds library-scoped upstream default global keys", function () {
+    const libraryOne = buildDefaultUpstreamGlobalConversationKey(1);
+    const libraryTwo = buildDefaultUpstreamGlobalConversationKey(2);
+
+    assert.equal(libraryOne, UPSTREAM_GLOBAL_CONVERSATION_KEY_BASE + 1);
+    assert.equal(libraryTwo, UPSTREAM_GLOBAL_CONVERSATION_KEY_BASE + 2);
+    assert.notEqual(libraryOne, libraryTwo);
+    assert.isTrue(isConversationKeyForKind("upstream", "global", libraryOne));
+    assert.isTrue(isConversationKeyForKind("upstream", "global", libraryTwo));
   });
 
   it("leaves future high-key bands unclassified", function () {

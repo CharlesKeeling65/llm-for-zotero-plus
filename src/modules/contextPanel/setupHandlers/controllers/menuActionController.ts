@@ -1,5 +1,6 @@
 import { t } from "../../../../utils/i18n";
 import {
+  copyGeneratedImageToClipboard,
   copyRenderedMarkdownToClipboard,
   copyTextToClipboard,
 } from "../../chat";
@@ -14,7 +15,11 @@ import { isGlobalPortalItem } from "../../portalScope";
 import { isClaudeGlobalPortalItem } from "../../../../claudeCode/portal";
 import { positionMenuBelowButton } from "../../menuPositioning";
 import { setStatus } from "../../textUtils";
-import type { ConversationSystem, QuoteCitation } from "../../../../shared/types";
+import type {
+  ConversationSystem,
+  GeneratedChatImage,
+  QuoteCitation,
+} from "../../../../shared/types";
 import type { ChatRuntimeMode, Message } from "../../types";
 
 type ResponseMenuTarget = {
@@ -26,6 +31,7 @@ type ResponseMenuTarget = {
   assistantTimestamp?: number;
   paperContexts?: import("../../types").PaperContextRef[];
   quoteCitations?: QuoteCitation[];
+  generatedImages?: GeneratedChatImage[];
 } | null;
 
 type PromptMenuTarget = {
@@ -115,12 +121,23 @@ export function attachMenuActionController(
       const target = deps.getResponseMenuTarget();
       deps.closeResponseMenu();
       if (!target) return;
-      await copyRenderedMarkdownToClipboard(
-        deps.body,
-        target.contentText,
-        target.quoteCitations,
-      );
-      setStatusMessage(t("Copied response"), "ready");
+      if (target.contentText.trim()) {
+        await copyRenderedMarkdownToClipboard(
+          deps.body,
+          target.contentText,
+          target.quoteCitations,
+        );
+        setStatusMessage(t("Copied response"), "ready");
+      } else if (target.generatedImages?.length) {
+        const result = await copyGeneratedImageToClipboard(
+          deps.body,
+          target.generatedImages[0]!,
+        );
+        setStatusMessage(
+          result === "image" ? "Copied image" : "Copied image source",
+          "ready",
+        );
+      }
     });
     deps.responseMenuNoteBtn.addEventListener("click", async (e: Event) => {
       e.preventDefault();
@@ -137,14 +154,16 @@ export function attachMenuActionController(
         modelName,
         paperContexts,
         quoteCitations,
+        generatedImages,
       } = target;
-      if (!targetItem || !contentText) {
-        deps.logError("LLM: Note save - missing item or contentText", null);
+      if (!targetItem || (!contentText && !generatedImages?.length)) {
+        deps.logError("LLM: Note save - missing item or response content", null);
         return;
       }
       try {
         const targetNoteSession = deps.resolveActiveNoteSession(targetItem);
         if (
+          deps.isGlobalMode() ||
           isGlobalPortalItem(targetItem) ||
           isClaudeGlobalPortalItem(targetItem) ||
           targetNoteSession?.noteKind === "standalone"
@@ -159,6 +178,7 @@ export function attachMenuActionController(
             modelName,
             paperContexts,
             quoteCitations,
+            generatedImages,
           );
           setStatusMessage(t("Created a new note"), "ready");
           return;
@@ -172,6 +192,7 @@ export function attachMenuActionController(
             appendToTrackedNote: true,
             rememberCreatedNote: true,
             quoteCitations,
+            generatedImages,
           },
         );
         setStatusMessage(

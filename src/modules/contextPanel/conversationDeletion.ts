@@ -14,11 +14,7 @@ import {
   setPendingRequestId,
 } from "./state";
 import { clearConversationSummary as clearConversationSummaryFromCache } from "./conversationSummaryCache";
-import {
-  clearConversation as clearStoredConversation,
-  deleteGlobalConversation,
-  deletePaperConversation,
-} from "../../utils/chatStore";
+import { conversationRepository } from "../../core/conversations/repository";
 import {
   buildPaperStateKey,
   getLastUsedPaperConversationKey,
@@ -28,10 +24,6 @@ import {
 } from "./prefHelpers";
 import { clearOwnerAttachmentRefs } from "../../utils/attachmentRefStore";
 import { removeConversationAttachmentFiles } from "./attachmentStorage";
-import {
-  clearClaudeConversation,
-  deleteClaudeConversation,
-} from "../../claudeCode/store";
 import {
   buildClaudeScope,
   invalidateClaudeConversationSession,
@@ -48,10 +40,6 @@ import {
   removeLastUsedClaudeGlobalConversationKey,
   removeLastUsedClaudePaperConversationKey,
 } from "../../claudeCode/prefs";
-import {
-  clearCodexConversation,
-  deleteCodexConversation,
-} from "../../codexAppServer/store";
 import { archiveCodexAppServerThread } from "../../codexAppServer/nativeClient";
 import {
   activeCodexGlobalConversationByLibrary,
@@ -69,11 +57,17 @@ import {
   clearAgentConversationState,
   clearDeletedAgentConversationState,
 } from "./agentConversationCleanup";
-import { validateConversationScope } from "../../shared/conversationRegistry";
+import { resolveConversationRefForKey } from "../../shared/conversationRef";
+import {
+  getConversationScopeValidationDetails,
+  type ConversationRegistryRow,
+  type ConversationScopeValidationDetails,
+} from "../../shared/conversationRegistry";
 
 type ConversationDeletionKind = "global" | "paper";
 
 export type ConversationDeletionTarget = {
+  conversationID?: string;
   conversationKey: number;
   kind: ConversationDeletionKind;
   conversationSystem: ConversationSystem;
@@ -109,13 +103,8 @@ export type ConversationDeletionResult = {
 };
 
 type ConversationDeletionOperations = {
-  clearStoredConversation: typeof clearStoredConversation;
-  deleteGlobalConversation: typeof deleteGlobalConversation;
-  deletePaperConversation: typeof deletePaperConversation;
-  clearClaudeConversation: typeof clearClaudeConversation;
-  deleteClaudeConversation: typeof deleteClaudeConversation;
-  clearCodexConversation: typeof clearCodexConversation;
-  deleteCodexConversation: typeof deleteCodexConversation;
+  preflightDeleteLocalConversationRows: (target: ConversationDeletionTarget) => Promise<void>;
+  deleteLocalConversationRows: (target: ConversationDeletionTarget) => Promise<void>;
   clearOwnerAttachmentRefs: typeof clearOwnerAttachmentRefs;
   removeConversationAttachmentFiles: typeof removeConversationAttachmentFiles;
   archiveCodexThread: (threadId: string) => Promise<void>;
@@ -132,7 +121,7 @@ export type ConversationDeletionDeps = {
   clearTransientComposeStateForItem?: (itemId: number) => void;
   resetSessionTokens?: (conversationKey: number) => void;
   scheduleAttachmentGc?: () => void;
-  getCoreAgentRuntime?: () => unknown;
+  getCoreAgentRuntime?: () => unknown | Promise<unknown>;
   clearAgentToolCaches?: (conversationKey: number) => void;
   clearAgentConversationState?: (conversationKey: number) => Promise<void>;
   operations?: Partial<ConversationDeletionOperations>;
@@ -148,6 +137,10 @@ function normalizeProviderSessionId(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function normalizeConversationID(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 function createResult(): ConversationDeletionResult {
   return {
     ok: true,
@@ -155,6 +148,24 @@ function createResult(): ConversationDeletionResult {
     errors: [],
     warnings: [],
   };
+}
+
+export function getConversationDeletionFailureMessage(
+  result: Pick<ConversationDeletionResult, "blocked" | "errors">,
+): string {
+  if (result.errors.some((issue) => issue.code === "catalog_row")) {
+    return "Failed to delete conversation because its saved identity is inconsistent. Check logs.";
+  }
+  if (
+    result.blocked &&
+    result.errors.some(
+      (issue) =>
+        issue.code === "codex_thread_archive" || issue.code === "message_rows",
+    )
+  ) {
+    return "Failed to delete conversation. Codex thread was not archived.";
+  }
+  return "Failed to fully delete conversation. Check logs.";
 }
 
 function defaultCancelPendingRequest(conversationKey: number): void {
@@ -193,13 +204,20 @@ function buildOperations(
   deps: ConversationDeletionDeps,
 ): ConversationDeletionOperations {
   return {
-    clearStoredConversation,
-    deleteGlobalConversation,
-    deletePaperConversation,
-    clearClaudeConversation,
-    deleteClaudeConversation,
-    clearCodexConversation,
-    deleteCodexConversation,
+    preflightDeleteLocalConversationRows: async (target) => {
+      await conversationRepository.preflightDeleteLocalConversationRows({
+        system: target.conversationSystem,
+        kind: target.kind,
+        conversationKey: target.conversationKey,
+      });
+    },
+    deleteLocalConversationRows: async (target) => {
+      await conversationRepository.deleteLocalConversationRows({
+        system: target.conversationSystem,
+        kind: target.kind,
+        conversationKey: target.conversationKey,
+      });
+    },
     clearOwnerAttachmentRefs,
     removeConversationAttachmentFiles,
     archiveCodexThread: (threadId) =>
@@ -208,14 +226,17 @@ function buildOperations(
       if (!deps.getCoreAgentRuntime) {
         return;
       }
-      await invalidateClaudeConversationSession(deps.getCoreAgentRuntime() as any, {
-        conversationKey,
-        scope: buildClaudeScope({
-          libraryID: target.libraryID,
-          kind: target.kind,
-          paperItemID: target.paperItemID,
-        }),
-      });
+      await invalidateClaudeConversationSession(
+        (await deps.getCoreAgentRuntime()) as any,
+        {
+          conversationKey,
+          scope: buildClaudeScope({
+            libraryID: target.libraryID,
+            kind: target.kind,
+            paperItemID: target.paperItemID,
+          }),
+        },
+      );
     },
     clearRememberedSelection,
     ...deps.operations,
@@ -230,7 +251,60 @@ function recordIssue(
 ): void {
   result[list].push(issue);
   if (list === "errors") result.ok = false;
-  log?.(issue.message, issue.error);
+  if ("error" in issue) {
+    log?.(issue.message, issue.error);
+  } else {
+    log?.(issue.message);
+  }
+}
+
+function summarizeRegistryScope(
+  scope: ConversationRegistryRow | null | undefined,
+): Record<string, unknown> | null {
+  if (!scope) return null;
+  return {
+    conversationID: scope.conversationID,
+    conversationKey: scope.conversationKey,
+    system: scope.system,
+    kind: scope.kind,
+    profileSignature: scope.profileSignature,
+    libraryID: scope.libraryID,
+    paperItemID: scope.paperItemID,
+    valid: scope.valid,
+    invalidReason: scope.invalidReason,
+  };
+}
+
+function summarizeScopeValidationFailure(
+  details: ConversationScopeValidationDetails,
+): Record<string, unknown> {
+  return {
+    reason: details.reason || "unknown",
+    target: summarizeRegistryScope(details.target),
+    registered: summarizeRegistryScope(details.registered),
+  };
+}
+
+function canCanonicalizeRegistryConversationID(
+  details: ConversationScopeValidationDetails,
+): boolean {
+  const target = details.target;
+  const registered = details.registered;
+  if (
+    details.reason !== "conversation_id_mismatch" ||
+    !target ||
+    !registered?.valid
+  ) {
+    return false;
+  }
+  return (
+    registered.conversationKey === target.conversationKey &&
+    registered.system === target.system &&
+    registered.kind === target.kind &&
+    registered.profileSignature === target.profileSignature &&
+    registered.libraryID === target.libraryID &&
+    (registered.paperItemID || null) === (target.paperItemID || null)
+  );
 }
 
 async function runStep(
@@ -244,34 +318,6 @@ async function runStep(
     await fn();
   } catch (error) {
     recordIssue(result, "errors", { code, message, error }, log);
-  }
-}
-
-async function clearMessageRows(
-  operations: ConversationDeletionOperations,
-  target: ConversationDeletionTarget,
-): Promise<void> {
-  if (target.conversationSystem === "claude_code") {
-    await operations.clearClaudeConversation(target.conversationKey);
-  } else if (target.conversationSystem === "codex") {
-    await operations.clearCodexConversation(target.conversationKey);
-  } else {
-    await operations.clearStoredConversation(target.conversationKey);
-  }
-}
-
-async function deleteCatalogRow(
-  operations: ConversationDeletionOperations,
-  target: ConversationDeletionTarget,
-): Promise<void> {
-  if (target.conversationSystem === "claude_code") {
-    await operations.deleteClaudeConversation(target.conversationKey);
-  } else if (target.conversationSystem === "codex") {
-    await operations.deleteCodexConversation(target.conversationKey);
-  } else if (target.kind === "global") {
-    await operations.deleteGlobalConversation(target.conversationKey);
-  } else {
-    await operations.deletePaperConversation(target.conversationKey);
   }
 }
 
@@ -397,20 +443,41 @@ export async function finalizeConversationDeletion(
     return result;
   }
 
-  const normalizedTarget: ConversationDeletionTarget = {
+  const targetConversationID = normalizeConversationID(target.conversationID);
+  const resolvedRef = targetConversationID
+    ? null
+    : await resolveConversationRefForKey(conversationKey);
+  const conversationID = targetConversationID || resolvedRef?.conversationID || "";
+  let normalizedTarget: ConversationDeletionTarget = {
     ...target,
+    conversationID: conversationID || undefined,
     conversationKey,
     libraryID,
     paperItemID: normalizePositiveInt(target.paperItemID) || undefined,
   };
-  const validScope = await validateConversationScope({
+  let scopeValidation = await getConversationScopeValidationDetails({
+    conversationID: normalizedTarget.conversationID,
     conversationKey,
     system: normalizedTarget.conversationSystem,
     kind: normalizedTarget.kind,
     libraryID,
     paperItemID: normalizedTarget.paperItemID,
   });
-  if (!validScope) {
+  if (canCanonicalizeRegistryConversationID(scopeValidation)) {
+    normalizedTarget = {
+      ...normalizedTarget,
+      conversationID: scopeValidation.registered?.conversationID || undefined,
+    };
+    scopeValidation = await getConversationScopeValidationDetails({
+      conversationID: normalizedTarget.conversationID,
+      conversationKey,
+      system: normalizedTarget.conversationSystem,
+      kind: normalizedTarget.kind,
+      libraryID,
+      paperItemID: normalizedTarget.paperItemID,
+    });
+  }
+  if (!scopeValidation.valid) {
     result.blocked = true;
     recordIssue(
       result,
@@ -419,6 +486,7 @@ export async function finalizeConversationDeletion(
         code: "catalog_row",
         message:
           "LLM: Refused to delete conversation with mismatched registry scope",
+        error: summarizeScopeValidationFailure(scopeValidation),
       },
       log,
     );
@@ -433,6 +501,64 @@ export async function finalizeConversationDeletion(
     () => (deps.cancelPendingRequest || defaultCancelPendingRequest)(conversationKey),
     log,
   );
+
+  if (normalizedTarget.conversationSystem === "claude_code") {
+    await runStep(
+      result,
+      "claude_session",
+      "LLM: Failed to invalidate deleted Claude conversation",
+      () => operations.invalidateClaudeConversation(conversationKey, normalizedTarget),
+      log,
+    );
+  }
+
+  const codexThreadId =
+    normalizedTarget.conversationSystem === "codex"
+      ? normalizeProviderSessionId(normalizedTarget.providerSessionId)
+      : "";
+  if (codexThreadId) {
+    const preflightErrorCount = result.errors.length;
+    await runStep(
+      result,
+      "message_rows",
+      "LLM: Failed to validate local conversation rows before archiving Codex thread",
+      () => operations.preflightDeleteLocalConversationRows(normalizedTarget),
+      log,
+    );
+    if (result.errors.length > preflightErrorCount) {
+      result.blocked = true;
+      return result;
+    }
+    try {
+      await operations.archiveCodexThread(codexThreadId);
+    } catch (error) {
+      result.blocked = true;
+      recordIssue(
+        result,
+        "errors",
+        {
+          code: "codex_thread_archive",
+          message:
+            "LLM: Failed to archive Codex thread; local conversation was not deleted",
+          error,
+        },
+        log,
+      );
+      return result;
+    }
+  }
+
+  const localDeleteErrorCount = result.errors.length;
+  await runStep(
+    result,
+    "message_rows",
+    "LLM: Failed to delete local conversation rows",
+    () => operations.deleteLocalConversationRows(normalizedTarget),
+    log,
+  );
+  if (result.errors.length > localDeleteErrorCount) {
+    return result;
+  }
   await runStep(
     result,
     "runtime_cache",
@@ -457,55 +583,6 @@ export async function finalizeConversationDeletion(
       message: "LLM: Failed to fully clear deleted agent conversation state",
     });
   }
-
-  if (normalizedTarget.conversationSystem === "claude_code") {
-    await runStep(
-      result,
-      "claude_session",
-      "LLM: Failed to invalidate deleted Claude conversation",
-      () => operations.invalidateClaudeConversation(conversationKey, normalizedTarget),
-      log,
-    );
-  }
-
-  const codexThreadId =
-    normalizedTarget.conversationSystem === "codex"
-      ? normalizeProviderSessionId(normalizedTarget.providerSessionId)
-      : "";
-  if (codexThreadId) {
-    try {
-      await operations.archiveCodexThread(codexThreadId);
-    } catch (error) {
-      result.blocked = true;
-      recordIssue(
-        result,
-        "errors",
-        {
-          code: "codex_thread_archive",
-          message:
-            "LLM: Failed to archive Codex thread; local conversation was not deleted",
-          error,
-        },
-        log,
-      );
-      return result;
-    }
-  }
-
-  await runStep(
-    result,
-    "message_rows",
-    "LLM: Failed to clear deleted conversation messages",
-    () => clearMessageRows(operations, normalizedTarget),
-    log,
-  );
-  await runStep(
-    result,
-    "catalog_row",
-    "LLM: Failed to delete conversation catalog row",
-    () => deleteCatalogRow(operations, normalizedTarget),
-    log,
-  );
   await runStep(
     result,
     "attachment_refs",

@@ -6,6 +6,8 @@ export type ConversationDraftSummary = {
   providerSessionId?: string | null;
   scopedConversationKey?: string | null;
   userTurnCount?: number | null;
+  title?: string | null;
+  isDraft?: boolean | null;
 };
 
 export type StandaloneDraftSummary = ConversationDraftSummary;
@@ -17,12 +19,27 @@ function normalizePositiveInt(value: unknown): number | null {
 }
 
 function hasNoUserTurns(summary: ConversationDraftSummary): boolean {
+  if (summary.isDraft === false) return false;
   const userTurnCount = Number(summary.userTurnCount);
   return Number.isFinite(userTurnCount) && userTurnCount === 0;
 }
 
 function hasNoProviderThreadState(summary: ConversationDraftSummary): boolean {
   return !summary.providerSessionId?.trim() && !summary.scopedConversationKey?.trim();
+}
+
+const GENERATED_DRAFT_TITLES = new Set([
+  "new chat",
+  "new claude chat",
+  "new claude paper chat",
+  "new codex chat",
+  "new codex paper chat",
+]);
+
+function hasMeaningfulConversationTitle(summary: ConversationDraftSummary): boolean {
+  const title = typeof summary.title === "string" ? summary.title.trim() : "";
+  if (!title) return false;
+  return !GENERATED_DRAFT_TITLES.has(title.toLowerCase());
 }
 
 function getDraftScopeKey(summary: ConversationDraftSummary): string | null {
@@ -79,7 +96,11 @@ export function isReusableConversationDraft(params: {
       return false;
     }
   }
-  return hasNoUserTurns(summary) && hasNoProviderThreadState(summary);
+  return (
+    hasNoUserTurns(summary) &&
+    hasNoProviderThreadState(summary) &&
+    !hasMeaningfulConversationTitle(summary)
+  );
 }
 
 export function findReusableConversationDraft<

@@ -1,6 +1,4 @@
-import type {
-  AgentToolInputValidation,
-} from "../types";
+import type { AgentToolInputValidation } from "../types";
 import type {
   ChatAttachment,
   PaperContentSourceMode,
@@ -30,8 +28,9 @@ export function normalizePositiveInt(value: unknown): number | undefined {
 }
 
 export function normalizePositiveIntArray(value: unknown): number[] | null {
-  if (!Array.isArray(value)) return null;
-  const out = value
+  const entries = normalizeBracketedArray(value);
+  if (!entries) return null;
+  const out = entries
     .map((entry) => normalizePositiveInt(entry))
     .filter((entry): entry is number => Number.isFinite(entry));
   if (!out.length) return null;
@@ -39,12 +38,27 @@ export function normalizePositiveIntArray(value: unknown): number[] | null {
 }
 
 export function normalizeStringArray(value: unknown): string[] | null {
-  if (!Array.isArray(value)) return null;
-  const out = value
+  const entries = normalizeBracketedArray(value);
+  if (!entries) return null;
+  const out = entries
     .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
     .filter(Boolean);
   if (!out.length) return null;
   return Array.from(new Set(out));
+}
+
+function normalizeBracketedArray(value: unknown): unknown[] | null {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return null;
+  try {
+    const repaired = trimmed.replace(/,\s*]/g, "]");
+    const parsed = JSON.parse(repaired);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch (_error) {
+    return null;
+  }
 }
 
 function normalizePaperContentSourceMode(

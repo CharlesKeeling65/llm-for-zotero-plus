@@ -1,6 +1,7 @@
 import type { PaperContextRef } from "./types";
 import { sanitizeText } from "./textUtils";
 import { isMineruSyncPackageAttachment } from "./mineruSync";
+import { isPdfContextAttachment } from "./contextAttachmentSupport";
 
 export type PaperSearchAttachmentCandidate = {
   contextItemId: number;
@@ -17,6 +18,9 @@ export type PaperSearchGroupCandidate = Omit<
   score: number;
   modifiedAt: number;
   addedAt?: number;
+  collectionIds: number[];
+  tags: string[];
+  tagsAuto: string[];
   itemKind?: "standalone-note";
 };
 
@@ -31,6 +35,15 @@ export type PaperBrowseCollectionCandidate = {
   name: string;
   childCollections: PaperBrowseCollectionCandidate[];
   papers: PaperSearchGroupCandidate[];
+};
+
+export type PaperSearchTagCandidate = {
+  name: string;
+  normalizedName: string;
+  count: number;
+  includeAutomatic: boolean;
+  isAutomatic: boolean;
+  score: number;
 };
 
 type IndexedPaperAttachment = {
@@ -50,6 +63,8 @@ type IndexedPaperCandidate = {
   modifiedAt: number;
   addedAt: number;
   collectionIDs: number[];
+  tags: string[];
+  tagsAuto: string[];
   itemKind?: "standalone-note";
   normalized: {
     title: string;
@@ -81,6 +96,8 @@ type PaperSearchScore = {
   matchedTokens: Set<string>;
 };
 
+type ZoteroTagLike = string | { tag?: unknown; name?: unknown; type?: unknown };
+
 const DEFAULT_PAPER_SEARCH_LIMIT = 20;
 const MATCH_FIELD_PRIORITY = [
   "citationKey",
@@ -98,7 +115,10 @@ const paperSearchLibraryLoadTasks = new Map<
   Promise<PaperSearchLibraryIndex>
 >();
 const allItemsLibraryIndexCache = new Map<number, AllItemsLibraryIndex>();
-const allItemsLibraryLoadTasks = new Map<number, Promise<AllItemsLibraryIndex>>();
+const allItemsLibraryLoadTasks = new Map<
+  number,
+  Promise<AllItemsLibraryIndex>
+>();
 
 function normalizeText(value: unknown): string {
   if (typeof value !== "string") return "";
@@ -177,11 +197,7 @@ function getPdfChildAttachments(item: Zotero.Item): Zotero.Item[] {
   const attachments = item.getAttachments();
   for (const attachmentId of attachments) {
     const attachment = Zotero.Items.get(attachmentId);
-    if (
-      attachment &&
-      attachment.isAttachment() &&
-      attachment.attachmentContentType === "application/pdf"
-    ) {
+    if (isPdfContextAttachment(attachment)) {
       out.push(attachment);
     }
   }
@@ -227,7 +243,10 @@ function getCreatorDisplayName(
   creator: _ZoteroTypes.Item.Creator | null | undefined,
 ): string {
   if (!creator) return "";
-  const parts = [normalizeText(creator.firstName), normalizeText(creator.lastName)]
+  const parts = [
+    normalizeText(creator.firstName),
+    normalizeText(creator.lastName),
+  ]
     .filter(Boolean)
     .join(" ")
     .trim();
@@ -265,7 +284,9 @@ function collectVenue(item: Zotero.Item): string {
     "proceedingsTitle",
     "conferenceName",
   ];
-  const values = fields.map((field) => getItemFieldText(item, field)).filter(Boolean);
+  const values = fields
+    .map((field) => getItemFieldText(item, field))
+    .filter(Boolean);
   if (!values.length) return "";
   const deduped: string[] = [];
   const seen = new Set<string>();
@@ -290,14 +311,54 @@ function getCollectionIDs(item: Zotero.Item): number[] {
   }
 }
 
+function normalizePaperSearchTagName(value: unknown): string | null {
+  const name = typeof value === "string" ? value.trim() : "";
+  return name ? name : null;
+}
+
+export function getPaperSearchItemTagNames(
+  item: Zotero.Item | null | undefined,
+): {
+  manual: string[];
+  automatic: string[];
+} {
+  const manual = new Set<string>();
+  const automatic = new Set<string>();
+  try {
+    const tags = (
+      item as { getTags?: () => ZoteroTagLike[] } | null
+    )?.getTags?.();
+    if (!Array.isArray(tags)) return { manual: [], automatic: [] };
+    for (const raw of tags) {
+      const rawName =
+        typeof raw === "string" ? raw : (raw?.tag ?? raw?.name ?? "");
+      const name = normalizePaperSearchTagName(rawName);
+      if (!name) continue;
+      const type = typeof raw === "string" ? undefined : Number(raw.type);
+      if (type === 1) automatic.add(name);
+      else manual.add(name);
+    }
+  } catch {
+    /* ignore malformed Zotero tag records */
+  }
+  return {
+    manual: [...manual].sort((a, b) => a.localeCompare(b)),
+    automatic: [...automatic].sort((a, b) => a.localeCompare(b)),
+  };
+}
+
 function resolveLibraryDisplayName(libraryID: number): string {
   try {
-    const libraries = (Zotero as unknown as {
-      Libraries?: {
-        getName?: (targetLibraryID: number) => unknown;
-        get?: (targetLibraryID: number) => { name?: unknown } | null | undefined;
-      };
-    }).Libraries;
+    const libraries = (
+      Zotero as unknown as {
+        Libraries?: {
+          getName?: (targetLibraryID: number) => unknown;
+          get?: (
+            targetLibraryID: number,
+          ) => { name?: unknown } | null | undefined;
+        };
+      }
+    ).Libraries;
     const directName = normalizeText(libraries?.getName?.(libraryID));
     if (directName) return directName;
     const library = libraries?.get?.(libraryID);
@@ -309,7 +370,9 @@ function resolveLibraryDisplayName(libraryID: number): string {
   return "My Library";
 }
 
-function buildIndexedCandidate(item: Zotero.Item): IndexedPaperCandidate | null {
+function buildIndexedCandidate(
+  item: Zotero.Item,
+): IndexedPaperCandidate | null {
   if (!item?.isRegularItem?.()) return null;
   const attachments = buildIndexedAttachments(getPdfChildAttachments(item));
   if (!attachments.length) return null;
@@ -322,6 +385,7 @@ function buildIndexedCandidate(item: Zotero.Item): IndexedPaperCandidate | null 
   const shortTitle = getItemFieldText(item, "shortTitle");
   const doi = getItemFieldText(item, "DOI");
   const venue = collectVenue(item);
+  const tagNames = getPaperSearchItemTagNames(item);
 
   return {
     itemId: item.id,
@@ -333,6 +397,8 @@ function buildIndexedCandidate(item: Zotero.Item): IndexedPaperCandidate | null 
     modifiedAt: toModifiedTimestamp(item.dateModified),
     addedAt: getItemAddedTimestamp(item),
     collectionIDs: getCollectionIDs(item),
+    tags: tagNames.manual,
+    tagsAuto: tagNames.automatic,
     normalized: {
       title: normalizePaperSearchText(title),
       shortTitle: normalizePaperSearchText(shortTitle),
@@ -352,7 +418,8 @@ function buildIndexedCollection(
     collectionId: collection.id,
     name: normalizeText(collection.name) || `Collection ${collection.id}`,
     parentID:
-      Number.isFinite(Number(collection.parentID)) && Number(collection.parentID) > 0
+      Number.isFinite(Number(collection.parentID)) &&
+      Number(collection.parentID) > 0
         ? Math.floor(Number(collection.parentID))
         : 0,
     childCollectionIDs: collection
@@ -392,7 +459,9 @@ async function buildPaperSearchLibraryIndex(
   return {
     libraryID,
     candidates,
-    collections: collections.map((collection) => buildIndexedCollection(collection)),
+    collections: collections.map((collection) =>
+      buildIndexedCollection(collection),
+    ),
   };
 }
 
@@ -447,7 +516,9 @@ function buildVisibleCandidate(
       ? Math.floor(excludeContextItemId)
       : null;
   const attachments = candidate.attachments
-    .filter((attachment) => !excludeId || attachment.contextItemId !== excludeId)
+    .filter(
+      (attachment) => !excludeId || attachment.contextItemId !== excludeId,
+    )
     .map((attachment) => ({
       contextItemId: attachment.contextItemId,
       title: attachment.title,
@@ -464,6 +535,9 @@ function buildVisibleCandidate(
     score: 0,
     modifiedAt: candidate.modifiedAt,
     addedAt: candidate.addedAt,
+    collectionIds: candidate.collectionIDs,
+    tags: candidate.tags,
+    tagsAuto: candidate.tagsAuto,
   };
 }
 
@@ -535,7 +609,11 @@ function scoreField(
   return phraseScore + tokenScore;
 }
 
-function scoreAttachmentTitle(title: string, query: string, tokens: string[]): number {
+function scoreAttachmentTitle(
+  title: string,
+  query: string,
+  tokens: string[],
+): number {
   const normalizedTitle = normalizePaperSearchText(title);
   if (!normalizedTitle) return 0;
   const scoreState: PaperSearchScore = {
@@ -590,7 +668,10 @@ function scoreCandidate(
     scoreNormalizedField(candidate.normalized.shortTitle, query, 1, 1, 1) > 0
   ) {
     score += 500;
-    for (const token of getMatchingTokens(candidate.normalized.shortTitle, tokens)) {
+    for (const token of getMatchingTokens(
+      candidate.normalized.shortTitle,
+      tokens,
+    )) {
       scoreState.matchedTokens.add(token);
     }
   }
@@ -608,7 +689,10 @@ function scoreCandidate(
       scoreState.matchedTokens.add(token);
     }
   } else {
-    const yearTokenMatches = getMatchingTokens(candidate.normalized.year, tokens);
+    const yearTokenMatches = getMatchingTokens(
+      candidate.normalized.year,
+      tokens,
+    );
     if (yearTokenMatches.length > 0) {
       score += yearTokenMatches.length * 40;
       for (const token of yearTokenMatches) {
@@ -642,7 +726,9 @@ function scoreCandidate(
     ]
       .filter(Boolean)
       .join(" ");
-    if (getMatchingTokens(titleAndCreatorBlob, tokens).length === tokens.length) {
+    if (
+      getMatchingTokens(titleAndCreatorBlob, tokens).length === tokens.length
+    ) {
       score += 120;
     }
   }
@@ -665,7 +751,10 @@ export function parsePaperSearchSlashToken(
   while (slashIndex >= 0) {
     if (slashIndex === 0 || /\s/u.test(safeInput[slashIndex - 1] || "")) {
       let tokenEnd = slashIndex + 1;
-      while (tokenEnd < safeInput.length && !/\s/u.test(safeInput[tokenEnd] || "")) {
+      while (
+        tokenEnd < safeInput.length &&
+        !/\s/u.test(safeInput[tokenEnd] || "")
+      ) {
         tokenEnd += 1;
       }
       if (normalizedCaret > tokenEnd) {
@@ -703,7 +792,10 @@ export function parseAtSearchToken(
   while (atIndex >= 0) {
     if (atIndex === 0 || /\s/u.test(safeInput[atIndex - 1] || "")) {
       let tokenEnd = atIndex + 1;
-      while (tokenEnd < safeInput.length && !/\s/u.test(safeInput[tokenEnd] || "")) {
+      while (
+        tokenEnd < safeInput.length &&
+        !/\s/u.test(safeInput[tokenEnd] || "")
+      ) {
         tokenEnd += 1;
       }
       if (normalizedCaret > tokenEnd) {
@@ -801,8 +893,8 @@ export async function listLibraryPaperCandidates(
   const libraryIndex = await getPaperSearchLibraryIndex(Math.floor(libraryID));
   const visibleCandidates = libraryIndex.candidates
     .map((candidate) => buildVisibleCandidate(candidate, excludeContextItemId))
-    .filter(
-      (candidate): candidate is PaperSearchGroupCandidate => Boolean(candidate),
+    .filter((candidate): candidate is PaperSearchGroupCandidate =>
+      Boolean(candidate),
     )
     .sort((a, b) => {
       const modifiedDelta = b.modifiedAt - a.modifiedAt;
@@ -885,13 +977,16 @@ type AllItemsLibraryIndex = {
 
 const ZOTERO_NOTE_CONTENT_TYPE = "application/x-zotero-note";
 
-function buildIndexedItemCandidate(item: Zotero.Item): IndexedPaperCandidate | null {
+function buildIndexedItemCandidate(
+  item: Zotero.Item,
+): IndexedPaperCandidate | null {
   // Standalone notes — represent as a single synthetic attachment pointing to itself
   if ((item as any).isNote?.() && !item.parentID) {
     const title =
       normalizeText(
         (item as any).getNoteTitle?.() || item.getDisplayTitle?.() || "",
       ) || `Note ${item.id}`;
+    const tagNames = getPaperSearchItemTagNames(item);
     return {
       itemId: item.id,
       title,
@@ -907,6 +1002,8 @@ function buildIndexedItemCandidate(item: Zotero.Item): IndexedPaperCandidate | n
       modifiedAt: toModifiedTimestamp(item.dateModified),
       addedAt: getItemAddedTimestamp(item),
       collectionIDs: getCollectionIDs(item),
+      tags: tagNames.manual,
+      tagsAuto: tagNames.automatic,
       normalized: {
         title: normalizePaperSearchText(title),
         shortTitle: "",
@@ -957,6 +1054,7 @@ function buildIndexedItemCandidate(item: Zotero.Item): IndexedPaperCandidate | n
   const shortTitle = getItemFieldText(item, "shortTitle");
   const doi = getItemFieldText(item, "DOI");
   const venue = collectVenue(item);
+  const tagNames = getPaperSearchItemTagNames(item);
 
   return {
     itemId: item.id,
@@ -968,6 +1066,8 @@ function buildIndexedItemCandidate(item: Zotero.Item): IndexedPaperCandidate | n
     modifiedAt: toModifiedTimestamp(item.dateModified),
     addedAt: getItemAddedTimestamp(item),
     collectionIDs: getCollectionIDs(item),
+    tags: tagNames.manual,
+    tagsAuto: tagNames.automatic,
     normalized: {
       title: normalizePaperSearchText(title),
       shortTitle: normalizePaperSearchText(shortTitle),
@@ -980,11 +1080,18 @@ function buildIndexedItemCandidate(item: Zotero.Item): IndexedPaperCandidate | n
   };
 }
 
-async function buildAllItemsLibraryIndex(libraryID: number): Promise<AllItemsLibraryIndex> {
+async function buildAllItemsLibraryIndex(
+  libraryID: number,
+): Promise<AllItemsLibraryIndex> {
   let items: Zotero.Item[] = [];
   let collections: Zotero.Collection[] = [];
   try {
-    const allItems: Zotero.Item[] = await Zotero.Items.getAll(libraryID, true, false, false);
+    const allItems: Zotero.Item[] = await Zotero.Items.getAll(
+      libraryID,
+      true,
+      false,
+      false,
+    );
     items = allItems.filter((item) => {
       if ((item as any).isNote?.()) return !item.parentID;
       if (item.isAttachment?.()) return false;
@@ -1007,7 +1114,9 @@ async function buildAllItemsLibraryIndex(libraryID: number): Promise<AllItemsLib
   };
 }
 
-async function getAllItemsLibraryIndex(libraryID: number): Promise<AllItemsLibraryIndex> {
+async function getAllItemsLibraryIndex(
+  libraryID: number,
+): Promise<AllItemsLibraryIndex> {
   const cached = allItemsLibraryIndexCache.get(libraryID);
   if (cached) return cached;
   const pending = allItemsLibraryLoadTasks.get(libraryID);
@@ -1058,6 +1167,9 @@ function buildVisibleItemCandidate(
     score: 0,
     modifiedAt: candidate.modifiedAt,
     addedAt: candidate.addedAt,
+    collectionIds: candidate.collectionIDs,
+    tags: candidate.tags,
+    tagsAuto: candidate.tagsAuto,
   };
 }
 
@@ -1095,14 +1207,25 @@ export async function searchAllItemCandidates(
   if (!queryTokens.length) return [];
 
   const index = await getAllItemsLibraryIndex(Math.floor(libraryID));
-  const rankedCandidates: Array<{ candidate: PaperSearchGroupCandidate; matchedTokenCount: number }> = [];
+  const rankedCandidates: Array<{
+    candidate: PaperSearchGroupCandidate;
+    matchedTokenCount: number;
+  }> = [];
 
   for (const indexedCandidate of index.candidates) {
     const visibleCandidate = buildVisibleItemCandidate(indexedCandidate);
-    const scored = scoreCandidate(indexedCandidate, visibleCandidate, normalizedQuery, queryTokens);
+    const scored = scoreCandidate(
+      indexedCandidate,
+      visibleCandidate,
+      normalizedQuery,
+      queryTokens,
+    );
     if (!scored) continue;
     visibleCandidate.score = scored.score;
-    rankedCandidates.push({ candidate: visibleCandidate, matchedTokenCount: scored.matchedTokenCount });
+    rankedCandidates.push({
+      candidate: visibleCandidate,
+      matchedTokenCount: scored.matchedTokenCount,
+    });
   }
 
   rankedCandidates.sort((a, b) => {
@@ -1119,6 +1242,7 @@ export async function searchAllItemCandidates(
 export { ZOTERO_NOTE_CONTENT_TYPE };
 
 const DEFAULT_COLLECTION_SEARCH_LIMIT = 5;
+const DEFAULT_TAG_SEARCH_LIMIT = 5;
 
 export async function searchCollectionCandidates(
   libraryID: number,
@@ -1178,6 +1302,104 @@ export async function searchCollectionCandidates(
   }));
 }
 
+export async function searchTagCandidates(
+  libraryID: number,
+  query: string,
+  limit = DEFAULT_TAG_SEARCH_LIMIT,
+): Promise<PaperSearchTagCandidate[]> {
+  if (!Number.isFinite(libraryID) || libraryID <= 0) return [];
+  const normalizedQuery = normalizePaperSearchText(query);
+  if (!normalizedQuery) return [];
+  const normalizedLimit = Number.isFinite(limit)
+    ? Math.max(1, Math.floor(limit))
+    : DEFAULT_TAG_SEARCH_LIMIT;
+  const queryTokens = getSearchTokens(normalizedQuery);
+  if (!queryTokens.length) return [];
+
+  const index = await getAllItemsLibraryIndex(Math.floor(libraryID));
+  const ranked = new Map<
+    string,
+    {
+      name: string;
+      itemIds: Set<number>;
+      manualItemIds: Set<number>;
+      automaticItemIds: Set<number>;
+      score: number;
+      matchedTokenCount: number;
+    }
+  >();
+
+  const addTag = (
+    candidate: IndexedPaperCandidate,
+    rawName: string,
+    isAutomatic: boolean,
+  ): void => {
+    const name = normalizePaperSearchTagName(rawName);
+    if (!name) return;
+    const normalizedName = normalizePaperSearchText(name);
+    if (!normalizedName) return;
+    const scoreState: PaperSearchScore = {
+      score: 0,
+      matchedTokens: new Set<string>(),
+    };
+    const tagScore = scoreField(
+      scoreState,
+      normalizedName,
+      normalizedQuery,
+      queryTokens,
+      { exact: 1000, prefix: 900, contains: 700, tokenBonus: 80 },
+    );
+    if (tagScore <= 0) return;
+
+    let entry = ranked.get(name);
+    if (!entry) {
+      entry = {
+        name,
+        itemIds: new Set<number>(),
+        manualItemIds: new Set<number>(),
+        automaticItemIds: new Set<number>(),
+        score: tagScore,
+        matchedTokenCount: scoreState.matchedTokens.size,
+      };
+      ranked.set(name, entry);
+    }
+    entry.itemIds.add(candidate.itemId);
+    if (isAutomatic) entry.automaticItemIds.add(candidate.itemId);
+    else entry.manualItemIds.add(candidate.itemId);
+    entry.score = Math.max(entry.score, tagScore);
+    entry.matchedTokenCount = Math.max(
+      entry.matchedTokenCount,
+      scoreState.matchedTokens.size,
+    );
+  };
+
+  for (const candidate of index.candidates) {
+    for (const tag of candidate.tags) addTag(candidate, tag, false);
+    for (const tag of candidate.tagsAuto) addTag(candidate, tag, true);
+  }
+
+  return [...ranked.values()]
+    .sort((a, b) => {
+      const scoreDelta = b.score - a.score;
+      if (scoreDelta !== 0) return scoreDelta;
+      const matchedTokenDelta = b.matchedTokenCount - a.matchedTokenCount;
+      if (matchedTokenDelta !== 0) return matchedTokenDelta;
+      const countDelta = b.itemIds.size - a.itemIds.size;
+      if (countDelta !== 0) return countDelta;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    })
+    .slice(0, normalizedLimit)
+    .map((entry) => ({
+      name: entry.name,
+      normalizedName: entry.name,
+      count: entry.itemIds.size,
+      includeAutomatic: entry.automaticItemIds.size > 0,
+      isAutomatic:
+        entry.automaticItemIds.size > 0 && entry.manualItemIds.size === 0,
+      score: entry.score,
+    }));
+}
+
 export async function browseAllItemCandidates(
   libraryID: number,
 ): Promise<PaperBrowseCollectionCandidate[]> {
@@ -1185,7 +1407,10 @@ export async function browseAllItemCandidates(
   const index = await getAllItemsLibraryIndex(Math.floor(libraryID));
   const visibleCandidates = new Map<number, PaperSearchGroupCandidate>();
   for (const candidate of index.candidates) {
-    visibleCandidates.set(candidate.itemId, buildVisibleItemCandidate(candidate));
+    visibleCandidates.set(
+      candidate.itemId,
+      buildVisibleItemCandidate(candidate),
+    );
   }
 
   const collectionMap = new Map<number, PaperBrowseCollectionCandidate>();

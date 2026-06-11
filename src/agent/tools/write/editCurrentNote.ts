@@ -9,76 +9,10 @@ import {
   readNoteSnapshot,
   resolveParentItemForNoteTarget,
 } from "../../../modules/contextPanel/notes";
+import { importLocalImagesIntoNote } from "../../../modules/contextPanel/noteImages";
 import { escapeNoteHtml } from "../../../modules/contextPanel/textUtils";
-import { fileUrlToPath } from "../../../utils/localPath";
 import { ok, fail, validateObject, normalizePositiveInt } from "../shared";
 import { executeAndRecordUndo } from "./mutateLibraryShared";
-
-/**
- * Scan note content for local file image references (![alt](file:///path) or
- * <img src="file:///path" />) and import them as Zotero embedded note images.
- * Returns the content with references replaced by data-attachment-key img tags.
- */
-async function importLocalImages(
-  content: string,
-  noteItemId: number,
-  zoteroGateway: ZoteroGateway,
-): Promise<string> {
-  // Match both markdown ![alt](file://...) and HTML <img src="file://..." />
-  const markdownPattern = /!\[([^\]]*)\]\((file:\/\/\/?[^)]+)\)/g;
-  const htmlPattern = /<img\s+[^>]*src\s*=\s*"(file:\/\/\/?[^"]+)"[^>]*\/?>/gi;
-
-  let result = content;
-
-  // Process markdown images
-  const mdMatches = [...content.matchAll(markdownPattern)];
-  for (const match of mdMatches) {
-    const fullMatch = match[0];
-    const alt = match[1];
-    const filePath = fileUrlToPath(match[2]);
-    if (!filePath) continue;
-    try {
-      const imported = await zoteroGateway.importNoteImage({
-        imagePath: filePath,
-        noteItemId,
-      });
-      if (imported?.key) {
-        result = result.replace(
-          fullMatch,
-          `<img data-attachment-key="${imported.key}" alt="${alt}" />`,
-        );
-      }
-    } catch {
-      // Leave original reference if import fails
-    }
-  }
-
-  // Process HTML img tags with file:// src
-  const htmlMatches = [...result.matchAll(htmlPattern)];
-  for (const match of htmlMatches) {
-    const fullMatch = match[0];
-    const filePath = fileUrlToPath(match[1]);
-    if (!filePath) continue;
-    const altMatch = fullMatch.match(/alt\s*=\s*"([^"]*)"/i);
-    const alt = altMatch?.[1] || "";
-    try {
-      const imported = await zoteroGateway.importNoteImage({
-        imagePath: filePath,
-        noteItemId,
-      });
-      if (imported?.key) {
-        result = result.replace(
-          fullMatch,
-          `<img data-attachment-key="${imported.key}" alt="${alt}" />`,
-        );
-      }
-    } catch {
-      // Leave original reference if import fails
-    }
-  }
-
-  return result;
-}
 
 type NotePatch = { find: string; replace: string };
 
@@ -855,7 +789,7 @@ export function createEditCurrentNoteTool(
         // Import images into this note
         let finalContent = input.content;
         try {
-          finalContent = await importLocalImages(
+          finalContent = await importLocalImagesIntoNote(
             input.content,
             noteId,
             zoteroGateway,
@@ -914,7 +848,7 @@ export function createEditCurrentNoteTool(
         let contentToAppend = input.content;
         if (hasLocalImages) {
           try {
-            contentToAppend = await importLocalImages(
+            contentToAppend = await importLocalImagesIntoNote(
               input.content,
               snapshot.noteId,
               zoteroGateway,
@@ -958,7 +892,7 @@ export function createEditCurrentNoteTool(
       let contentToSave = input.content;
       if (hasLocalImages && input.noteId) {
         try {
-          contentToSave = await importLocalImages(
+          contentToSave = await importLocalImagesIntoNote(
             input.content,
             input.noteId,
             zoteroGateway,

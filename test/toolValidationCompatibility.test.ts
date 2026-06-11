@@ -198,9 +198,72 @@ describe("tool validation compatibility", function () {
       await tool.shouldRequireConfirmation?.(modeAlias.value, baseContext),
     );
 
+    const createAlias = tool.validate({
+      action: "create",
+      file_path: "/tmp/create-alias.py",
+      text: "print('saved')",
+    });
+    assert.isTrue(createAlias.ok);
+    if (!createAlias.ok) return;
+    assert.equal(createAlias.value.action, "write");
+    assert.equal(createAlias.value.filePath, "/tmp/create-alias.py");
+    assert.equal(createAlias.value.content, "print('saved')");
+
+    const opAlias = tool.validate({
+      op: "save_file",
+      filepath: "/tmp/save-alias.py",
+      contents: "print('saved from op')",
+    });
+    assert.isTrue(opAlias.ok);
+    if (!opAlias.ok) return;
+    assert.equal(opAlias.value.action, "write");
+    assert.equal(opAlias.value.filePath, "/tmp/save-alias.py");
+    assert.equal(opAlias.value.content, "print('saved from op')");
+
+    const operationAlias = tool.validate({
+      operation: "read_file",
+      file_path: "/tmp/read-alias.md",
+    });
+    assert.isTrue(operationAlias.ok);
+    if (!operationAlias.ok) return;
+    assert.equal(operationAlias.value.action, "read");
+    assert.equal(operationAlias.value.filePath, "/tmp/read-alias.md");
+
     const missingAction = tool.validate({
       filePath: "/tmp/no-action.md",
     });
     assert.isFalse(missingAction.ok);
+
+    for (const action of ["append", "edit", "update", "delete", "execute"]) {
+      const unsupported = tool.validate({
+        action,
+        filePath: `/tmp/${action}.md`,
+        content: "unsafe",
+      });
+      assert.isFalse(unsupported.ok);
+      if (!unsupported.ok) {
+        assert.include(unsupported.error, "action must be");
+      }
+    }
+
+    const unsupportedActionWinsPrecedence = tool.validate({
+      action: "append",
+      op: "save_file",
+      filePath: "/tmp/append.md",
+      content: "unsafe",
+    });
+    assert.isFalse(unsupportedActionWinsPrecedence.ok);
+    if (!unsupportedActionWinsPrecedence.ok) {
+      assert.include(unsupportedActionWinsPrecedence.error, "action must be");
+    }
+
+    const missingWriteContent = tool.validate({
+      action: "save",
+      filePath: "/tmp/missing-content.md",
+    });
+    assert.isFalse(missingWriteContent.ok);
+    if (!missingWriteContent.ok) {
+      assert.include(missingWriteContent.error, "content is required");
+    }
   });
 });

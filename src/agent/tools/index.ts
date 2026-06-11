@@ -13,7 +13,6 @@ import { createViewPdfPagesTool } from "./read/viewPdfPages";
 import { createReadAttachmentTool } from "./read/readAttachment";
 import { clearPdfToolCaches } from "./read/pdfToolUtils";
 import { createSearchLiteratureOnlineTool } from "./read/searchLiteratureOnline";
-import { createWebSearchTool } from "./read/webSearch";
 import { createToolResultReadTool } from "./read/toolResultRead";
 import { createDelegatingTool, createRenamedTool } from "./facade";
 
@@ -33,7 +32,7 @@ import { createFileIOTool } from "./write/fileIO";
 import { createZoteroScriptTool } from "./write/zoteroScript";
 import { PdfPageService } from "../services/pdfPageService";
 import type { AgentToolDefinition } from "../types";
-import { fail, ok, validateObject } from "./shared";
+import { fail, ok, PAPER_CONTEXT_REF_SCHEMA, validateObject } from "./shared";
 
 type BuiltInAgentToolDeps = {
   zoteroGateway: ZoteroGateway;
@@ -43,6 +42,34 @@ type BuiltInAgentToolDeps = {
 };
 
 type ToolGuidance = NonNullable<AgentToolDefinition["guidance"]>;
+
+const STRING_ARRAY_SCHEMA = {
+  type: "array" as const,
+  items: { type: "string" as const },
+};
+
+const NUMBER_ARRAY_SCHEMA = {
+  type: "array" as const,
+  items: { type: "number" as const },
+};
+
+const METADATA_PATCH_SCHEMA = {
+  type: "object" as const,
+  additionalProperties: true,
+  description: "Metadata fields to update.",
+};
+
+const LIBRARY_UPDATE_OPERATION_SCHEMA = {
+  type: "object" as const,
+  additionalProperties: true,
+  properties: {
+    id: { type: "string" as const },
+    itemId: { type: "number" as const },
+    paperContext: PAPER_CONTEXT_REF_SCHEMA,
+    metadata: METADATA_PATCH_SCHEMA,
+    patch: METADATA_PATCH_SCHEMA,
+  },
+};
 
 const LIBRARY_SEARCH_GUIDANCE: ToolGuidance = {
   matches: (request) =>
@@ -55,11 +82,11 @@ const LIBRARY_SEARCH_GUIDANCE: ToolGuidance = {
 
 const LITERATURE_SEARCH_GUIDANCE: ToolGuidance = {
   matches: (request) =>
-    /\b(related papers?|similar papers?|find papers?|search (the )?(internet|literature)|citations?|references?|papers? (by|from)|publications? (by|from))\b/i.test(
+    /\b(related papers?|similar papers?|find papers?|search (the )?(internet|online|web|literature)|online search|web search|citations?|references?|papers? (by|from)|publications? (by|from))\b/i.test(
       request.userText || "",
     ),
   instruction:
-    "When the user explicitly asks to discover, find, or search for papers online, call literature_search and let the review card present the result. Do not use this tool for questions about the content of papers already in context (e.g. counting references, summarizing, explaining)." +
+    "When the user explicitly asks to search online or search the literature, call literature_search with workflow:'answer' by default, analyze the scholarly results, and answer in chat with explicit source attribution. Use workflow:'review' only when the user wants to import/add papers to Zotero, save selected search results to a note, refine results inside the card, or review metadata changes. If the request is not answerable from scholarly sources, say that limitation instead of pretending general web search is available. Do not use this tool for questions about the content of papers already in context (e.g. counting references, summarizing, explaining)." +
     "\n\nSource selection:" +
     "\n- recommendations, references, citations modes -> always use source:'openalex' (only OpenAlex supports these)." +
     "\n- search mode -> source:'openalex' (default, broadest coverage), source:'arxiv' (preprints, CS/ML/physics), or source:'europepmc' (biomedical/life sciences)." +
@@ -75,7 +102,7 @@ const LIBRARY_UPDATE_GUIDANCE: ToolGuidance = {
       request.userText || "",
     ),
   instruction:
-    "For library write operations, the confirmation card is the deliverable; call library_update directly instead of stopping with a prose summary. Use kind:'tags' for tag changes, kind:'collections' for collection membership, and kind:'metadata' for item metadata fields. When the user asks to fix, correct, or enrich metadata from external sources, use literature_search with mode:'metadata' first to fetch canonical data, then continue through the review/update flow. Only call library_update with kind:'metadata' directly when the user provides specific field values to set.",
+    "For library write operations, the confirmation card is the deliverable; call library_update directly instead of stopping with a prose summary. Use kind:'tags' for tag changes, kind:'collections' for collection membership, and kind:'metadata' for item metadata fields. When the user asks to fix, correct, or enrich metadata from external sources, use literature_search with workflow:'review' and mode:'metadata' first to fetch canonical data, then continue through the review/update flow. Only call library_update with kind:'metadata' directly when the user provides specific field values to set.",
 };
 
 const NOTE_WRITE_GUIDANCE: ToolGuidance = {
@@ -140,13 +167,68 @@ function createLibraryUpdateTool(tools: {
     requiresConfirmation: true,
     inputSchema: {
       type: "object",
-      additionalProperties: true,
+      additionalProperties: false,
       required: ["kind"],
       properties: {
         kind: {
           type: "string",
           enum: ["tags", "collections", "metadata"],
         },
+        action: {
+          type: "string",
+          enum: ["add", "remove"],
+          description:
+            "For tags and collections: whether to add or remove entries.",
+        },
+        itemIds: {
+          ...NUMBER_ARRAY_SCHEMA,
+          description: "Zotero item IDs to update.",
+        },
+        tags: {
+          ...STRING_ARRAY_SCHEMA,
+          description: "Tags to add or remove when kind:'tags'.",
+        },
+        assignments: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              itemId: { type: "number" },
+              tags: STRING_ARRAY_SCHEMA,
+              targetCollectionId: { type: "number" },
+              targetCollectionName: { type: "string" },
+            },
+            required: ["itemId"],
+          },
+          description:
+            "Per-item tag or collection assignments for kind:'tags' or kind:'collections'.",
+        },
+        targetCollectionId: {
+          type: "number",
+          description: "Target collection ID for kind:'collections'.",
+        },
+        targetCollectionName: {
+          type: "string",
+          description:
+            "Target collection name for kind:'collections'; resolved in the confirmation card.",
+        },
+        collectionId: {
+          type: "number",
+          description:
+            "Collection ID to remove items from when kind:'collections' and action:'remove'.",
+        },
+        metadata: METADATA_PATCH_SCHEMA,
+        operations: {
+          type: "array",
+          items: LIBRARY_UPDATE_OPERATION_SCHEMA,
+          description: "Batch metadata operations when kind:'metadata'.",
+        },
+        itemId: {
+          type: "number",
+          description: "Single Zotero item ID for kind:'metadata'.",
+        },
+        paperContext: PAPER_CONTEXT_REF_SCHEMA,
       },
     },
     summaries: {
@@ -189,12 +271,33 @@ function createLibraryImportTool(tools: {
     requiresConfirmation: true,
     inputSchema: {
       type: "object",
-      additionalProperties: true,
+      additionalProperties: false,
       required: ["kind"],
       properties: {
         kind: {
           type: "string",
           enum: ["identifiers", "files"],
+        },
+        identifiers: {
+          ...STRING_ARRAY_SCHEMA,
+          description:
+            "DOIs, ISBNs, arXiv IDs, or URLs to import when kind:'identifiers'.",
+        },
+        filePaths: {
+          ...STRING_ARRAY_SCHEMA,
+          description: "Absolute local file paths to import when kind:'files'.",
+        },
+        targetCollectionId: {
+          type: "number",
+          description: "Collection to add imported items to.",
+        },
+        collectionId: {
+          type: "number",
+          description: "Deprecated alias for targetCollectionId.",
+        },
+        libraryID: {
+          type: "number",
+          description: "Target library ID. Defaults to the user's library.",
         },
       },
     },
@@ -236,12 +339,25 @@ function createLibraryDeleteTool(tools: {
     requiresConfirmation: true,
     inputSchema: {
       type: "object",
-      additionalProperties: true,
+      additionalProperties: false,
       required: ["mode"],
       properties: {
         mode: {
           type: "string",
           enum: ["trash", "merge"],
+        },
+        itemIds: {
+          ...NUMBER_ARRAY_SCHEMA,
+          description: "Zotero item IDs to trash when mode:'trash'.",
+        },
+        masterItemId: {
+          type: "number",
+          description: "The surviving master item ID when mode:'merge'.",
+        },
+        otherItemIds: {
+          ...NUMBER_ARRAY_SCHEMA,
+          description:
+            "Duplicate item IDs to merge into the master when mode:'merge'.",
         },
       },
     },
@@ -343,11 +459,10 @@ export function createBuiltInToolRegistry(
       name: "literature_search",
       label: "Search Literature",
       description:
-        "Search scholarly sources and fetch external scholarly metadata through Zotero-aware review/import workflows. Use web_search for general web lookup.",
+        "Search scholarly sources and fetch external scholarly metadata. Use workflow:'answer' for source-cited chat answers, or workflow:'review' for Zotero import/review-card workflows.",
       guidance: LITERATURE_SEARCH_GUIDANCE,
     }),
   );
-  registry.register(createWebSearchTool());
   registry.register(
     createLibraryUpdateTool({
       applyTags,

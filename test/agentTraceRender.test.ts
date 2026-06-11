@@ -1,22 +1,30 @@
 import { assert } from "chai";
+import { readFileSync } from "node:fs";
 import {
+  buildAgentTraceChipDetails,
   buildAgentTraceDisplayItems,
   buildAgentTraceMarkdownForRender,
   getPendingActionButtonLayout,
   renderAgentTrace,
+  renderPendingActionCard,
 } from "../src/modules/contextPanel/agentTrace/render";
 import {
+  resolveAssistantResponseMenuContent,
   renderAssistantMarkdownHtmlForChat,
+  renderAssistantGeneratedImagesInto,
   shouldAttachAssistantResponseContextMenu,
   shouldDecorateInterleavedAgentTraceCitations,
   shouldSuppressAssistantResponseContextMenu,
 } from "../src/modules/contextPanel/chat";
 import {
   extractRenderedMermaidSvg,
+  isSafeRenderedMarkdownAttributeForTests,
+  isSafeRenderedMarkdownElementForTests,
   needsMermaidCytoscapeLayoutHost,
   normalizeMermaidFlowchartLabels,
   normalizeMermaidSourceForTheme,
   polishRenderedMermaidSvg,
+  renderRenderedMarkdownInto,
   resolveMermaidThemeFromColors,
 } from "../src/modules/contextPanel/renderedMarkdown";
 import {
@@ -28,6 +36,10 @@ import type {
   AgentRunEventRecord,
 } from "../src/agent/types";
 import { buildQuoteCitation } from "../src/modules/contextPanel/quoteCitations";
+import {
+  isEmbeddableGeneratedImage,
+  resolveGeneratedImageAsset,
+} from "../src/modules/contextPanel/generatedImageAssets";
 
 class FakeClassList {
   private readonly classes = new Set<string>();
@@ -54,9 +66,11 @@ class FakeElement {
   public textContent = "";
   public type = "";
   public title = "";
+  public disabled = false;
   public attributes: Record<string, string> = {};
   private copyableChildren: FakeElement[] = [];
   private html = "";
+  private listeners = new Map<string, Array<(event: any) => void>>();
 
   constructor(public readonly tagName = "div") {}
 
@@ -101,8 +115,60 @@ class FakeElement {
     return null;
   }
 
-  addEventListener(): void {
-    // Test fake only records tree mutations.
+  addEventListener(type: string, listener: (event: any) => void): void {
+    const existing = this.listeners.get(type) || [];
+    existing.push(listener);
+    this.listeners.set(type, existing);
+  }
+
+  dispatchFakeEvent(type: string): {
+    defaultPrevented: boolean;
+    propagationStopped: boolean;
+    immediatePropagationStopped: boolean;
+  } {
+    const event = {
+      defaultPrevented: false,
+      propagationStopped: false,
+      immediatePropagationStopped: false,
+      preventDefault() {
+        this.defaultPrevented = true;
+      },
+      stopPropagation() {
+        this.propagationStopped = true;
+      },
+      stopImmediatePropagation() {
+        this.immediatePropagationStopped = true;
+      },
+    };
+    for (const listener of this.listeners.get(type) || []) {
+      listener(event);
+    }
+    return event;
+  }
+
+  async dispatchFakeEventAsync(type: string): Promise<{
+    defaultPrevented: boolean;
+    propagationStopped: boolean;
+    immediatePropagationStopped: boolean;
+  }> {
+    const event = {
+      defaultPrevented: false,
+      propagationStopped: false,
+      immediatePropagationStopped: false,
+      preventDefault() {
+        this.defaultPrevented = true;
+      },
+      stopPropagation() {
+        this.propagationStopped = true;
+      },
+      stopImmediatePropagation() {
+        this.immediatePropagationStopped = true;
+      },
+    };
+    await Promise.all(
+      (this.listeners.get(type) || []).map((listener) => listener(event)),
+    );
+    return event;
   }
 
   contains(node: unknown): boolean {
@@ -145,6 +211,23 @@ class FakeElement {
     return null;
   }
 
+  findAllByClass(className: string): FakeElement[] {
+    const matches = this.classList.contains(className) ? [this] : [];
+    for (const child of this.children) {
+      matches.push(...child.findAllByClass(className));
+    }
+    return matches;
+  }
+
+  findAllByTag(tagName: string): FakeElement[] {
+    const normalized = tagName.toLowerCase();
+    const matches = this.tagName.toLowerCase() === normalized ? [this] : [];
+    for (const child of this.children) {
+      matches.push(...child.findAllByTag(normalized));
+    }
+    return matches;
+  }
+
   getCopyableChildren(): FakeElement[] {
     return this.copyableChildren;
   }
@@ -158,9 +241,106 @@ class FakeCopyableElement extends FakeElement {
   }
 }
 
+class ThrowingTemplateElement extends FakeElement {
+  public readonly content = {
+    querySelectorAll: () => [],
+  };
+
+  set innerHTML(_value: string) {
+    throw new Error("template parser unavailable");
+  }
+
+  get innerHTML(): string {
+    return "";
+  }
+}
+
+class OneShotInnerHtmlFailureElement extends FakeElement {
+  private htmlSetCount = 0;
+  private storedHtml = "";
+
+  set innerHTML(value: string) {
+    this.htmlSetCount++;
+    if (this.htmlSetCount === 1) {
+      throw new Error("strict chrome innerHTML rejected fragment");
+    }
+    this.storedHtml = value;
+  }
+
+  get innerHTML(): string {
+    return this.storedHtml;
+  }
+
+  getInnerHtmlSetCount(): number {
+    return this.htmlSetCount;
+  }
+}
+
 const fakeDocument = {
   createElement: (tagName: string) => new FakeElement(tagName),
+  createElementNS: (_namespace: string, tagName: string) =>
+    new FakeElement(tagName),
 } as unknown as Document;
+
+const throwingTemplateDocument = {
+  createElement: (tagName: string) =>
+    tagName === "template"
+      ? new ThrowingTemplateElement(tagName)
+      : new FakeElement(tagName),
+  createElementNS: (_namespace: string, tagName: string) =>
+    new FakeElement(tagName),
+} as unknown as Document;
+
+function collectFakeText(element: FakeElement | null | undefined): string {
+  if (!element) return "";
+  return [element.textContent, ...element.children.map(collectFakeText)].join(
+    "",
+  );
+}
+
+function createSanitizerElement(
+  localName: string,
+  classes: string[] = [],
+  parent: Element | null = null,
+): Element {
+  return {
+    localName,
+    parentElement: parent,
+    parentNode: parent,
+    nodeType: 1,
+    classList: {
+      contains: (cls: string) => classes.includes(cls),
+    },
+  } as unknown as Element;
+}
+
+function createKatexSvgElement(localName: "svg" | "path" | "line"): Element {
+  const katex = createSanitizerElement("span", ["katex"]);
+  const svg = createSanitizerElement("svg", [], katex);
+  return localName === "svg" ? svg : createSanitizerElement(localName, [], svg);
+}
+
+function extractKatexSvgTags(
+  html: string,
+): Array<{ tagName: "svg" | "path" | "line"; attrs: Array<[string, string]> }> {
+  const tags: Array<{
+    tagName: "svg" | "path" | "line";
+    attrs: Array<[string, string]>;
+  }> = [];
+  for (const tagMatch of html.matchAll(/<(svg|path|line)\b([^>]*)>/gi)) {
+    const attrs: Array<[string, string]> = [];
+    for (const attrMatch of tagMatch[2].matchAll(
+      /([A-Za-z_:][\w:.-]*)="([^"]*)"/g,
+    )) {
+      attrs.push([attrMatch[1], attrMatch[2]]);
+    }
+    tags.push({
+      tagName: tagMatch[1].toLowerCase() as "svg" | "path" | "line",
+      attrs,
+    });
+  }
+  return tags;
+}
 
 const obsidianStyleMermaidFixture = [
   "flowchart TB",
@@ -240,10 +420,7 @@ describe("Mermaid rendering helpers", function () {
 
     const normalized = normalizeMermaidFlowchartLabels(source);
 
-    assert.include(
-      normalized,
-      'B["LEC population activity (time cells?)"]',
-    );
+    assert.include(normalized, 'B["LEC population activity (time cells?)"]');
     assert.include(normalized, 'C["Intrinsic drift: over time"]');
     assert.include(normalized, "A[Continuous experience]");
   });
@@ -256,8 +433,7 @@ describe("Mermaid rendering helpers", function () {
   });
 
   it("does not rewrite Mermaid edge labels while normalizing node labels", function () {
-    const source =
-      "flowchart TD\n  A[Bad label?] -->|question [yes?]| B[Done]";
+    const source = "flowchart TD\n  A[Bad label?] -->|question [yes?]| B[Done]";
 
     const normalized = normalizeMermaidFlowchartLabels(source);
 
@@ -298,7 +474,8 @@ describe("Mermaid rendering helpers", function () {
   });
 
   it("adds SVG polish rules for the expanded Mermaid viewer", function () {
-    const svg = '<svg viewBox="0 0 10 10"><g class="cluster"><rect /></g></svg>';
+    const svg =
+      '<svg viewBox="0 0 10 10"><g class="cluster"><rect /></g></svg>';
 
     const polished = polishRenderedMermaidSvg(svg, "light");
 
@@ -341,10 +518,7 @@ describe("Mermaid rendering helpers", function () {
       'B["Graceful memory <code>continuum</code> & sequence scaffold"]',
     );
     assert.include(normalized, 'C["<strong>Conclusion</strong>"]');
-    assert.include(
-      normalized,
-      "-->|edge **label** stays markdown source| B",
-    );
+    assert.include(normalized, "-->|edge **label** stays markdown source| B");
   });
 
   it("strips locked Mermaid init overrides while preserving safe directives", function () {
@@ -471,7 +645,7 @@ describe("Mermaid rendering helpers", function () {
 });
 
 describe("agentTrace render", function () {
-  it("expands quote anchors before rendering agent trace markdown", function () {
+  it("preserves known quote anchors before agent trace DOM decoration", function () {
     const quoteCitation = buildQuoteCitation({
       quoteText: "Interleaved trace quote anchors should not leak.",
       citationLabel: "(Chandra et al., 2025)",
@@ -484,19 +658,21 @@ describe("agentTrace render", function () {
       { quoteCitations: [quoteCitation!] },
     );
 
-    assert.include(rendered, "> Interleaved trace quote anchors");
-    assert.include(rendered, "(Chandra et al., 2025)");
-    assert.notInclude(rendered, "[[quote:");
+    assert.include(rendered, `[[quote:${quoteCitation!.id}]]`);
+    assert.notInclude(rendered, "> Interleaved trace quote anchors");
+    assert.notInclude(rendered, "(Chandra et al., 2025)");
   });
 
-  it("does not render unresolved quote anchors in agent trace markdown", function () {
+  it("omits unresolved quote anchors in agent trace markdown", function () {
     const rendered = buildAgentTraceMarkdownForRender(
-      "Evidence:\n\n[[quote:Q_missing]]",
+      "Evidence:\n\n[[quote:Q_missing]]\n\nContinue.",
       { quoteCitations: [] },
     );
 
-    assert.include(rendered, "[quote unavailable]");
+    assert.include(rendered, "Evidence");
+    assert.include(rendered, "Continue.");
     assert.notInclude(rendered, "[[quote:");
+    assert.notInclude(rendered, "[quote unavailable]");
   });
 
   it("uses rendered Markdown HTML for streaming assistant text", function () {
@@ -522,6 +698,47 @@ describe("agentTrace render", function () {
       "| A | B |\n|---|---|\n| 1 | 2 |",
     );
     assert.include(tableHtml, "<table");
+  });
+
+  it("keeps rendered Markdown when template sanitizer parsing fails", function () {
+    const target = new FakeElement("div") as unknown as HTMLElement;
+
+    renderRenderedMarkdownInto(
+      target,
+      ["## Methodology Overview", "", "**Fiber photometry**", "", "---"].join(
+        "\n",
+      ),
+      throwingTemplateDocument,
+    );
+
+    const html = (target as unknown as FakeElement).innerHTML;
+    assert.include(html, "<h3>Methodology Overview</h3>");
+    assert.include(html, "<strong>Fiber photometry</strong>");
+    assert.include(html, "<hr");
+    assert.notInclude(html, "## Methodology Overview");
+    assert.isTrue(
+      (target as unknown as FakeElement).classList.contains(
+        "llm-rendered-markdown",
+      ),
+    );
+  });
+
+  it("falls back to the legacy renderer when chrome innerHTML rejects marked HTML", function () {
+    const target = new OneShotInnerHtmlFailureElement(
+      "div",
+    ) as unknown as HTMLElement;
+
+    renderRenderedMarkdownInto(
+      target,
+      ["## Methodology Overview", "", "The study used photometry."].join("\n"),
+      throwingTemplateDocument,
+    );
+
+    const fakeTarget = target as unknown as OneShotInnerHtmlFailureElement;
+    assert.equal(fakeTarget.getInnerHtmlSetCount(), 2);
+    assert.include(fakeTarget.innerHTML, "<h3>Methodology Overview</h3>");
+    assert.include(fakeTarget.innerHTML, "<p>The study used photometry.</p>");
+    assert.notInclude(fakeTarget.innerHTML, "## Methodology Overview");
   });
 
   it("renders trace inline math through the shared Markdown surface", function () {
@@ -583,7 +800,10 @@ describe("agentTrace render", function () {
 
     assert.exists(copyable);
     assert.exists(copyButton);
-    assert.equal(copyButton?.attributes["aria-label"], "Copy original markdown");
+    assert.equal(
+      copyButton?.attributes["aria-label"],
+      "Copy original markdown",
+    );
   });
 
   it("renders tagged display math as KaTeX tag markup", function () {
@@ -594,6 +814,80 @@ describe("agentTrace render", function () {
     assert.include(html, "math-display");
     assert.include(html, 'class="tag"');
     assert.notInclude(html, "math-error");
+  });
+
+  it("allows the SVG tags and attributes emitted by KaTeX math", function () {
+    const formulas = [
+      String.raw`\sqrt{x+y}`,
+      String.raw`\sqrt[3]{x}`,
+      String.raw`\widehat{x}`,
+      String.raw`\overrightarrow{AB}`,
+      String.raw`\xrightarrow{n\to\infty}`,
+      String.raw`\overbrace{x+y}`,
+      String.raw`\underbrace{x+y}`,
+      String.raw`\cancel{x+y}`,
+    ];
+
+    for (const formula of formulas) {
+      const html = renderAssistantMarkdownHtmlForChat(
+        String.raw`$$${formula}$$`,
+      );
+      const tags = extractKatexSvgTags(html);
+
+      assert.isNotEmpty(tags, formula);
+      assert.include(html, "katex", formula);
+      assert.include(html, "<svg", formula);
+
+      for (const tag of tags) {
+        const element = createKatexSvgElement(tag.tagName);
+        assert.isTrue(
+          isSafeRenderedMarkdownElementForTests(element),
+          `${formula} ${tag.tagName}`,
+        );
+        for (const [name, value] of tag.attrs) {
+          assert.isTrue(
+            isSafeRenderedMarkdownAttributeForTests(element, name, value),
+            `${formula} ${tag.tagName}.${name}=${value}`,
+          );
+        }
+      }
+    }
+  });
+
+  it("keeps non-KaTeX and unsafe SVG blocked in rendered Markdown", function () {
+    const rawSvg = createSanitizerElement("svg");
+    const rawPath = createSanitizerElement("path");
+    const rawLine = createSanitizerElement("line");
+
+    assert.isFalse(isSafeRenderedMarkdownElementForTests(rawSvg));
+    assert.isFalse(isSafeRenderedMarkdownElementForTests(rawPath));
+    assert.isFalse(isSafeRenderedMarkdownElementForTests(rawLine));
+
+    const katexSvg = createKatexSvgElement("svg");
+    const katexPath = createKatexSvgElement("path");
+    const katexLine = createKatexSvgElement("line");
+    const unsafeAttrs: Array<[Element, string, string]> = [
+      [katexSvg, "onload", "alert(1)"],
+      [katexSvg, "href", "https://example.com/x.svg"],
+      [katexSvg, "xlink:href", "https://example.com/x.svg"],
+      [katexSvg, "style", "background:url(https://example.com/x.svg)"],
+      [katexSvg, "filter", "url(https://example.com/filter.svg#x)"],
+      [katexSvg, "clip-path", "url(https://example.com/clip.svg#x)"],
+      [katexSvg, "width", "url(https://example.com/x.svg)"],
+      [katexPath, "href", "https://example.com/x.svg"],
+      [katexPath, "style", "stroke:url(https://example.com/x.svg)"],
+      [katexPath, "d", "M0 0 L10 10 url(https://example.com/x.svg)"],
+      [katexLine, "xlink:href", "https://example.com/x.svg"],
+      [katexLine, "style", "stroke:url(https://example.com/x.svg)"],
+      [katexLine, "x1", "url(https://example.com/x.svg)"],
+    ];
+
+    for (const [element, name, value] of unsafeAttrs) {
+      assert.isFalse(
+        isSafeRenderedMarkdownAttributeForTests(element, name, value),
+        `${name}=${value}`,
+      );
+    }
   });
 
   it("preserves whitespace when compacting reasoning deltas", function () {
@@ -731,8 +1025,7 @@ describe("agentTrace render", function () {
       .map((item) => item.text);
     const codexProgressMessages = items.filter(
       (item): item is Extract<(typeof items)[number], { type: "message" }> =>
-        item.type === "message" &&
-        item.text !== "Request sent to Codex.",
+        item.type === "message" && item.text !== "Request sent to Codex.",
     );
 
     assert.includeMembers(progressMessages, [
@@ -790,6 +1083,615 @@ describe("agentTrace render", function () {
 
     assert.notInclude(actionTexts, "Using Query Library");
     assert.include(actionTexts, "Used Query Library");
+  });
+
+  it("renders generated assistant images outside user screenshot UI", function () {
+    const savedPathContainer = fakeDocument.createElement("div") as unknown as
+      | HTMLElement
+      | FakeElement;
+    const renderedSavedPath = renderAssistantGeneratedImagesInto(
+      savedPathContainer as HTMLElement,
+      [
+        {
+          id: "img-1",
+          label: "result.png",
+          path: "/tmp/result.png",
+          revisedPrompt: "A concise chart",
+        },
+      ],
+      fakeDocument,
+    );
+    assert.isTrue(renderedSavedPath);
+    const savedPathRoot = savedPathContainer as FakeElement;
+    const savedImg = savedPathRoot.findByClass(
+      "llm-assistant-generated-image",
+    ) as unknown as { src?: string; alt?: string; title?: string } | null;
+    assert.equal(savedImg?.src, "file:///tmp/result.png");
+    assert.equal(savedImg?.alt, "result.png");
+    assert.equal(savedImg?.title, "A concise chart");
+    assert.isNull(savedPathRoot.findByClass("llm-user-screenshots-preview"));
+    const savedActions = savedPathRoot.findAllByClass(
+      "llm-generated-image-action",
+    );
+    assert.lengthOf(savedActions, 3);
+    assert.isFalse(
+      (
+        savedPathRoot.findByClass(
+          "llm-generated-image-action-open",
+        ) as FakeElement | null
+      )?.disabled,
+    );
+    const openClick = (
+      savedPathRoot.findByClass(
+        "llm-generated-image-action-open",
+      ) as FakeElement
+    ).dispatchFakeEvent("click");
+    assert.isTrue(openClick.defaultPrevented);
+    assert.isTrue(openClick.propagationStopped);
+    assert.isTrue(openClick.immediatePropagationStopped);
+
+    const dataUrlContainer = fakeDocument.createElement("div") as HTMLElement;
+    assert.isTrue(
+      renderAssistantGeneratedImagesInto(
+        dataUrlContainer,
+        [{ id: "img-2", src: "data:image/png;base64,abc123" }],
+        fakeDocument,
+      ),
+    );
+    const dataImg = (dataUrlContainer as unknown as FakeElement).findByClass(
+      "llm-assistant-generated-image",
+    ) as unknown as { src?: string } | null;
+    assert.equal(dataImg?.src, "data:image/png;base64,abc123");
+    assert.isTrue(
+      (
+        (dataUrlContainer as unknown as FakeElement).findByClass(
+          "llm-generated-image-action-open",
+        ) as FakeElement | null
+      )?.disabled,
+    );
+
+    const opaqueContainer = fakeDocument.createElement("div") as HTMLElement;
+    assert.isFalse(
+      renderAssistantGeneratedImagesInto(
+        opaqueContainer,
+        [{ id: "img-3", src: "opaque-result-id" }],
+        fakeDocument,
+      ),
+    );
+  });
+
+  it("saves generated assistant images through the Zotero file picker", async function () {
+    const globalScope = globalThis as typeof globalThis & {
+      IOUtils?: {
+        read?: (path: string) => Promise<Uint8Array>;
+        copy?: (sourcePath: string, destPath: string) => Promise<void>;
+      };
+      Zotero?: {
+        getMainWindow?: () => unknown;
+        FilePicker?: new () => {
+          modeSave: number;
+          returnOK: number;
+          returnReplace: number;
+          filterAll: number;
+          defaultString?: string;
+          defaultExtension?: string;
+          file?: string | { path?: string };
+          init: (parent: unknown, title: string, mode: number) => void;
+          appendFilter: (title: string, filter: string) => void;
+          appendFilters: (filterMask: number) => void;
+          show: () => Promise<number>;
+        };
+      };
+      ztoolkit?: { log?: (...args: unknown[]) => void };
+    };
+    const originalIOUtils = globalScope.IOUtils;
+    const originalZotero = globalScope.Zotero;
+    const originalZtoolkit = globalScope.ztoolkit;
+    const copied: Array<{ sourcePath: string; destPath: string }> = [];
+    let pickerDefaultString = "";
+    globalScope.IOUtils = {
+      read: async (path: string) => {
+        assert.equal(path, "/tmp/result.png");
+        return new Uint8Array([7, 8, 9]);
+      },
+      copy: async (sourcePath: string, destPath: string) => {
+        copied.push({ sourcePath, destPath });
+      },
+    };
+    class FakeFilePicker {
+      modeSave = 1;
+      returnOK = 0;
+      returnReplace = 1;
+      filterAll = 2;
+      file = "/tmp/saved-result.png";
+      defaultExtension = "";
+      set defaultString(value: string) {
+        pickerDefaultString = value;
+      }
+      get defaultString() {
+        return pickerDefaultString;
+      }
+      init(parent: unknown, title: string, mode: number) {
+        assert.equal(parent, fakeMainWindow);
+        assert.equal(title, "Save generated image");
+        assert.equal(mode, 1);
+      }
+      appendFilter(_title: string, _filter: string) {}
+      appendFilters(_filterMask: number) {}
+      async show() {
+        return 0;
+      }
+    }
+    const fakeMainWindow = { browsingContext: { id: "main" } };
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      getMainWindow: () => fakeMainWindow,
+      FilePicker: FakeFilePicker,
+    };
+    globalScope.ztoolkit = {
+      ...(originalZtoolkit || {}),
+      log: () => {},
+    };
+
+    try {
+      const container = fakeDocument.createElement("div") as HTMLElement;
+      const statuses: string[] = [];
+      assert.isTrue(
+        renderAssistantGeneratedImagesInto(
+          container,
+          [{ id: "img-save", label: "result.png", path: "/tmp/result.png" }],
+          fakeDocument,
+          {
+            onImageActionStatus: (message) => statuses.push(message),
+          },
+        ),
+      );
+      const saveButton = (container as unknown as FakeElement).findByClass(
+        "llm-generated-image-action-save",
+      ) as FakeElement;
+
+      const saveClick = await saveButton.dispatchFakeEventAsync("click");
+      assert.isTrue(saveClick.defaultPrevented);
+      assert.isTrue(saveClick.propagationStopped);
+      assert.equal(pickerDefaultString, "result.png");
+      assert.deepEqual(copied, [
+        { sourcePath: "/tmp/result.png", destPath: "/tmp/saved-result.png" },
+      ]);
+      assert.deepEqual(statuses, ["Saved image"]);
+    } finally {
+      if (originalIOUtils) {
+        globalScope.IOUtils = originalIOUtils;
+      } else {
+        delete globalScope.IOUtils;
+      }
+      if (originalZotero) {
+        globalScope.Zotero = originalZotero;
+      } else {
+        delete globalScope.Zotero;
+      }
+      if (originalZtoolkit) {
+        globalScope.ztoolkit = originalZtoolkit;
+      } else {
+        delete globalScope.ztoolkit;
+      }
+    }
+  });
+
+  it("passes browsingContext to the XPCOM generated-image save picker fallback", async function () {
+    const globalScope = globalThis as typeof globalThis & {
+      IOUtils?: {
+        read?: (path: string) => Promise<Uint8Array>;
+        copy?: (sourcePath: string, destPath: string) => Promise<void>;
+      };
+      Zotero?: {
+        getMainWindow?: () => unknown;
+        FilePicker?: unknown;
+      };
+      Components?: {
+        classes?: Record<
+          string,
+          { createInstance?: (iface: unknown) => unknown }
+        >;
+        interfaces?: {
+          nsIFilePicker?: {
+            modeSave: number;
+            returnOK: number;
+            returnReplace: number;
+            filterAll: number;
+          };
+        };
+      };
+      ChromeUtils?: {
+        importESModule?: (url: string) => unknown;
+      };
+      ztoolkit?: { log?: (...args: unknown[]) => void };
+    };
+    const originalIOUtils = globalScope.IOUtils;
+    const originalZotero = globalScope.Zotero;
+    const originalComponents = globalScope.Components;
+    const originalChromeUtils = globalScope.ChromeUtils;
+    const originalZtoolkit = globalScope.ztoolkit;
+    const browsingContext = { id: "main-browsing-context" };
+    const copied: Array<{ sourcePath: string; destPath: string }> = [];
+    let initParent: unknown = null;
+    globalScope.IOUtils = {
+      read: async () => new Uint8Array([7, 8, 9]),
+      copy: async (sourcePath: string, destPath: string) => {
+        copied.push({ sourcePath, destPath });
+      },
+    };
+    globalScope.Zotero = {
+      ...(originalZotero || {}),
+      getMainWindow: () => ({ browsingContext }),
+      FilePicker: undefined,
+    };
+    globalScope.ChromeUtils = {
+      importESModule: () => {
+        throw new Error("module import unavailable");
+      },
+    };
+    const nsIFilePicker = {
+      modeSave: 1,
+      returnOK: 0,
+      returnReplace: 2,
+      filterAll: 1,
+    };
+    globalScope.Components = {
+      classes: {
+        "@mozilla.org/filepicker;1": {
+          createInstance: () => ({
+            file: { path: "/tmp/xpcom-saved-result.png" },
+            set defaultString(_value: string) {
+              throw new Error("defaultString unavailable");
+            },
+            init: (parent: unknown, title: string, mode: number) => {
+              initParent = parent;
+              assert.equal(title, "Save generated image");
+              assert.equal(mode, nsIFilePicker.modeSave);
+            },
+            appendFilter: () => {},
+            appendFilters: () => {},
+            open: (callback: (result: number) => void) =>
+              callback(nsIFilePicker.returnOK),
+          }),
+        },
+      },
+      interfaces: { nsIFilePicker },
+    };
+    globalScope.ztoolkit = {
+      ...(originalZtoolkit || {}),
+      log: () => {},
+    };
+
+    try {
+      const container = fakeDocument.createElement("div") as HTMLElement;
+      const statuses: string[] = [];
+      assert.isTrue(
+        renderAssistantGeneratedImagesInto(
+          container,
+          [{ id: "img-xpcom", label: "result.png", path: "/tmp/result.png" }],
+          fakeDocument,
+          {
+            onImageActionStatus: (message) => statuses.push(message),
+          },
+        ),
+      );
+      const saveButton = (container as unknown as FakeElement).findByClass(
+        "llm-generated-image-action-save",
+      ) as FakeElement;
+
+      await saveButton.dispatchFakeEventAsync("click");
+
+      assert.equal(initParent, browsingContext);
+      assert.deepEqual(copied, [
+        {
+          sourcePath: "/tmp/result.png",
+          destPath: "/tmp/xpcom-saved-result.png",
+        },
+      ]);
+      assert.deepEqual(statuses, ["Saved image"]);
+    } finally {
+      if (originalIOUtils) {
+        globalScope.IOUtils = originalIOUtils;
+      } else {
+        delete globalScope.IOUtils;
+      }
+      if (originalZotero) {
+        globalScope.Zotero = originalZotero;
+      } else {
+        delete globalScope.Zotero;
+      }
+      if (originalComponents) {
+        globalScope.Components = originalComponents;
+      } else {
+        delete globalScope.Components;
+      }
+      if (originalChromeUtils) {
+        globalScope.ChromeUtils = originalChromeUtils;
+      } else {
+        delete globalScope.ChromeUtils;
+      }
+      if (originalZtoolkit) {
+        globalScope.ztoolkit = originalZtoolkit;
+      } else {
+        delete globalScope.ztoolkit;
+      }
+    }
+  });
+
+  it("treats image-only assistant responses as response-menu targets", function () {
+    const imageOnly = {
+      text: "",
+      generatedImages: [
+        {
+          id: "img-only",
+          label: "result.png",
+          src: "file:///tmp/result.png",
+        },
+      ],
+    };
+
+    assert.isTrue(shouldAttachAssistantResponseContextMenu(imageOnly));
+    const fullTarget = resolveAssistantResponseMenuContent(imageOnly);
+    assert.deepEqual(fullTarget, {
+      contentText: "",
+      generatedImages: [
+        {
+          id: "img-only",
+          label: "result.png",
+          src: "file:///tmp/result.png",
+        },
+      ],
+    });
+
+    const selectedTarget = resolveAssistantResponseMenuContent(
+      imageOnly,
+      "selected words",
+    );
+    assert.deepEqual(selectedTarget, { contentText: "selected words" });
+    assert.isFalse(shouldAttachAssistantResponseContextMenu({ text: "" }));
+  });
+
+  it("resolves generated image assets from paths, file URLs, and data URLs", async function () {
+    const globalScope = globalThis as typeof globalThis & {
+      IOUtils?: { read?: (path: string) => Promise<Uint8Array> };
+    };
+    const originalIOUtils = globalScope.IOUtils;
+    const readPaths: string[] = [];
+    globalScope.IOUtils = {
+      read: async (path: string) => {
+        readPaths.push(path);
+        assert.equal(path, "/tmp/result.png");
+        return new Uint8Array([7, 8, 9]);
+      },
+    };
+    try {
+      const pathAsset = await resolveGeneratedImageAsset({
+        id: "img-path",
+        label: "result.png",
+        path: "/tmp/result.png",
+      });
+      assert.deepEqual(Array.from(pathAsset?.bytes || []), [7, 8, 9]);
+      assert.equal(pathAsset?.mimeType, "image/png");
+      assert.equal(pathAsset?.fileName, "result.png");
+      assert.equal(pathAsset?.fileUrl, "file:///tmp/result.png");
+
+      const fileUrlImage = {
+        id: "img-file-url",
+        label: "result.png",
+        src: "file:///tmp/result.png",
+      };
+      assert.isTrue(isEmbeddableGeneratedImage(fileUrlImage));
+      const fileUrlAsset = await resolveGeneratedImageAsset(fileUrlImage);
+      assert.deepEqual(Array.from(fileUrlAsset?.bytes || []), [7, 8, 9]);
+      assert.equal(fileUrlAsset?.mimeType, "image/png");
+      assert.equal(fileUrlAsset?.fileName, "result.png");
+      assert.equal(fileUrlAsset?.path, "/tmp/result.png");
+      assert.equal(fileUrlAsset?.fileUrl, "file:///tmp/result.png");
+
+      const dataAsset = await resolveGeneratedImageAsset({
+        id: "img-data",
+        label: "inline",
+        src: "data:image/png;base64,AQID",
+      });
+      assert.deepEqual(Array.from(dataAsset?.bytes || []), [1, 2, 3]);
+      assert.equal(dataAsset?.mimeType, "image/png");
+      assert.equal(dataAsset?.fileName, "inline.png");
+      assert.deepEqual(readPaths, ["/tmp/result.png", "/tmp/result.png"]);
+    } finally {
+      if (originalIOUtils) {
+        globalScope.IOUtils = originalIOUtils;
+      } else {
+        delete globalScope.IOUtils;
+      }
+    }
+  });
+
+  it("renders full expandable details for long Codex trace values", function () {
+    const longQuery =
+      "Anticevic Cole Repovs Savic Driesen connectivity pharmacology computational psychiatry";
+    const longUrl =
+      "https://www.frontiersin.org/journals/psychiatry/articles/10.3389/fpsyt.2013.00169/full";
+    const longPath =
+      "/tmp/codex/screenshots/frontiers-article-page-0001-full-width.png";
+    const command = `python scripts/fetch.py --url ${longUrl}`;
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-1",
+        seq: 1,
+        eventType: "codex_tool_activity",
+        payload: {
+          type: "codex_tool_activity",
+          itemId: "web-1",
+          phase: "completed",
+          toolName: "codex_web_search",
+          toolLabel: "Opened web page",
+          args: {
+            query: longQuery,
+            url: longUrl,
+            pattern: "connectivity pharmacology",
+          },
+        },
+        createdAt: 1,
+      },
+      {
+        runId: "run-1",
+        seq: 2,
+        eventType: "codex_tool_activity",
+        payload: {
+          type: "codex_tool_activity",
+          itemId: "image-1",
+          phase: "completed",
+          toolName: "image_view",
+          toolLabel: "Viewed image",
+          args: { path: longPath },
+        },
+        createdAt: 2,
+      },
+      {
+        runId: "run-1",
+        seq: 3,
+        eventType: "codex_tool_activity",
+        payload: {
+          type: "codex_tool_activity",
+          itemId: "cmd-1",
+          phase: "completed",
+          toolName: "command",
+          toolLabel: "Command",
+          args: { status: "exit 0" },
+          codeBlock: command,
+        },
+        createdAt: 3,
+      },
+    ];
+
+    const trace = renderAgentTrace({
+      doc: fakeDocument,
+      message: {
+        role: "assistant",
+        text: "",
+        timestamp: 1,
+        runMode: "agent",
+        modelProviderLabel: "Codex",
+      },
+      events,
+    }) as unknown as FakeElement;
+
+    const values = trace
+      .findAllByClass("llm-agent-process-detail-value")
+      .map(collectFakeText);
+    assert.include(values, longQuery);
+    assert.include(values, longUrl);
+    assert.include(values, "connectivity pharmacology");
+    assert.include(values, longPath);
+    assert.include(values, command);
+    assert.isEmpty(trace.findAllByClass("llm-at-expand"));
+
+    const chipLabels = trace
+      .findAllByClass("llm-agent-process-chip-label")
+      .map(collectFakeText);
+    assert.includeMembers(chipLabels, [
+      "Query",
+      "URL",
+      "Pattern",
+      "Path",
+      "Status",
+    ]);
+    assert.isFalse(chipLabels.some((label) => label.includes("...")));
+  });
+
+  it("renders full expandable details for request context chips", function () {
+    const longPaperTitle =
+      "A very long paper title about hippocampal attractor dynamics and entorhinal grid cell scaffolds across episodic memory";
+    const longSelectedText = [
+      "This is a long selected passage from the paper that should remain fully available",
+      "inside the expanded agent trace details instead of disappearing behind a chip.",
+    ].join(" ");
+    const longFileName =
+      "supplementary-analysis-notebook-with-long-descriptive-filename-and-version-history.md";
+    const events: AgentRunEventRecord[] = [
+      {
+        runId: "run-1",
+        seq: 1,
+        eventType: "final",
+        payload: { type: "final", text: "Done." },
+        createdAt: 1,
+      },
+    ];
+
+    const trace = renderAgentTrace({
+      doc: fakeDocument,
+      userMessage: {
+        role: "user",
+        text: "Use this context.",
+        timestamp: 1,
+        selectedTexts: [longSelectedText],
+        selectedTextSources: ["pdf"],
+        paperContexts: [
+          {
+            itemId: 10,
+            contextItemId: 11,
+            title: longPaperTitle,
+          },
+        ],
+        attachments: [
+          {
+            id: "file-1",
+            name: longFileName,
+            mimeType: "text/markdown",
+            sizeBytes: 42,
+            category: "markdown",
+          },
+        ],
+      },
+      message: {
+        role: "assistant",
+        text: "Done.",
+        timestamp: 2,
+        runMode: "agent",
+        modelProviderLabel: "OpenAI",
+      },
+      events,
+    }) as unknown as FakeElement;
+
+    const values = trace
+      .findAllByClass("llm-agent-process-detail-value")
+      .map(collectFakeText);
+    assert.include(values, longPaperTitle);
+    assert.include(values, longSelectedText);
+    assert.include(values, longFileName);
+
+    const chipLabels = trace
+      .findAllByClass("llm-agent-process-chip-label")
+      .map(collectFakeText);
+    assert.includeMembers(chipLabels, ["Paper", "Selected text", "File"]);
+    assert.isFalse(chipLabels.some((label) => label.includes("...")));
+  });
+
+  it("preserves custom chip title and long label values as details", function () {
+    const longTitle =
+      "https://example.org/articles/with/a/very/long/path/that/must/remain/recoverable";
+    const longLabel =
+      "Custom tool output with a long label that should become an expandable detail value";
+
+    assert.deepEqual(
+      buildAgentTraceChipDetails({ label: "URL", title: longTitle }),
+      [{ label: "URL", value: longTitle, kind: "url" }],
+    );
+    assert.deepEqual(buildAgentTraceChipDetails({ label: longLabel }), [
+      { label: "Detail", value: longLabel, kind: "text" },
+    ]);
+  });
+
+  it("does not ellipsize agent trace chip labels in CSS", function () {
+    const css = readFileSync("addon/content/zoteroPane.css", "utf8");
+    const chipLabelRule =
+      css.match(/\.llm-agent-process-chip-label\s*\{[\s\S]*?\}/)?.[0] || "";
+
+    assert.include(chipLabelRule, "white-space: normal");
+    assert.include(chipLabelRule, "overflow: visible");
+    assert.include(chipLabelRule, "text-overflow: clip");
+    assert.notInclude(chipLabelRule, "text-overflow: ellipsis");
   });
 
   it("falls back to a Zotero MCP tool label when Codex omits the exact tool name", function () {
@@ -1060,6 +1962,50 @@ describe("agentTrace render", function () {
     });
   });
 
+  it("renders run_command commands as a read-only code preview", function () {
+    const command = 'python3 analyze.py --input "data set.csv"';
+    const action: AgentPendingAction = {
+      toolName: "run_command",
+      title: "Run shell command",
+      description: "Execute a command on your local machine.",
+      confirmLabel: "Run",
+      cancelLabel: "Cancel",
+      fields: [
+        {
+          type: "code_preview",
+          id: "command",
+          label: "Command",
+          value: command,
+          language: "sh",
+        },
+        {
+          type: "text",
+          id: "cwd",
+          label: "Working directory",
+          value: "/tmp/project",
+        },
+      ],
+    };
+
+    const card = renderPendingActionCard(fakeDocument, {
+      requestId: "run-command-preview",
+      action,
+    }) as unknown as FakeElement;
+    const preview = card.findByClass("llm-agent-hitl-code-preview");
+    const code = preview?.findAllByTag("code")[0];
+    const inputs = card.findAllByTag("input");
+
+    assert.exists(preview);
+    assert.exists(code);
+    assert.equal(code?.textContent, command);
+    assert.equal(code?.attributes["data-language"], "sh");
+    assert.lengthOf(inputs, 1);
+    assert.equal(
+      (inputs[0] as FakeElement & { value?: string }).value,
+      "/tmp/project",
+    );
+  });
+
   it("removes repetitive filler chatter between tool steps", function () {
     const events: AgentRunEventRecord[] = [
       {
@@ -1185,7 +2131,9 @@ describe("agentTrace render", function () {
     assert.isFalse(isInterleaved);
     assert.isFalse(inlineTextReplacesAssistantText);
     assert.isFalse(items.some((item) => item.type === "inline_text"));
-    assert.isTrue(shouldAttachAssistantResponseContextMenu({ text: finalText }));
+    assert.isTrue(
+      shouldAttachAssistantResponseContextMenu({ text: finalText }),
+    );
   });
 
   it("keeps unique original-agent interleaved text in trace and final answer in the assistant bubble", function () {
@@ -1256,7 +2204,9 @@ describe("agentTrace render", function () {
     assert.isTrue(isInterleaved);
     assert.isFalse(inlineTextReplacesAssistantText);
     assert.deepEqual(inlineTexts, [scratchText]);
-    assert.isTrue(shouldAttachAssistantResponseContextMenu({ text: finalText }));
+    assert.isTrue(
+      shouldAttachAssistantResponseContextMenu({ text: finalText }),
+    );
   });
 
   it("suppresses original-agent duplicate inline final text without suppressing the assistant bubble", function () {
@@ -1308,7 +2258,9 @@ describe("agentTrace render", function () {
     assert.isTrue(isInterleaved);
     assert.isFalse(inlineTextReplacesAssistantText);
     assert.isFalse(items.some((item) => item.type === "inline_text"));
-    assert.isTrue(shouldAttachAssistantResponseContextMenu({ text: finalText }));
+    assert.isTrue(
+      shouldAttachAssistantResponseContextMenu({ text: finalText }),
+    );
   });
 
   it("does not mark rolled-back scratch text as interleaved", function () {
@@ -1709,8 +2661,7 @@ describe("agentTrace render", function () {
         eventType: "message_delta",
         payload: {
           type: "message_delta",
-          text:
-            " the Obsidian vault location and look for any existing note for this paper.",
+          text: " the Obsidian vault location and look for any existing note for this paper.",
         },
         createdAt: 3,
       },
@@ -1728,17 +2679,13 @@ describe("agentTrace render", function () {
       },
     ];
 
-    const { items, isInterleaved } = buildAgentTraceDisplayItems(
-      events,
-      null,
-      {
-        role: "assistant",
-        text: sentence,
-        timestamp: 1,
-        runMode: "agent",
-        modelProviderLabel: "Claude Code",
-      },
-    );
+    const { items, isInterleaved } = buildAgentTraceDisplayItems(events, null, {
+      role: "assistant",
+      text: sentence,
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "Claude Code",
+    });
     const inlineTexts = items
       .filter(
         (
@@ -1783,8 +2730,7 @@ describe("agentTrace render", function () {
         eventType: "message_delta",
         payload: {
           type: "message_delta",
-          text:
-            " the Obsidian vault location and look for any existing note for this paper.",
+          text: " the Obsidian vault location and look for any existing note for this paper.",
         },
         createdAt: 3,
       },
@@ -1823,17 +2769,13 @@ describe("agentTrace render", function () {
       },
     ];
 
-    const { items, isInterleaved } = buildAgentTraceDisplayItems(
-      events,
-      null,
-      {
-        role: "assistant",
-        text: sentence,
-        timestamp: 1,
-        runMode: "agent",
-        modelProviderLabel: "Claude Code",
-      },
-    );
+    const { items, isInterleaved } = buildAgentTraceDisplayItems(events, null, {
+      role: "assistant",
+      text: sentence,
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "Claude Code",
+    });
     const inlineTexts = items
       .filter(
         (
@@ -1894,17 +2836,13 @@ describe("agentTrace render", function () {
       },
     ];
 
-    const { items, isInterleaved } = buildAgentTraceDisplayItems(
-      events,
-      null,
-      {
-        role: "assistant",
-        text: "dog dog",
-        timestamp: 1,
-        runMode: "agent",
-        modelProviderLabel: "Claude Code",
-      },
-    );
+    const { items, isInterleaved } = buildAgentTraceDisplayItems(events, null, {
+      role: "assistant",
+      text: "dog dog",
+      timestamp: 1,
+      runMode: "agent",
+      modelProviderLabel: "Claude Code",
+    });
     const inlineText = items.find((item) => item.type === "inline_text");
 
     assert.isTrue(isInterleaved);

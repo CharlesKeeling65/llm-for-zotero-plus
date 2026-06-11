@@ -15,7 +15,7 @@ declare const rootURI: string;
 
 declare const addon: import("../src/addon").default;
 
-declare const __env__: "production" | "development";
+declare const __env__: "production" | "development" | "test";
 
 declare module "*.md" {
   const content: string;

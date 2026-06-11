@@ -5,7 +5,9 @@ type WebChatClientModule = typeof import("../src/webchat/client");
 
 type EndpointReply = [number, string | Record<string, string>, string?];
 
-function parseJsonReply(reply: EndpointReply | number): Record<string, unknown> {
+function parseJsonReply(
+  reply: EndpointReply | number,
+): Record<string, unknown> {
   if (!Array.isArray(reply)) {
     throw new Error(`Unexpected endpoint reply: ${String(reply)}`);
   }
@@ -25,16 +27,20 @@ describe("webchat relay/client", function () {
     method: "GET" | "POST",
     data?: unknown,
   ): Promise<Record<string, unknown>> => {
-    const EndpointClass = (globalThis.Zotero.Server.Endpoints as Record<string, any>)[path];
+    const EndpointClass = (
+      globalThis.Zotero.Server.Endpoints as Record<string, any>
+    )[path];
     assert.isFunction(EndpointClass, `Missing endpoint class for ${path}`);
     const endpoint = new EndpointClass();
-    return parseJsonReply(await endpoint.init({
-      method,
-      pathname: path,
-      query: {},
-      headers: {},
-      data: data ?? null,
-    }));
+    return parseJsonReply(
+      await endpoint.init({
+        method,
+        pathname: path,
+        query: {},
+        headers: {},
+        data: data ?? null,
+      }),
+    );
   };
 
   before(async function () {
@@ -46,8 +52,9 @@ describe("webchat relay/client", function () {
         Endpoints: {},
       },
     } as typeof Zotero;
-    (globalThis as typeof globalThis & { ztoolkit: { log: () => void } })
-      .ztoolkit = {
+    (
+      globalThis as typeof globalThis & { ztoolkit: { log: () => void } }
+    ).ztoolkit = {
       log: () => {},
     };
 
@@ -70,22 +77,30 @@ describe("webchat relay/client", function () {
   });
 
   it("tracks per-site history freshness without wiping other sites on empty updates", async function () {
-    await invokeEndpoint("/llm-for-zotero/webchat/update_chat_history", "POST", {
-      sessions: [
-        {
-          id: "chatgpt-1",
-          title: "ChatGPT thread",
-          chatUrl: "https://chatgpt.com/c/chatgpt-1",
-        },
-      ],
-      siteHostname: "chatgpt.com",
-      scrapedAt: 111,
-    });
-    await invokeEndpoint("/llm-for-zotero/webchat/update_chat_history", "POST", {
-      sessions: [],
-      siteHostname: "chat.deepseek.com",
-      scrapedAt: 222,
-    });
+    await invokeEndpoint(
+      "/llm-for-zotero/webchat/update_chat_history",
+      "POST",
+      {
+        sessions: [
+          {
+            id: "chatgpt-1",
+            title: "ChatGPT thread",
+            chatUrl: "https://chatgpt.com/c/chatgpt-1",
+          },
+        ],
+        siteHostname: "chatgpt.com",
+        scrapedAt: 111,
+      },
+    );
+    await invokeEndpoint(
+      "/llm-for-zotero/webchat/update_chat_history",
+      "POST",
+      {
+        sessions: [],
+        siteHostname: "chat.deepseek.com",
+        scrapedAt: 222,
+      },
+    );
 
     const snapshot = relayServer.relayGetHistorySnapshot();
     assert.deepEqual(snapshot.sessions, [
@@ -108,26 +123,34 @@ describe("webchat relay/client", function () {
   });
 
   it("preserves existing site history when a fresh invalid source update arrives", async function () {
-    await invokeEndpoint("/llm-for-zotero/webchat/update_chat_history", "POST", {
-      sessions: [
-        {
-          id: "deepseek-1",
-          title: "DeepSeek thread",
-          chatUrl: "https://chat.deepseek.com/a/chat/s/deepseek-1",
-        },
-      ],
-      siteHostname: "chat.deepseek.com",
-      scrapedAt: 300,
-      source: "network",
-    });
+    await invokeEndpoint(
+      "/llm-for-zotero/webchat/update_chat_history",
+      "POST",
+      {
+        sessions: [
+          {
+            id: "deepseek-1",
+            title: "DeepSeek thread",
+            chatUrl: "https://chat.deepseek.com/a/chat/s/deepseek-1",
+          },
+        ],
+        siteHostname: "chat.deepseek.com",
+        scrapedAt: 300,
+        source: "network",
+      },
+    );
 
-    await invokeEndpoint("/llm-for-zotero/webchat/update_chat_history", "POST", {
-      sessions: [],
-      siteHostname: "chat.deepseek.com",
-      scrapedAt: 301,
-      status: "invalid_source",
-      source: "network",
-    });
+    await invokeEndpoint(
+      "/llm-for-zotero/webchat/update_chat_history",
+      "POST",
+      {
+        sessions: [],
+        siteHostname: "chat.deepseek.com",
+        scrapedAt: 301,
+        status: "invalid_source",
+        source: "network",
+      },
+    );
 
     const snapshot = relayServer.relayGetHistorySnapshot();
     assert.deepEqual(snapshot.sessions, [
@@ -145,26 +168,34 @@ describe("webchat relay/client", function () {
   });
 
   it("clears existing site history on a fresh empty update and exposes the failure helpers", async function () {
-    await invokeEndpoint("/llm-for-zotero/webchat/update_chat_history", "POST", {
-      sessions: [
-        {
-          id: "deepseek-1",
-          title: "DeepSeek thread",
-          chatUrl: "https://chat.deepseek.com/a/chat/s/deepseek-1",
-        },
-      ],
-      siteHostname: "chat.deepseek.com",
-      scrapedAt: 400,
-      source: "network",
-    });
+    await invokeEndpoint(
+      "/llm-for-zotero/webchat/update_chat_history",
+      "POST",
+      {
+        sessions: [
+          {
+            id: "deepseek-1",
+            title: "DeepSeek thread",
+            chatUrl: "https://chat.deepseek.com/a/chat/s/deepseek-1",
+          },
+        ],
+        siteHostname: "chat.deepseek.com",
+        scrapedAt: 400,
+        source: "network",
+      },
+    );
 
-    await invokeEndpoint("/llm-for-zotero/webchat/update_chat_history", "POST", {
-      sessions: [],
-      siteHostname: "chat.deepseek.com",
-      scrapedAt: 401,
-      status: "empty",
-      source: "network",
-    });
+    await invokeEndpoint(
+      "/llm-for-zotero/webchat/update_chat_history",
+      "POST",
+      {
+        sessions: [],
+        siteHostname: "chat.deepseek.com",
+        scrapedAt: 401,
+        status: "empty",
+        source: "network",
+      },
+    );
 
     const snapshot = await client.fetchChatHistorySnapshot("");
     assert.deepEqual(snapshot.sessions, []);
@@ -184,13 +215,17 @@ describe("webchat relay/client", function () {
   });
 
   it("flags invalid history statuses as failures in the client helper", async function () {
-    await invokeEndpoint("/llm-for-zotero/webchat/update_chat_history", "POST", {
-      sessions: [],
-      siteHostname: "chat.deepseek.com",
-      scrapedAt: 500,
-      status: "timeout",
-      source: "dom",
-    });
+    await invokeEndpoint(
+      "/llm-for-zotero/webchat/update_chat_history",
+      "POST",
+      {
+        sessions: [],
+        siteHostname: "chat.deepseek.com",
+        scrapedAt: 500,
+        status: "timeout",
+        source: "dom",
+      },
+    );
 
     const snapshot = await client.fetchChatHistorySnapshot("");
     assert.equal(
@@ -237,6 +272,163 @@ describe("webchat relay/client", function () {
       capturedAt: 333,
       source: "network",
     });
+  });
+
+  it("stores rich extension status diagnostics", async function () {
+    await invokeEndpoint("/llm-for-zotero/webchat/extension_status", "POST", {
+      chatTabAlive: true,
+      chatUrl: "https://chat.deepseek.com/",
+      siteId: "deepseek",
+      url: "https://chat.deepseek.com/a/chat/s/status-chat",
+      contentScriptAlive: true,
+      mainWorldInjected: false,
+      composerFound: true,
+      sendControlState: "disabled",
+      uploadControlFound: true,
+      networkHookActive: false,
+      lastRequestAt: 123456,
+      lastStreamAt: 123999,
+      lastDiagnostic: {
+        reasonCode: "send_control_disabled",
+        phase: "prompt_applied",
+        message: "DeepSeek send button is disabled",
+      },
+    });
+
+    const status = relayServer.relayGetExtensionStatus();
+    assert.isNotNull(status);
+    assert.equal(status?.chatTabAlive, true);
+    assert.equal(status?.siteId, "deepseek");
+    assert.equal(status?.url, "https://chat.deepseek.com/a/chat/s/status-chat");
+    assert.equal(status?.contentScriptAlive, true);
+    assert.equal(status?.mainWorldInjected, false);
+    assert.equal(status?.composerFound, true);
+    assert.equal(status?.sendControlState, "disabled");
+    assert.equal(status?.uploadControlFound, true);
+    assert.equal(status?.networkHookActive, false);
+    assert.equal(status?.lastRequestAt, 123456);
+    assert.equal(status?.lastStreamAt, 123999);
+    assert.equal(status?.lastDiagnostic?.reasonCode, "send_control_disabled");
+    assert.equal(status?.lastDiagnostic?.siteId, "deepseek");
+  });
+
+  it("updates remote chat url and derives provider chat ids", async function () {
+    const chatgpt = await invokeEndpoint(
+      "/llm-for-zotero/webchat/update_chat_url",
+      "POST",
+      {
+        chat_url: "https://chatgpt.com/c/chatgpt-thread-1",
+      },
+    );
+
+    assert.equal(
+      chatgpt.remote_chat_url,
+      "https://chatgpt.com/c/chatgpt-thread-1",
+    );
+    assert.equal(chatgpt.remote_chat_id, "chatgpt-thread-1");
+
+    const deepseek = await invokeEndpoint(
+      "/llm-for-zotero/webchat/update_chat_url",
+      "POST",
+      {
+        chatUrl:
+          "https://chat.deepseek.com/a/chat/s/deepseek-thread-2?from=sidebar",
+      },
+    );
+
+    assert.equal(
+      deepseek.remote_chat_url,
+      "https://chat.deepseek.com/a/chat/s/deepseek-thread-2?from=sidebar",
+    );
+    assert.equal(deepseek.remote_chat_id, "deepseek-thread-2");
+
+    const root = await invokeEndpoint(
+      "/llm-for-zotero/webchat/update_chat_url",
+      "POST",
+      {
+        chatUrl: "https://chat.deepseek.com/",
+      },
+    );
+
+    assert.equal(root.remote_chat_url, "https://chat.deepseek.com/");
+    assert.isNull(root.remote_chat_id);
+  });
+
+  it("propagates per-turn diagnostics through phase, snapshot, and terminal response", async function () {
+    const submit = relayServer.relaySubmitQuery({ prompt: "diagnostic-turn" });
+    const claimed = relayServer.relayClaimQuery(submit.seq);
+    const attempt = claimed.query?.attempt || 1;
+    assert.isTrue(claimed.ok);
+
+    await invokeEndpoint("/llm-for-zotero/webchat/ack_query_phase", "POST", {
+      seq: submit.seq,
+      attempt,
+      phase: "prompt_applied",
+      diagnostic: {
+        reasonCode: "prompt_ready",
+        siteId: "deepseek",
+        composerTextMatched: true,
+        uploadDetected: true,
+        sendControlState: "disabled",
+      },
+    });
+
+    assert.equal(
+      relayServer.relayGetStateSnapshot().last_diagnostic?.reasonCode,
+      "prompt_ready",
+    );
+    assert.equal(
+      relayServer.relayGetStateSnapshot().last_diagnostic?.phase,
+      "prompt_applied",
+    );
+
+    await invokeEndpoint("/llm-for-zotero/webchat/update_partial", "POST", {
+      seq: submit.seq,
+      attempt,
+      answer_snapshot: "partial",
+      turn_status: "assistant_turn_matched",
+      diagnostic: {
+        reasonCode: "assistant_visible",
+        siteId: "deepseek",
+        requestObserved: true,
+        streamObserved: true,
+        userTurnMatched: true,
+        assistantTurnMatched: true,
+      },
+    });
+
+    const partial = relayServer.relayPollResponse();
+    assert.equal(partial.diagnostic?.reasonCode, "assistant_visible");
+    assert.equal(partial.diagnostic?.requestObserved, true);
+    assert.equal(partial.diagnostic?.streamObserved, true);
+
+    await invokeEndpoint("/llm-for-zotero/webchat/submit_response", "POST", {
+      seq: submit.seq,
+      attempt,
+      response: "Final",
+      thinking: "Reasoning",
+      run_state: "done",
+      completion_reason: "settled",
+      turn_status: "done",
+      diagnostic: {
+        reasonCode: "deepseek_stream_observed",
+        siteId: "deepseek",
+        clickAttempts: 2,
+        requestObserved: true,
+        streamObserved: true,
+        userTurnMatched: true,
+        assistantTurnMatched: true,
+      },
+    });
+
+    const done = relayServer.relayPollResponse();
+    assert.equal(done.status, "done");
+    assert.equal(done.diagnostic?.reasonCode, "deepseek_stream_observed");
+    assert.equal(
+      done.responses[0].diagnostic?.reasonCode,
+      "deepseek_stream_observed",
+    );
+    assert.equal(done.responses[0].diagnostic?.clickAttempts, 2);
   });
 
   it("does not reuse a fresh scraped transcript for the wrong chat", async function () {
@@ -332,17 +524,21 @@ describe("webchat relay/client", function () {
   });
 
   it("fails chat loading instead of falling back to stale scraped messages", async function () {
-    await invokeEndpoint("/llm-for-zotero/webchat/update_chat_history", "POST", {
-      sessions: [
-        {
-          id: "chat-b",
-          title: "DeepSeek thread",
-          chatUrl: "https://chat.deepseek.com/a/chat/s/chat-b",
-        },
-      ],
-      siteHostname: "chat.deepseek.com",
-      scrapedAt: 555,
-    });
+    await invokeEndpoint(
+      "/llm-for-zotero/webchat/update_chat_history",
+      "POST",
+      {
+        sessions: [
+          {
+            id: "chat-b",
+            title: "DeepSeek thread",
+            chatUrl: "https://chat.deepseek.com/a/chat/s/chat-b",
+          },
+        ],
+        siteHostname: "chat.deepseek.com",
+        scrapedAt: 555,
+      },
+    );
 
     await invokeEndpoint("/llm-for-zotero/webchat/chat_history", "POST", {
       action: "submit_scraped",
@@ -392,17 +588,21 @@ describe("webchat relay/client", function () {
   });
 
   it("loads a fresh scraped transcript without requiring remote ready state", async function () {
-    await invokeEndpoint("/llm-for-zotero/webchat/update_chat_history", "POST", {
-      sessions: [
-        {
-          id: "chat-c",
-          title: "DeepSeek thread",
-          chatUrl: "https://chat.deepseek.com/a/chat/s/chat-c",
-        },
-      ],
-      siteHostname: "chat.deepseek.com",
-      scrapedAt: 600,
-    });
+    await invokeEndpoint(
+      "/llm-for-zotero/webchat/update_chat_history",
+      "POST",
+      {
+        sessions: [
+          {
+            id: "chat-c",
+            title: "DeepSeek thread",
+            chatUrl: "https://chat.deepseek.com/a/chat/s/chat-c",
+          },
+        ],
+        siteHostname: "chat.deepseek.com",
+        scrapedAt: 600,
+      },
+    );
 
     const loadPromise = client.loadChatSession("", "chat-c");
     setTimeout(() => {
@@ -528,6 +728,9 @@ describe("webchat relay/client", function () {
     }
 
     assert.instanceOf(thrown, Error);
-    assert.equal(thrown?.message, "Chat finished without a visible final answer.");
+    assert.equal(
+      thrown?.message,
+      "Chat finished without a visible final answer.",
+    );
   });
 });

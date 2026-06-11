@@ -3,13 +3,14 @@ import { ColumnOptions, DialogHelper } from "zotero-plugin-toolkit";
 import hooks from "./hooks";
 import { createZToolkit } from "./utils/ztoolkit";
 import type { getAgentApi } from "./agent";
+import type { WorkflowTestApi } from "./modules/contextPanel/workflowTestTypes";
 
 class Addon {
   public data: {
     alive: boolean;
     config: typeof config;
     // Env type, see build.js
-    env: "development" | "production";
+    env: "development" | "production" | "test";
     initialized?: boolean;
     ztoolkit: ZToolkit;
     locale?: {
@@ -28,6 +29,7 @@ class Addon {
   // APIs
   public api: {
     agent?: ReturnType<typeof getAgentApi>;
+    workflowTest?: WorkflowTestApi;
   };
 
   constructor() {

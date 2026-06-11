@@ -25,6 +25,7 @@ import {
 } from "../../utils/attachmentRefStore";
 import type {
   ChatAttachment,
+  GeneratedChatImage,
   Message,
   PaperContextRef,
   QuoteCitation,
@@ -61,6 +62,11 @@ import {
 } from "../../codexAppServer/portal";
 import { getMessageCitationPaperContexts } from "./citationContexts";
 import { replaceQuoteCitationPlaceholdersForMarkdown } from "./quoteCitations";
+import {
+  buildGeneratedImagesHtmlForNote,
+  formatGeneratedImagesMarkdownForNote,
+  normalizeEmbeddableGeneratedImages,
+} from "./noteImages";
 
 export { readNoteSnapshot, stripNoteHtml, type NoteSnapshot };
 
@@ -381,17 +387,20 @@ function buildAssistantNoteHtml(
   modelName: string,
   paperContexts?: PaperContextRef[],
   quoteCitations?: QuoteCitation[],
+  generatedImagesHtml = "",
 ): string {
   const response = replaceQuoteCitationPlaceholdersForMarkdown(
     sanitizeText(stripTrailingPluginFooter(contentText || "")).trim(),
     quoteCitations,
-    { unresolved: "unavailable" },
+    { unresolved: "omit" },
   );
   const source = modelName.trim() || "unknown";
   const timestamp = getCurrentLocalTimestamp();
-  let responseHtml = renderRawNoteHtml(response);
-  responseHtml = injectCitationLinksIntoNoteHtml(responseHtml, paperContexts);
-  return `<p><strong>${escapeNoteHtml(timestamp)}</strong></p><p><strong>${escapeNoteHtml(source)}:</strong></p><div>${responseHtml}</div>${NOTE_FOOTER_HTML}`;
+  let responseHtml = response ? renderRawNoteHtml(response) : "";
+  if (responseHtml) {
+    responseHtml = injectCitationLinksIntoNoteHtml(responseHtml, paperContexts);
+  }
+  return `<p><strong>${escapeNoteHtml(timestamp)}</strong></p><p><strong>${escapeNoteHtml(source)}:</strong></p><div>${responseHtml}${generatedImagesHtml}</div>${NOTE_FOOTER_HTML}`;
 }
 
 function renderChatMessageHtmlForNote(
@@ -401,7 +410,7 @@ function renderChatMessageHtmlForNote(
   const safeText = replaceQuoteCitationPlaceholdersForMarkdown(
     sanitizeText(text || "").trim(),
     quoteCitations,
-    { unresolved: "unavailable" },
+    { unresolved: "omit" },
   );
   if (!safeText) return "";
   // Reuse the same markdown-to-note rendering path as single-response save.
@@ -623,12 +632,31 @@ async function normalizeHistoryAttachmentsToSharedBlobs(
 export function buildChatHistoryNotePayload(messages: Message[]): {
   noteHtml: string;
   noteText: string;
+};
+export function buildChatHistoryNotePayload(
+  messages: Message[],
+  options: {
+    generatedImageHtmlByMessageIndex?: Map<number, string>;
+  },
+): {
+  noteHtml: string;
+  noteText: string;
+};
+export function buildChatHistoryNotePayload(
+  messages: Message[],
+  options: {
+    generatedImageHtmlByMessageIndex?: Map<number, string>;
+  } = {},
+): {
+  noteHtml: string;
+  noteText: string;
 } {
   const timestamp = getCurrentLocalTimestamp();
   const textLines: string[] = [];
   const htmlBlocks: string[] = [];
   let lastUserPaperContexts: PaperContextRef[] | undefined;
-  for (const msg of messages) {
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const msg = messages[messageIndex]!;
     // Strip any skill-added footer from assistant messages so chat-history
     // exports don't end up with "Written by LLM-for-Zotero." repeated for
     // every saved-as-note assistant turn plus the UI wrapper's own footer.
@@ -645,12 +673,26 @@ export function buildChatHistoryNotePayload(messages: Message[]): {
       msg.screenshotImages,
     );
     const fileAttachments = normalizeFileAttachmentsForNote(msg.attachments);
+    const generatedImages =
+      msg.role === "assistant"
+        ? normalizeEmbeddableGeneratedImages(msg.generatedImages)
+        : [];
+    const generatedImageText =
+      msg.role === "assistant"
+        ? formatGeneratedImagesMarkdownForNote(generatedImages)
+        : "";
+    const generatedImageHtml =
+      msg.role === "assistant"
+        ? options.generatedImageHtmlByMessageIndex?.get(messageIndex) || ""
+        : "";
     const screenshotCount = screenshotImages.length;
     if (
       !text &&
       !selectedTextContexts.length &&
       !screenshotCount &&
-      !fileAttachments.length
+      !fileAttachments.length &&
+      !generatedImageText &&
+      !generatedImageHtml
     )
       continue;
     let textWithContext = text;
@@ -692,6 +734,10 @@ export function buildChatHistoryNotePayload(messages: Message[]): {
       }
       textWithContext = userBlocks.join("\n\n");
       htmlTextWithContext = userHtmlBlocks.join("\n\n");
+    } else if (generatedImageText) {
+      textWithContext = [textWithContext, generatedImageText]
+        .filter(Boolean)
+        .join("\n\n");
     }
     const speaker =
       msg.role === "user"
@@ -704,7 +750,7 @@ export function buildChatHistoryNotePayload(messages: Message[]): {
     const fileHtml =
       msg.role === "user" ? buildFileListHtmlForNote(fileAttachments) : "";
     let rendered = renderChatMessageHtmlForNote(
-      msg.role === "user" ? htmlTextWithContext : textWithContext,
+      htmlTextWithContext,
       msg.role === "assistant" ? msg.quoteCitations : undefined,
     );
     // For assistant messages, inject citation links using the preceding
@@ -720,17 +766,18 @@ export function buildChatHistoryNotePayload(messages: Message[]): {
         ? replaceQuoteCitationPlaceholdersForMarkdown(
             textWithContext,
             msg.quoteCitations,
-            { unresolved: "unavailable" },
+            { unresolved: "omit" },
           )
         : textWithContext;
     if (msg.role === "user") {
       lastUserPaperContexts = getMessageCitationPaperContexts(msg);
     }
-    if (!rendered && !screenshotHtml && !fileHtml) continue;
+    if (!rendered && !screenshotHtml && !fileHtml && !generatedImageHtml)
+      continue;
     textLines.push(`${speaker}: ${exportedText}`);
     const renderedBlock = rendered ? `<div>${rendered}</div>` : "";
     htmlBlocks.push(
-      `<p><strong>${escapeNoteHtml(speaker)}:</strong></p>${renderedBlock}${screenshotHtml}${fileHtml}`,
+      `<p><strong>${escapeNoteHtml(speaker)}:</strong></p>${renderedBlock}${screenshotHtml}${fileHtml}${generatedImageHtml}`,
     );
   }
   const noteText = textLines.join("\n\n");
@@ -761,6 +808,7 @@ export async function createNoteFromAssistantText(
     appendToTrackedNote?: boolean;
     rememberCreatedNote?: boolean;
     quoteCitations?: QuoteCitation[];
+    generatedImages?: GeneratedChatImage[];
   } = {},
 ): Promise<"created" | "appended"> {
   const parentItem = resolveParentItemForNoteTarget(item);
@@ -775,12 +823,22 @@ export async function createNoteFromAssistantText(
   // of injecting rendered DOM HTML from the bubble was fragile — KaTeX
   // span trees and sanitised classless wrappers were mostly dropped by
   // ProseMirror.)
-  const html = buildAssistantNoteHtml(
-    contentText,
-    modelName,
-    paperContexts,
-    options.quoteCitations,
+  const generatedImages = normalizeEmbeddableGeneratedImages(
+    options.generatedImages,
   );
+  const buildHtml = async (noteId?: number): Promise<string> => {
+    const generatedImagesHtml =
+      noteId && generatedImages.length
+        ? await buildGeneratedImagesHtmlForNote(generatedImages, noteId)
+        : "";
+    return buildAssistantNoteHtml(
+      contentText,
+      modelName,
+      paperContexts,
+      options.quoteCitations,
+      generatedImagesHtml,
+    );
+  };
 
   if (options.appendToTrackedNote) {
     // Try to find an existing tracked note for this parent item.
@@ -788,6 +846,7 @@ export async function createNoteFromAssistantText(
     const existingNote = getTrackedAssistantNoteForParent(parentId);
     if (existingNote) {
       try {
+        const html = await buildHtml(existingNote.id);
         const appendedHtml = appendAssistantAnswerToNoteHtml(
           existingNote.getNote() || "",
           html,
@@ -814,12 +873,20 @@ export async function createNoteFromAssistantText(
   const note = new Zotero.Item("note");
   note.libraryID = parentItem.libraryID;
   note.parentID = parentId;
-  note.setNote(html);
+  if (generatedImages.length) {
+    note.setNote("<p>Preparing generated images...</p>");
+  } else {
+    note.setNote(await buildHtml());
+  }
   const saveResult = await note.saveTx();
   // saveTx() returns the new item ID (number) on creation.
   // Also check note.id as a fallback.
   const newNoteId =
     typeof saveResult === "number" && saveResult > 0 ? saveResult : note.id;
+  if (generatedImages.length && newNoteId && newNoteId > 0) {
+    note.setNote(await buildHtml(newNoteId));
+    await note.saveTx();
+  }
   if (newNoteId && newNoteId > 0) {
     if (options.rememberCreatedNote) {
       rememberAssistantNoteForParent(parentId, newNoteId);
@@ -839,6 +906,7 @@ export async function createStandaloneNoteFromAssistantText(
   modelName: string,
   paperContexts?: PaperContextRef[],
   quoteCitations?: QuoteCitation[],
+  generatedImages?: GeneratedChatImage[],
 ): Promise<"created"> {
   const normalizedLibraryID = Number.isFinite(libraryID)
     ? Math.floor(libraryID)
@@ -846,17 +914,59 @@ export async function createStandaloneNoteFromAssistantText(
   if (normalizedLibraryID <= 0) {
     throw new Error("Invalid library ID for standalone note creation");
   }
-  const html = buildAssistantNoteHtml(
-    contentText,
-    modelName,
-    paperContexts,
-    quoteCitations,
-  );
+  const normalizedImages = normalizeEmbeddableGeneratedImages(generatedImages);
   const note = new Zotero.Item("note");
   note.libraryID = normalizedLibraryID;
-  note.setNote(html);
-  await note.saveTx();
+  if (normalizedImages.length) {
+    note.setNote("<p>Preparing generated images...</p>");
+    const saveResult = await note.saveTx();
+    const noteId =
+      typeof saveResult === "number" && saveResult > 0 ? saveResult : note.id;
+    const generatedImagesHtml =
+      noteId && noteId > 0
+        ? await buildGeneratedImagesHtmlForNote(normalizedImages, noteId)
+        : "";
+    note.setNote(
+      buildAssistantNoteHtml(
+        contentText,
+        modelName,
+        paperContexts,
+        quoteCitations,
+        generatedImagesHtml,
+      ),
+    );
+    await note.saveTx();
+  } else {
+    note.setNote(
+      buildAssistantNoteHtml(
+        contentText,
+        modelName,
+        paperContexts,
+        quoteCitations,
+      ),
+    );
+    await note.saveTx();
+  }
   return "created";
+}
+
+async function buildGeneratedImageHtmlByMessageIndex(
+  history: Message[],
+  noteId: number,
+): Promise<Map<number, string>> {
+  const htmlByIndex = new Map<number, string>();
+  if (!noteId || noteId <= 0) return htmlByIndex;
+  for (let index = 0; index < history.length; index += 1) {
+    const msg = history[index];
+    if (msg?.role !== "assistant") continue;
+    const generatedImages = normalizeEmbeddableGeneratedImages(
+      msg.generatedImages,
+    );
+    if (!generatedImages.length) continue;
+    const html = await buildGeneratedImagesHtmlForNote(generatedImages, noteId);
+    if (html) htmlByIndex.set(index, html);
+  }
+  return htmlByIndex;
 }
 
 export async function createNoteFromChatHistory(
@@ -885,7 +995,13 @@ export async function createNoteFromChatHistory(
   }
   const normalizedHistory =
     await normalizeHistoryAttachmentsToSharedBlobs(history);
-  note.setNote(buildChatHistoryNotePayload(normalizedHistory).noteHtml);
+  const generatedImageHtmlByMessageIndex =
+    await buildGeneratedImageHtmlByMessageIndex(normalizedHistory, noteId);
+  note.setNote(
+    buildChatHistoryNotePayload(normalizedHistory, {
+      generatedImageHtmlByMessageIndex,
+    }).noteHtml,
+  );
   await note.saveTx();
   const attachmentHashes = collectAttachmentHashes(normalizedHistory);
   try {
@@ -926,7 +1042,13 @@ export async function createStandaloneNoteFromChatHistory(
   }
   const normalizedHistory =
     await normalizeHistoryAttachmentsToSharedBlobs(history);
-  note.setNote(buildChatHistoryNotePayload(normalizedHistory).noteHtml);
+  const generatedImageHtmlByMessageIndex =
+    await buildGeneratedImageHtmlByMessageIndex(normalizedHistory, noteId);
+  note.setNote(
+    buildChatHistoryNotePayload(normalizedHistory, {
+      generatedImageHtmlByMessageIndex,
+    }).noteHtml,
+  );
   await note.saveTx();
   const attachmentHashes = collectAttachmentHashes(normalizedHistory);
   try {
