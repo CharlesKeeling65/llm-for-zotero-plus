@@ -167,6 +167,16 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
     });
     keyset.appendChild(key);
   }
+
+  // Register MinerU context menu on item right-click
+  try {
+    const { registerMineruContextMenu } = await import(
+      "./modules/mineruContextMenu"
+    );
+    registerMineruContextMenu();
+  } catch (err) {
+    ztoolkit.log("LLM: Failed to register MinerU context menu", err);
+  }
 }
 
 function registerPrefsPane() {

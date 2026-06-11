@@ -4,10 +4,10 @@
   "version": "3.8.12",
   "description": "AI research agent rooted in your Zotero library",
   "config": {
-    "addonName": "llm-for-zotero",
-    "addonID": "zotero-llm@github.com.yilewang",
-    "addonRef": "llmforzotero",
-    "addonInstance": "LLMForZotero",
+    "addonName": "llm-for-zotero-dev",
+    "addonID": "zotero-llm-dev@github.com.yilewang",
+    "addonRef": "llmforzoterodev",
+    "addonInstance": "LLMForZoteroDev",
     "prefsPrefix": "extensions.zotero.llmforzotero"
   },
   "repository": {
